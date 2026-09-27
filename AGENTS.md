@@ -158,9 +158,11 @@ business profile and bookkeeping notes (`org://profile`, `org://notes`) before c
 
 ## 6. Your writes go to the review queue
 
-Everything you create or change through MCP is proposed, not posted: categorizations, entries, rules
-and invoice drafts. It waits in the review queue until a person approves it, unless an owner set a
-policy that auto-approves it. You can't approve, reject, void, reverse, or move lock dates.
+Everything you write to the books through MCP is proposed, not posted: categorizations, entries,
+rules, invoice and bill drafts, and corrections (reversals, replacements, and payment date changes).
+It waits in the review queue until a person approves it, unless an owner set a policy that
+auto-approves it. Contacts and notes don't touch the books, so they apply directly. You can't
+approve, reject, void, delete, or move lock dates.
 
 - Always include a short `rationale` with each write.
 - Write tools return a review item ID and its status. Tell the human when items are waiting, for

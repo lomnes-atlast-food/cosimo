@@ -439,14 +439,17 @@ Tools, at minimum:
 - `list_orgs`, `get_account_balances`, `run_report`, `get_cash_snapshot`
 - `list_uncategorized_transactions`, `categorize_transaction`, `create_rule`
 - `search_transactions`, `get_entry`, `list_entries`, `create_manual_entry` (draft only unless the token role allows posting)
-- `list_contacts`, `list_invoices`, `create_invoice_draft`
+- `list_contacts`, `create_contact`, `update_contact`, `list_invoices`, `create_invoice_draft`
 - `list_bills`, `list_bill_payments`, `create_bill_draft`
+- `propose_reversal`, `propose_replacement`, `propose_payment_date_change`
 
 `get_entry` and `list_entries` fill in each line's account code/name and, when set, contact name, and whether the entry has an attachment; the REST `EntryView` itself carries only IDs.
 
-Destructive actions (reverse, void, delete, change lock date) are not exposed through MCP in v1.
+Corrections to posted entries go through the review queue like any other write. `propose_reversal` creates a pending reversal entry. `propose_replacement` creates one `entry_replacement` review item: approving it posts the reversal and the corrected entry together, and rejecting it posts neither. `propose_payment_date_change` creates one `payment_redate` review item: approving it reverses the payment's entry on its original date, posts the same lines on the new date, and moves the payment, its applications, and any matched bank transaction to the new entry. Entries created by documents (invoices, bills, payments) can't be reversed or replaced through MCP; a payment's date is the one correction allowed. Void, delete, and changing lock dates are not exposed through MCP.
 
-MCP tools that change data MUST accept a `rationale` string. Every MCP write lands in the review queue (Section 7.5) unless a review policy auto-approves it. Write tools return the review item ID and its status so the assistant can tell the human what is waiting. Additional tools: `list_pending_reviews` and `get_review_item`. Approving is not exposed through MCP in v1, so an AI cannot approve its own proposals.
+`create_contact` and `update_contact` apply directly, without a review item, because contacts don't touch the books; the audit log records them.
+
+MCP tools that change the books MUST accept a `rationale` string. Every MCP write to the books lands in the review queue (Section 7.5) unless a review policy auto-approves it. Write tools return the review item ID and its status so the assistant can tell the human what is waiting. Additional tools: `list_pending_reviews` and `get_review_item`. Approving is not exposed through MCP in v1, so an AI cannot approve its own proposals.
 
 ### 10.3 Business Context for AI
 

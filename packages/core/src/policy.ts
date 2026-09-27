@@ -36,6 +36,8 @@ export interface Proposal {
     | "rule"
     | "invoice_draft"
     | "bill_draft"
+    | "entry_replacement"
+    | "payment_redate"
     | "import_batch";
   /** Largest absolute line amount / transaction amount in cents. */
   amount: number;

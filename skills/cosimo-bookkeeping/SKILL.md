@@ -7,8 +7,8 @@ description: Do bookkeeping in a Cosimo instance over MCP. Covers the monthly cl
 
 Cosimo is self-hosted double-entry bookkeeping. You work in one organization through its MCP
 server (`<instance>/mcp`). Everything you write is a **proposal**: it waits in the review queue
-until a person approves it. You can't approve, reject, void, reverse, delete, or change lock dates,
-so don't offer to.
+until a person approves it. You can't approve, reject, void, delete, or change lock dates, so don't
+offer to. Corrections to posted entries are proposals too (see "Corrections" below).
 
 ## Before anything else
 
@@ -87,6 +87,27 @@ Work one month at a time, oldest first.
    (vendor, lines with a description, amount in cents, and an expense account code). Approving it
    posts the bill to Accounts Payable. The vendor contact must be marked vendor, not customer-only.
 3. `list_bill_payments` shows what's already been paid, so you don't propose a bill twice.
+
+## Contacts
+
+- Before `create_bill_draft` or `create_invoice_draft` for someone new, check `list_contacts` with
+  `include_archived: true`. If the contact is archived, bring it back with `update_contact`
+  (`archived: false`). Only if it's truly missing, add it with `create_contact`.
+- Contact changes apply right away (no review) and are recorded in the audit log. Tell the person
+  what you added or changed.
+
+## Corrections
+
+- To fix a posted entry (wrong account, amount, or date), use `propose_replacement` with the
+  corrected lines. Check the original with `get_entry` first. The reversal and the corrected entry
+  are one review item: approved together or not at all.
+- To cancel a posted entry that shouldn't exist (a duplicate), use `propose_reversal`.
+- When a payment was recorded on a different date than the bank shows, use
+  `propose_payment_date_change` with the bank's date. The payment ID is in `list_bill_payments`.
+- Entries created by invoices, bills, and payments can't be reversed or replaced. Explain the fix
+  to the person, who can void or edit the document.
+- Don't post an offsetting `create_manual_entry` to correct a mistake; use the tools above so the
+  link to the original is kept.
 
 ## Year-end package
 

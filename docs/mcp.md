@@ -2,8 +2,9 @@
 
 Cosimo serves a [Model Context Protocol](https://modelcontextprotocol.io) endpoint at
 `<your instance>/mcp`. An assistant such as Claude can read your books through it and propose
-changes. It can't make changes on its own: everything it writes waits in the review queue until a
-person approves it.
+changes. It can't change the books on its own: everything it writes to them waits in the review
+queue until a person approves it. Only notes and contacts, which don't touch the books, apply
+directly.
 
 ## Connecting
 
@@ -53,9 +54,21 @@ Propose (each takes a `rationale`, which you see in Review):
 | `create_manual_entry` | Posts the entry |
 | `create_invoice_draft` | Finalizes the invoice (you still decide when to send it) |
 | `create_bill_draft` | Posts the bill to Accounts Payable |
-| `append_note` | Adds a dated note attributed to the assistant (no review; notes don't touch the books) |
+| `propose_reversal` | Posts a reversal of a posted entry |
+| `propose_replacement` | Reverses a posted entry and posts the corrected one, together (one review item) |
+| `propose_payment_date_change` | Moves a payment to a new date: its entry is reversed on the old date and posted again on the new one; the documents it pays stay paid and a matched bank transaction stays matched (one review item) |
 
-There are no tools to approve, reject, void, reverse, delete, or change lock dates. OAuth access
+Entries created by invoices, bills, and payments can't be reversed or replaced over MCP; void or
+edit the document instead. A payment's date is the one exception.
+
+Apply directly, without review, and recorded in the audit log:
+
+| Tool | Effect |
+|---|---|
+| `create_contact`, `update_contact` | Adds, edits, archives, or unarchives a customer or vendor (contacts don't touch the books) |
+| `append_note` | Adds a dated note attributed to the assistant (notes don't touch the books) |
+
+There are no tools to approve, reject, void, delete, or change lock dates. OAuth access
 tokens can only read through the REST API, so an assistant can't reach those actions there either. Owners can auto-approve some
 proposals with a review policy, such as "AI categorizations under $100 to an account already used
 for that payee" (Settings → Review policies). Anything over the amount threshold is always

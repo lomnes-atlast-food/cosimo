@@ -181,6 +181,8 @@ const ReviewSchema = z
       "rule",
       "invoice_draft",
       "bill_draft",
+      "entry_replacement",
+      "payment_redate",
       "import_batch",
     ]),
     item_id: z.string(),
@@ -218,7 +220,17 @@ const PolicyInputSchema = z.object({
       amount_lt: Cents.optional(),
       amount_gte: Cents.optional(),
       item_types: z
-        .array(z.enum(["journal_entry", "bank_categorization", "rule", "invoice_draft", "bill_draft"]))
+        .array(
+          z.enum([
+            "journal_entry",
+            "bank_categorization",
+            "rule",
+            "invoice_draft",
+            "bill_draft",
+            "entry_replacement",
+            "payment_redate",
+          ]),
+        )
         .optional(),
       account_used_for_payee: z.boolean().optional(),
       rule_auto_post: z.boolean().optional(),

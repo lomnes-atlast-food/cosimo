@@ -3,9 +3,11 @@
  * published in `tools/list`) and calls the same services as the REST API, as the `mcp` actor.
  *
  * Writes go through the review policy like any other writer; for the `mcp` actor the default is
- * review, and OAuth grants are always propose-only. Every write tool takes a `rationale` and
- * returns the review item ID and status. There is no tool to approve, reject, void, reverse,
- * delete, or move lock dates.
+ * review, and OAuth grants are always propose-only. Every write tool that touches the books takes
+ * a `rationale` and returns the review item ID and status. Corrections to posted entries (reverse,
+ * replace, and a payment's date) are proposals like any other write. Notes and contacts don't touch
+ * the books, so they apply directly and are recorded in the audit log. There is no tool to approve,
+ * reject, void, delete, or move lock dates.
  */
 import type { LineInput } from "@cosimo/core";
 import { org } from "@cosimo/db";
@@ -24,20 +26,23 @@ import {
   type Split,
 } from "./banking.ts";
 import { holdBillDraftTx } from "./bill-review.ts";
-import { listContacts } from "./contacts.ts";
+import { contactView, createContactTx, listContacts, updateContactTx } from "./contacts.ts";
 import { dashboard } from "./dashboard.ts";
 import {
   createBillTx,
   createInvoiceTx,
   type DocLineInput,
   finalizeBillTx,
+  finalizeInvoiceTx,
   listBills,
   listInvoices,
   listPayments,
 } from "./documents.ts";
+import { assertNoPendingReplacement, proposeReplacementTx } from "./entry-replacement-review.ts";
 import { holdInvoiceDraftTx } from "./invoice-review.ts";
-import { getEntry, listEntries, submitEntryTx } from "./ledger.ts";
+import { getEntry, listEntries, reverseEntryTx, submitEntryTx } from "./ledger.ts";
 import { appendNoteTx } from "./notes.ts";
+import { proposePaymentRedateTx } from "./payment-redate-review.ts";
 import { REPORT_KEYS, runReport } from "./reports.ts";
 import { listReview, mustGetReview, reviewView } from "./review.ts";
 import { createRuleTx } from "./rules.ts";
@@ -69,6 +74,17 @@ const Rationale = z
 const Cents = z.number().int().describe("Integer cents");
 const IsoDate = z.string().regex(/^\d{4}-\d{2}-\d{2}$/, "YYYY-MM-DD");
 
+const EntryLines = z
+  .array(
+    z.object({
+      account: z.string().describe("Account ID or code"),
+      amount: Cents.describe("Debit positive, credit negative"),
+      description: z.string().optional(),
+      contact_id: z.string().optional(),
+    }),
+  )
+  .min(2);
+
 function requireWriter(t: ToolCtx) {
   if (t.scope.role !== "owner" && t.scope.role !== "bookkeeper")
     throw forbidden("This connection is read-only (its role is not Owner or Bookkeeper).");
@@ -84,6 +100,19 @@ async function accountId(t: ToolCtx, ref: string) {
       "unknown_account",
     );
   return a.id;
+}
+
+/** Journal lines from tool input, with account codes resolved to IDs. */
+async function entryLines(t: ToolCtx, lines: z.output<typeof EntryLines>) {
+  const out: LineInput[] = [];
+  for (const l of lines)
+    out.push({
+      accountId: await accountId(t, l.account),
+      amount: l.amount,
+      description: l.description ?? null,
+      contactId: l.contact_id ?? null,
+    });
+  return out;
 }
 
 /** One lookup of every account, keyed by ID, for enriching lines with a code and name. */
@@ -567,33 +596,17 @@ tool({
   name: "create_manual_entry",
   title: "Propose a journal entry",
   description:
-    "Propose a balanced journal entry (debits positive, credits negative, integer cents; lines must sum to zero). Use it for adjustments and follow-on entries, such as monthly amortization of a prepaid expense. It goes to the review queue unless a policy approves it. To correct an entry that's already posted, explain what's wrong to the person instead; reversing or replacing a posted entry isn't available through MCP yet.",
+    "Propose a balanced journal entry (debits positive, credits negative, integer cents; lines must sum to zero). Use it for adjustments and follow-on entries, such as monthly amortization of a prepaid expense. It goes to the review queue unless a policy approves it. To correct an entry that's already posted, use propose_replacement (or propose_reversal to cancel it) instead of adding an offsetting entry.",
   write: true,
   input: z.object({
     date: IsoDate,
     memo: z.string().max(500).optional(),
-    lines: z
-      .array(
-        z.object({
-          account: z.string().describe("Account ID or code"),
-          amount: Cents.describe("Debit positive, credit negative"),
-          description: z.string().optional(),
-          contact_id: z.string().optional(),
-        }),
-      )
-      .min(2),
+    lines: EntryLines,
     rationale: Rationale,
   }),
   async run(t, i) {
     requireWriter(t);
-    const lines: LineInput[] = [];
-    for (const l of i.lines)
-      lines.push({
-        accountId: await accountId(t, l.account),
-        amount: l.amount,
-        description: l.description ?? null,
-        contactId: l.contact_id ?? null,
-      });
+    const lines = await entryLines(t, i.lines);
     const r = await t.scope.handle.write((tx) =>
       submitEntryTx(tx, t.scope.id, t.scope.actor, {
         date: i.date,
@@ -648,14 +661,33 @@ tool({
         lines,
       });
       const reviewId = await holdInvoiceDraftTx(tx, t.scope.id, t.scope.actor, inv.id, i.rationale);
+      if (reviewId)
+        return {
+          invoice_id: inv.id,
+          number: inv.number,
+          total: inv.total,
+          status: "pending_review",
+          review_item_id: reviewId,
+          entry_id: null,
+          message:
+            "Drafted. It waits in the review queue; nothing is posted or sent until a person approves it.",
+        };
+      // A review policy approved it: finalize now, as approving the review item would.
+      const r = await finalizeInvoiceTx(tx, t.scope.id, t.scope.actor, inv.id, { forcePost: true });
+      const posted = await tx
+        .select({ status: org.invoices.status })
+        .from(org.invoices)
+        .where(eq(org.invoices.id, inv.id))
+        .get();
       return {
         invoice_id: inv.id,
         number: inv.number,
         total: inv.total,
-        status: "pending_review",
-        review_item_id: reviewId,
+        status: posted?.status ?? "sent",
+        review_item_id: null,
+        entry_id: r.entry.id,
         message:
-          "Drafted. It waits in the review queue; nothing is posted or sent until a person approves it.",
+          "Applied: a review policy approved it automatically, so the invoice is posted to Accounts Receivable. It has not been sent; sending stays with a person.",
       };
     });
   },
@@ -723,6 +755,181 @@ tool({
           "Applied: a review policy approved it automatically, so the bill is posted to Accounts Payable.",
       };
     });
+  },
+});
+
+const ContactFields = {
+  email: z.string().max(200).nullable().optional(),
+  phone: z.string().max(50).nullable().optional(),
+  address: z
+    .record(z.string(), z.string().max(200))
+    .nullable()
+    .optional()
+    .describe("Free-form fields, e.g. line1, city, state, postal_code, country"),
+  tax_id_last4: z.string().max(4).nullable().optional().describe("Last 4 digits of the tax ID only"),
+  is_1099_vendor: z.boolean().optional(),
+  default_account: z
+    .string()
+    .nullable()
+    .optional()
+    .describe("Default expense or income account, ID or code; null clears it"),
+  notes: z.string().max(5000).nullable().optional(),
+};
+
+/** Resolve `default_account` (ID or code) to `default_account_id`, keeping undefined and null as they are. */
+async function defaultAccountId(t: ToolCtx, ref: string | null | undefined) {
+  if (ref === undefined || ref === null) return ref;
+  return accountId(t, ref);
+}
+
+tool({
+  name: "create_contact",
+  title: "Add a customer or vendor",
+  description:
+    "Add a customer or vendor, for example when one is missing before create_bill_draft or create_invoice_draft. Check list_contacts with include_archived: true first so you don't create a duplicate; to bring back an archived contact use update_contact with archived: false instead. Applies right away and is recorded in the audit log; it is not a proposal and does not go to the review queue, because contacts don't touch the books.",
+  write: true,
+  input: z.object({
+    kind: z.enum(["customer", "vendor", "both"]),
+    name: z.string().trim().min(1).max(200),
+    ...ContactFields,
+  }),
+  async run(t, i) {
+    requireWriter(t);
+    const { default_account, ...rest } = i;
+    const default_account_id = await defaultAccountId(t, default_account);
+    const c = await t.scope.handle.write((tx) =>
+      createContactTx(tx, t.scope.id, t.scope.actor, { ...rest, default_account_id }),
+    );
+    return {
+      contact: contactView(c),
+      message: "Created. Contacts apply directly; this did not go to the review queue.",
+    };
+  },
+});
+
+tool({
+  name: "update_contact",
+  title: "Update or archive a customer or vendor",
+  description:
+    "Change a customer's or vendor's details, archive one (archived: true), or bring an archived one back (archived: false). Only the fields you pass change. Applies right away and is recorded in the audit log; it is not a proposal and does not go to the review queue. To add a new contact use create_contact.",
+  write: true,
+  input: z.object({
+    contact_id: z.string(),
+    kind: z.enum(["customer", "vendor", "both"]).optional(),
+    name: z.string().trim().min(1).max(200).optional(),
+    ...ContactFields,
+    archived: z.boolean().optional(),
+  }),
+  async run(t, i) {
+    requireWriter(t);
+    const { contact_id, default_account, ...rest } = i;
+    const default_account_id = await defaultAccountId(t, default_account);
+    const c = await t.scope.handle.write((tx) =>
+      updateContactTx(tx, t.scope.id, t.scope.actor, contact_id, { ...rest, default_account_id }),
+    );
+    return {
+      contact: contactView(c),
+      message: "Updated. Contacts apply directly; this did not go to the review queue.",
+    };
+  },
+});
+
+tool({
+  name: "propose_reversal",
+  title: "Propose reversing a posted entry",
+  description:
+    "Propose cancelling a posted journal entry with a reversal: a new entry with every line negated, dated the original's date unless you give one. It waits in the review queue like any other proposal. To fix an entry rather than cancel it, use propose_replacement. Entries created by an invoice, bill, or payment are refused: for a payment recorded on the wrong date use propose_payment_date_change; otherwise explain the fix to the person, who can void or edit the document. An entry that is already reversed, or has a reversal or replacement waiting, is refused too.",
+  write: true,
+  input: z.object({
+    entry_id: z.string(),
+    date: IsoDate.optional().describe("Defaults to the original entry's date"),
+    memo: z.string().max(500).optional(),
+    rationale: Rationale,
+  }),
+  async run(t, i) {
+    requireWriter(t);
+    const r = await t.scope.handle.write(async (tx) => {
+      await assertNoPendingReplacement(tx, i.entry_id);
+      return reverseEntryTx(tx, t.scope.id, t.scope.actor, i.entry_id, {
+        date: i.date,
+        memo: i.memo ?? null,
+        rationale: i.rationale,
+      });
+    });
+    return outcome(r);
+  },
+});
+
+tool({
+  name: "propose_replacement",
+  title: "Propose correcting a posted entry",
+  description:
+    "Propose correcting a posted journal entry: the original is reversed and a corrected entry (the date, memo, and balanced lines you give, in the same format as create_manual_entry) is posted in its place. It is one review item: a person approves both halves together or neither, and nothing changes until then. Use get_entry first to see the original's lines. Entries created by an invoice, bill, or payment are refused (for a payment's date, use propose_payment_date_change). An entry that is already reversed, or has a reversal or replacement waiting, is refused too.",
+  write: true,
+  input: z.object({
+    entry_id: z.string(),
+    date: IsoDate,
+    memo: z.string().max(500).optional(),
+    lines: EntryLines,
+    rationale: Rationale,
+  }),
+  async run(t, i) {
+    requireWriter(t);
+    const lines = await entryLines(t, i.lines);
+    const r = await t.scope.handle.write((tx) =>
+      proposeReplacementTx(tx, t.scope.id, t.scope.actor, i.entry_id, {
+        date: i.date,
+        memo: i.memo ?? null,
+        lines,
+        rationale: i.rationale,
+      }),
+    );
+    if (r.reviewItemId)
+      return {
+        status: "pending_review",
+        review_item_id: r.reviewItemId,
+        reversal_entry_id: null,
+        replacement_entry_id: null,
+        message:
+          "Proposed. The reversal and the corrected entry wait in the review queue as one item; nothing changes until a person approves it.",
+      };
+    return {
+      status: "posted",
+      review_item_id: null,
+      reversal_entry_id: r.reversal?.entry.id ?? null,
+      replacement_entry_id: r.replacement?.entry.id ?? null,
+      message:
+        "Applied: a review policy approved it automatically, so the original is reversed and the correction posted.",
+    };
+  },
+});
+
+tool({
+  name: "propose_payment_date_change",
+  title: "Propose a new date for a payment",
+  description:
+    "Propose moving a recorded payment (to a vendor or from a customer) to a different date, typically to match the date the bank shows. Payment IDs come from list_bill_payments, or from a journal entry's source_id when its source_type is bill_payment or invoice_payment. On approval the payment's entry is reversed on its original date and posted again on the new date; the bills or invoices it pays stay paid, and a matched bank transaction stays matched. It is one review item and changes nothing until a person approves it. Refuses a voided payment, one not yet posted, one in a completed bank reconciliation, or one with a date change already waiting.",
+  write: true,
+  input: z.object({ payment_id: z.string(), date: IsoDate, rationale: Rationale }),
+  async run(t, i) {
+    requireWriter(t);
+    const r = await t.scope.handle.write((tx) =>
+      proposePaymentRedateTx(tx, t.scope.id, t.scope.actor, i.payment_id, i.date, i.rationale),
+    );
+    if (r.reviewItemId)
+      return {
+        status: "pending_review",
+        review_item_id: r.reviewItemId,
+        entry_id: null,
+        message:
+          "Proposed. The date change waits in the review queue; nothing changes until a person approves it.",
+      };
+    return {
+      status: "posted",
+      review_item_id: null,
+      entry_id: r.entry?.id ?? null,
+      message: `Applied: a review policy approved it automatically, so the payment is now dated ${i.date}.`,
+    };
   },
 });
 

@@ -25,6 +25,8 @@ const TYPE_LABEL: Record<string, string> = {
   rule: "New rule",
   invoice_draft: "Invoice draft",
   bill_draft: "Bill draft",
+  entry_replacement: "Entry correction",
+  payment_redate: "Payment date change",
   import_batch: "Import",
 };
 const ACTOR_LABEL: Record<string, string> = {
@@ -214,6 +216,20 @@ function ReviewCard({
       total: number;
       lines: { description: string; amount: number }[];
     };
+    original?: Entry;
+    replacement?: {
+      date: string;
+      memo: string | null;
+      lines: { account_id: string; amount: number; description: string | null }[];
+    };
+    payment?: {
+      direction: "received" | "sent";
+      contact_name: string;
+      amount: number;
+      applications: { document_type: string; document_number: string; amount: number }[];
+    };
+    from_date?: string;
+    to_date?: string;
     import?: {
       source: string;
       files: string[];
@@ -352,6 +368,69 @@ function ReviewCard({
                 ))}
               </ul>
               <p className="mt-1 text-xs text-zinc-500">Approving posts the bill to Accounts Payable.</p>
+            </div>
+          )}
+          {item.item_type === "entry_replacement" && payload.original && payload.replacement && (
+            <div className="grid gap-3 text-sm sm:grid-cols-2">
+              {[
+                {
+                  title: "Original (reversed)",
+                  date: payload.original.date,
+                  memo: payload.original.memo,
+                  lines: payload.original.lines,
+                },
+                { title: "Replacement", ...payload.replacement },
+              ].map((side) => (
+                <div key={side.title}>
+                  <p className="text-xs font-medium text-zinc-500">
+                    {side.title} · {fmtDate(side.date)}
+                    {side.memo ? ` · ${side.memo}` : ""}
+                  </p>
+                  <table className="w-full">
+                    <tbody>
+                      {side.lines.map((l, i) => (
+                        <tr key={`${i}-${l.account_id}`}>
+                          <td className="py-0.5">{byId.get(l.account_id)?.name ?? l.account_id}</td>
+                          <td className="w-24 py-0.5 text-right num">
+                            {l.amount > 0 ? money(l.amount) : ""}
+                          </td>
+                          <td className="w-24 py-0.5 text-right num">
+                            {l.amount < 0 ? money(-l.amount) : ""}
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              ))}
+              <p className="text-xs text-zinc-500 sm:col-span-2">
+                Approving reverses the original and posts the replacement together. Rejecting changes nothing.
+              </p>
+            </div>
+          )}
+          {item.item_type === "payment_redate" && payload.payment && (
+            <div className="text-sm">
+              <p>
+                Payment {payload.payment.direction === "sent" ? "to" : "from"}{" "}
+                <strong>{payload.payment.contact_name}</strong> · {money(payload.payment.amount)}
+              </p>
+              <p>
+                {fmtDate(payload.from_date ?? "")} → <strong>{fmtDate(payload.to_date ?? "")}</strong>
+              </p>
+              {payload.payment.applications.length > 0 && (
+                <ul className="mt-1 text-xs text-zinc-600 dark:text-zinc-400">
+                  {payload.payment.applications.map((x) => (
+                    <li key={`${x.document_type}-${x.document_number}`}>
+                      {x.document_type === "bill" ? "Bill" : "Invoice"} {x.document_number} ·{" "}
+                      {money(x.amount)}
+                    </li>
+                  ))}
+                </ul>
+              )}
+              <p className="mt-1 text-xs text-zinc-500">
+                Approving reverses the payment's entry on the old date and posts it again on the new date. The
+                documents it pays stay paid, and a matched bank transaction stays matched.
+              </p>
             </div>
           )}
           {payload.import && (
