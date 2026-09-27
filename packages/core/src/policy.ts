@@ -30,7 +30,13 @@ export interface PolicyCondition {
 
 export interface Proposal {
   actor: Actor;
-  itemType: "journal_entry" | "bank_categorization" | "rule" | "invoice_draft" | "import_batch";
+  itemType:
+    | "journal_entry"
+    | "bank_categorization"
+    | "rule"
+    | "invoice_draft"
+    | "bill_draft"
+    | "import_batch";
   /** Largest absolute line amount / transaction amount in cents. */
   amount: number;
   proposeOnly?: boolean;

@@ -24,6 +24,7 @@ const TYPE_LABEL: Record<string, string> = {
   bank_categorization: "Bank categorization",
   rule: "New rule",
   invoice_draft: "Invoice draft",
+  bill_draft: "Bill draft",
   import_batch: "Import",
 };
 const ACTOR_LABEL: Record<string, string> = {
@@ -206,6 +207,13 @@ function ReviewCard({
       total: number;
       lines: { description: string; amount: number }[];
     };
+    bill?: {
+      bill_number: string | null;
+      vendor_name: string;
+      issue_date: string;
+      total: number;
+      lines: { description: string; amount: number }[];
+    };
     import?: {
       source: string;
       files: string[];
@@ -327,6 +335,23 @@ function ReviewCard({
               <p className="mt-1 text-xs text-zinc-500">
                 Approving finalizes the invoice. Sending it stays up to you.
               </p>
+            </div>
+          )}
+          {payload.bill && (
+            <div className="text-sm">
+              <p>
+                Bill{payload.bill.bill_number ? ` ${payload.bill.bill_number}` : ""} from{" "}
+                <strong>{payload.bill.vendor_name}</strong>, {fmtDate(payload.bill.issue_date)} ·{" "}
+                {money(payload.bill.total)}
+              </p>
+              <ul className="mt-1 text-xs text-zinc-600 dark:text-zinc-400">
+                {payload.bill.lines.map((l, i) => (
+                  <li key={`${i}-${l.description}`}>
+                    {l.description} · {money(l.amount)}
+                  </li>
+                ))}
+              </ul>
+              <p className="mt-1 text-xs text-zinc-500">Approving posts the bill to Accounts Payable.</p>
             </div>
           )}
           {payload.import && (
