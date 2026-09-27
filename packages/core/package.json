@@ -1,0 +1,17 @@
+{
+  "name": "@cosimo/core",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts",
+    "./*": "./src/*.ts"
+  },
+  "dependencies": {
+    "@cosimo/shared": "workspace:*",
+    "papaparse": "^5.7.0"
+  },
+  "devDependencies": {
+    "@types/papaparse": "^5.3.16"
+  }
+}

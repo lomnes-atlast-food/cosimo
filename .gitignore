@@ -1,0 +1,16 @@
+node_modules/
+dist/
+CLAUDE.local.md
+data/
+.env*
+!.env.example
+*.db
+*.db-*
+*.db.*
+playwright-report/
+test-results/
+.cosimo/
+*.tsbuildinfo
+.DS_Store
+coverage/
+*.bun-build

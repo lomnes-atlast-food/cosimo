@@ -1,0 +1,41 @@
+Journal
+Northwind Studio LLC
+"January 1 - February 28, 2026"
+
+,Date,Transaction Type,Num,Name,Memo/Description,Account,Debit,Credit
+,01/02/2026,Deposit,,,Owner contribution,1000 Business Checking,"$5,000.00",
+,,,,,Owner contribution,3100 Owner's Investment,,"$5,000.00"
+,,,,,,,"$5,000.00","$5,000.00"
+
+,01/05/2026,Invoice,1001,Acme Robotics,Brand identity package,1200 Accounts Receivable (A/R),"$2,750.00",
+,,,,Acme Robotics,Brand identity package,4000 Design Income,,"$2,750.00"
+,,,,,,,"$2,750.00","$2,750.00"
+
+,01/12/2026,Bill,B-77,Pixel Supply Co,Stock photo license pack,5000 Stock Photography,$320.00,
+,,,,Pixel Supply Co,,2000 Accounts Payable (A/P),,$320.00
+,,,,,,,$320.00,$320.00
+
+,01/15/2026,Payment,,Acme Robotics,,1000 Business Checking,"$2,750.00",
+,,,,Acme Robotics,,1200 Accounts Receivable (A/R),,"$2,750.00"
+,,,,,,,"$2,750.00","$2,750.00"
+
+,01/20/2026,Bill Payment (Check),5001,Pixel Supply Co,,2000 Accounts Payable (A/P),$320.00,
+,,,,Pixel Supply Co,,1000 Business Checking,,$320.00
+,,,,,,,$320.00,$320.00
+
+,01/31/2026,Expense,,,Monthly service fee,6300 Bank Charges,$15.00,
+,,,,,Monthly service fee,1000 Business Checking,,$15.00
+,,,,,,,$15.00,$15.00
+
+,01/31/2026,Expense,,Metro Fiber,January internet,6190 Utilities:Internet,$89.99,
+,,,,Metro Fiber,January internet,2100 Business Visa,,$89.99
+,,,,,,,$89.99,$89.99
+
+,02/03/2026,Journal Entry,JE-1,,Client lunch net of software credit,Meals,$52.50,
+,,,,,Software credit,6100 Software Subscriptions,($10.00),
+,,,,,Client lunch net of software credit,2100 Business Visa,,$42.50
+,,,,,,,$42.50,$42.50
+
+,,,,,,TOTAL,"$11,297.49","$11,297.49"
+
+Friday, March 06, 2026 09:16 AM GMT-08:00

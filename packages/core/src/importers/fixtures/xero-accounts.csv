@@ -1,0 +1,20 @@
+*Code,*Name,*Type,*Tax Code,Description,Dashboard,Expense Claims,Enable Payments,Balance
+090,Business Bank Account,Bank,Tax Exempt,,Yes,No,No,"4,410.00"
+610,Accounts Receivable,Current Asset,Tax Exempt,Outstanding invoices the company has issued,No,No,No,0.00
+620,Prepayments,Current Asset,Tax Exempt,,No,No,No,
+710,Office Equipment,Fixed Asset,Tax Exempt,,No,No,No,"3,600.00"
+711,Less Accumulated Depreciation on Office Equipment,Fixed Asset,Tax Exempt,,No,No,No,-100.00
+800,Accounts Payable,Current Liability,Tax Exempt,Outstanding invoices the company has received from suppliers,No,No,No,0.00
+820,Sales Tax,Current Liability,Tax Exempt,,No,No,No,245.00
+900,Loan,Non-current Liability,Tax Exempt,,No,No,No,
+880,Owner A Drawings,Equity,Tax Exempt,,No,No,No,500.00
+881,Owner A Funds Introduced,Equity,Tax Exempt,,No,No,No,"-5,000.00"
+960,Retained Earnings,Equity,Tax Exempt,,No,No,No,
+200,Sales,Revenue,Tax on Sales,Income from any normal business activity,No,No,No,"-3,000.00"
+270,Interest Income,Other Income,Tax Exempt,,No,No,No,
+310,Cost of Goods Sold,Direct Costs,Tax on Purchases,,No,No,No,320.00
+404,Bank Fees,Overhead,Tax Exempt,,No,Yes,No,15.00
+416,Depreciation,Depreciation,Tax Exempt,,No,No,No,100.00
+429,General Expenses,Overhead,Tax on Purchases,,No,Yes,No,
+445,"Light, Power, Heating",Overhead,Tax on Purchases,,No,Yes,No,
+493,Travel - National,Overhead,Tax on Purchases,,No,Yes,No,

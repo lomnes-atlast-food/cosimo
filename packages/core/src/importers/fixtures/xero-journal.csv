@@ -1,0 +1,25 @@
+Journal Report
+Northwind Studio LLC
+For the period 1 January 2026 to 28 February 2026
+
+Date,Journal Number,Source,Contact,Description,Reference,Account Code,Account,Debit,Credit,Net,Tax,Gross
+2 Jan 2026,1,Receive Money,,Owner contribution,,090,Business Bank Account,"5,000.00",,"5,000.00",0.00,"5,000.00"
+2 Jan 2026,1,Receive Money,,Owner contribution,,881,Owner A Funds Introduced,,"5,000.00","-5,000.00",0.00,"-5,000.00"
+Total,,,,,,,,"5,000.00","5,000.00",,,
+5 Jan 2026,2,Receivable Invoice,Acme Robotics,Brand identity package,INV-0001,610,Accounts Receivable,"3,245.00",,"3,245.00",,
+5 Jan 2026,2,Receivable Invoice,Acme Robotics,Brand identity package,INV-0001,200,Sales,,"3,000.00","-3,000.00",,
+5 Jan 2026,2,Receivable Invoice,Acme Robotics,Sales tax,INV-0001,820,Sales Tax,,245.00,-245.00,,
+Total,,,,,,,,"3,245.00","3,245.00",,,
+12 Jan 2026,3,Payable Invoice,Pixel Supply Co,Stock photo license pack,BILL-77,310,Cost of Goods Sold,320.00,,320.00,,
+12 Jan 2026,3,Payable Invoice,Pixel Supply Co,Stock photo license pack,BILL-77,800,Accounts Payable,,320.00,-320.00,,
+15 Jan 2026,4,Receivable Payment,Acme Robotics,Payment: Acme Robotics,INV-0001,090,Business Bank Account,"3,245.00",,,,
+15 Jan 2026,4,Receivable Payment,Acme Robotics,Payment: Acme Robotics,INV-0001,610,Accounts Receivable,,"3,245.00",,,
+20 Jan 2026,5,Payable Payment,Pixel Supply Co,Payment: Pixel Supply Co,BILL-77,800,Accounts Payable,320.00,,,,
+20 Jan 2026,5,Payable Payment,Pixel Supply Co,Payment: Pixel Supply Co,BILL-77,090,Business Bank Account,,320.00,,,
+31 Jan 2026,6,Spend Money,Northside Bank,Monthly service fee,,404,Bank Fees,15.00,,,,
+31 Jan 2026,6,Spend Money,Northside Bank,Monthly service fee,,090,Business Bank Account,,15.00,,,
+31 Jan 2026,7,Manual Journal,,January depreciation,MJ-1,416,Depreciation,100.00,,,,
+31 Jan 2026,7,Manual Journal,,January depreciation,MJ-1,711,Less Accumulated Depreciation on Office Equipment,,100.00,,,
+3 Feb 2026,8,Spend Money,,Owner drawing,,880,Owner A Drawings,500.00,,,,
+3 Feb 2026,8,Spend Money,,Owner drawing,,090,Business Bank Account,,500.00,,,
+Total,,,,,,,,"9,745.00","9,745.00",,,

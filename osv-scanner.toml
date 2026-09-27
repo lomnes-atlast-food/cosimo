@@ -1,0 +1,4 @@
+[[IgnoredVulns]]
+id = "GHSA-67mh-4wv8-2f99"
+ignoreUntil = 2027-03-31
+reason = "esbuild 0.18 dev server only; reached through drizzle-kit (dev tool) via @esbuild-kit. See issue #30."

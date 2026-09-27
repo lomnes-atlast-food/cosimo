@@ -1,0 +1,1391 @@
+/**
+ * Receivables and payables (SPEC §8): invoices, bills, payments and their applications. Documents
+ * drive their own entries (SPEC §6 #8): finalizing posts the document's entry, voiding reverses it,
+ * and users cannot edit those entries directly. Every entry still goes through the posting pipeline,
+ * so a large invoice may wait in the review queue; document state follows the entry through the
+ * post/reject hooks at the bottom of this file.
+ */
+import { newId, type OrgDb, type OrgTx, org } from "@cosimo/db";
+import { addDays, addMonths, today } from "@cosimo/shared";
+import { and, asc, desc, eq, gte, inArray, isNull, lte, type SQL, sql } from "drizzle-orm";
+import { conflict, forbidden, notFound, unprocessable } from "../http/errors.ts";
+import type { ActorInfo } from "./actor.ts";
+import { appendAudit } from "./audit.ts";
+import { assertReviewable, bankTxnView, mustGetBankAccount, mustGetBankTxn } from "./banking.ts";
+import { mustGetContact } from "./contacts.ts";
+import {
+  accountMap,
+  getEntry,
+  onEntryPosted,
+  onEntryRejected,
+  rejectEntryTx,
+  reverseEntryTx,
+  type SubmitResult,
+  settingsRow,
+  submitEntryTx,
+  systemAccountId,
+} from "./ledger.ts";
+
+type Reader = OrgDb | OrgTx;
+type InvoiceRow = typeof org.invoices.$inferSelect;
+type BillRow = typeof org.bills.$inferSelect;
+type PaymentRow = typeof org.payments.$inferSelect;
+export type DocType = "invoice" | "bill";
+
+// ----------------------------------------------------------------------------- helpers
+
+/** Line amount = quantity × unit price, quantity in thousandths, rounded half away from zero. */
+export function lineAmount(quantityMilli: number, unitPrice: number): number {
+  const p = quantityMilli * unitPrice;
+  if (!Number.isSafeInteger(p)) throw unprocessable("Line amount is too large.", "invalid_amount");
+  const sign = p < 0 ? -1 : 1;
+  return sign * Math.floor((Math.abs(p) + 500) / 1000);
+}
+
+/** Due date from terms like "Net 30", "Due on receipt"; falls back to 30 days. */
+export function dueFromTerms(issue: string, terms: string | null | undefined): string {
+  const t = (terms ?? "").trim().toLowerCase();
+  if (/receipt|immediate/.test(t)) return issue;
+  const m = /net\s*(\d{1,3})/.exec(t);
+  return addDays(issue, m ? Number(m[1]) : 30);
+}
+
+function canReverseDocuments(a: ActorInfo) {
+  if (a.actor === "mcp" || a.proposeOnly)
+    throw forbidden("Voiding needs a person or a full-access API token.");
+}
+
+/** A person (or full API token) voiding a document posts the reversal directly. */
+const reversalOpts = (a: ActorInfo) => ({
+  forcePost: a.actor === "user" || (a.actor === "api_token" && !a.proposeOnly),
+});
+
+async function entryStatus(db: Reader, entryId: string | null) {
+  if (!entryId) return null;
+  const e = await db
+    .select({ status: org.journalEntries.status })
+    .from(org.journalEntries)
+    .where(eq(org.journalEntries.id, entryId))
+    .get();
+  return e?.status ?? null;
+}
+
+/** Sum of live applications: payment not voided and its entry posted. */
+async function appliedTo(db: Reader, type: DocType, id: string, asOf?: string) {
+  const conds: SQL[] = [
+    eq(org.paymentApplications.documentType, type),
+    eq(org.paymentApplications.documentId, id),
+    isNull(org.payments.voidedAt),
+    eq(org.journalEntries.status, "posted"),
+  ];
+  if (asOf)
+    conds.push(lte(sql`coalesce(${org.paymentApplications.appliedDate}, ${org.payments.date})`, asOf));
+  const r = await db
+    .select({ total: sql<number>`coalesce(sum(${org.paymentApplications.amount}), 0)` })
+    .from(org.paymentApplications)
+    .innerJoin(org.payments, eq(org.payments.id, org.paymentApplications.paymentId))
+    .innerJoin(org.journalEntries, eq(org.journalEntries.id, org.payments.entryId))
+    .where(and(...conds))
+    .get();
+  return Number(r?.total ?? 0);
+}
+
+/** Recompute amount paid and status of a document from its live applications and entry. */
+export async function recomputeDocTx(tx: OrgTx, type: DocType, id: string) {
+  const table = type === "invoice" ? org.invoices : org.bills;
+  const doc = (await tx.select().from(table).where(eq(table.id, id)).get()) as
+    | InvoiceRow
+    | BillRow
+    | undefined;
+  if (!doc) return;
+  const paid = await appliedTo(tx, type, id);
+  const posted = (await entryStatus(tx, doc.entryId)) === "posted";
+  let status: string;
+  if (doc.voidedAt) status = "void";
+  else if (!posted) status = "draft";
+  else if (paid <= 0) status = type === "invoice" ? "sent" : "open";
+  else if (paid < doc.total) status = "partial";
+  else status = "paid";
+  await tx
+    .update(table)
+    .set({ amountPaid: paid, status: status as never })
+    .where(eq(table.id, id));
+}
+
+// ----------------------------------------------------------------------------- invoices
+
+export interface DocLineInput {
+  description: string;
+  quantity_milli?: number;
+  unit_price?: number;
+  /** Bills: the line amount directly. */
+  amount?: number;
+  account_id: string;
+}
+
+export interface InvoiceInput {
+  customer_id: string;
+  number?: string | null;
+  issue_date: string;
+  due_date?: string | null;
+  terms?: string | null;
+  memo?: string | null;
+  lines: DocLineInput[];
+}
+
+export async function invoiceView(db: Reader, inv: InvoiceRow) {
+  const lines = await db
+    .select()
+    .from(org.invoiceLines)
+    .where(eq(org.invoiceLines.invoiceId, inv.id))
+    .orderBy(asc(org.invoiceLines.lineOrder))
+    .all();
+  const customer = await db.select().from(org.contacts).where(eq(org.contacts.id, inv.customerId)).get();
+  const es = await entryStatus(db, inv.entryId);
+  return {
+    id: inv.id,
+    number: inv.number,
+    customer_id: inv.customerId,
+    customer_name: customer?.name ?? "",
+    customer_email: customer?.email ?? null,
+    issue_date: inv.issueDate,
+    due_date: inv.dueDate,
+    status: inv.status,
+    entry_status: es,
+    currency: inv.currency,
+    subtotal: inv.subtotal,
+    total: inv.total,
+    amount_paid: inv.amountPaid,
+    balance_due: inv.status === "void" ? 0 : inv.total - inv.amountPaid,
+    overdue: (inv.status === "sent" || inv.status === "partial") && inv.dueDate < today(),
+    memo: inv.memo,
+    terms: inv.terms,
+    entry_id: inv.entryId,
+    recurring_id: inv.recurringId,
+    created_by_actor: inv.createdByActor,
+    created_at: inv.createdAt,
+    sent_at: inv.sentAt,
+    last_reminder_at: inv.lastReminderAt,
+    voided_at: inv.voidedAt,
+    lines: lines.map((l) => ({
+      id: l.id,
+      description: l.description,
+      quantity_milli: l.quantityMilli,
+      unit_price: l.unitPrice,
+      amount: l.amount,
+      account_id: l.incomeAccountId,
+    })),
+  };
+}
+export type InvoiceView = Awaited<ReturnType<typeof invoiceView>>;
+
+export async function mustGetInvoice(db: Reader, id: string) {
+  const i = await db.select().from(org.invoices).where(eq(org.invoices.id, id)).get();
+  if (!i) throw notFound("Invoice");
+  return i;
+}
+
+export async function listInvoices(
+  db: Reader,
+  f: {
+    status?: string[];
+    customerId?: string;
+    from?: string;
+    to?: string;
+    overdue?: boolean;
+    limit?: number;
+  },
+) {
+  const conds: SQL[] = [];
+  if (f.status?.length) conds.push(inArray(org.invoices.status, f.status as InvoiceRow["status"][]));
+  if (f.customerId) conds.push(eq(org.invoices.customerId, f.customerId));
+  if (f.from) conds.push(gte(org.invoices.issueDate, f.from));
+  if (f.to) conds.push(lte(org.invoices.issueDate, f.to));
+  if (f.overdue)
+    conds.push(
+      and(inArray(org.invoices.status, ["sent", "partial"]), sql`${org.invoices.dueDate} < ${today()}`)!,
+    );
+  const rows = await db
+    .select()
+    .from(org.invoices)
+    .where(conds.length ? and(...conds) : undefined)
+    .orderBy(desc(org.invoices.issueDate), desc(org.invoices.id))
+    .limit(Math.min(f.limit ?? 200, 1000))
+    .all();
+  return Promise.all(rows.map((r) => invoiceView(db, r)));
+}
+
+async function checkDocLines(tx: Reader, lines: DocLineInput[], kind: DocType) {
+  if (!lines.length) throw unprocessable("Add at least one line.", "empty");
+  const accts = await accountMap(tx);
+  for (const l of lines) {
+    const a = accts.get(l.account_id);
+    if (!a?.isActive) throw unprocessable("A line's account is missing or inactive.", "invalid_account");
+    if (kind === "invoice" && a.type !== "income" && a.type !== "liability") {
+      throw unprocessable(
+        "Invoice lines post to income (or liability, e.g. deposits) accounts.",
+        "invalid_account",
+      );
+    }
+    if (kind === "bill" && a.type !== "expense" && a.type !== "asset" && a.type !== "liability") {
+      throw unprocessable("Bill lines post to expense, asset, or liability accounts.", "invalid_account");
+    }
+  }
+}
+
+async function nextInvoiceNumber(tx: OrgTx) {
+  const s = await settingsRow(tx);
+  for (let n = s.nextInvoiceNumber, i = 0; i < 10_000; n++, i++) {
+    const num = `${s.invoicePrefix}${n}`;
+    const taken = await tx
+      .select({ id: org.invoices.id })
+      .from(org.invoices)
+      .where(eq(org.invoices.number, num))
+      .get();
+    if (!taken) {
+      await tx
+        .update(org.orgSettings)
+        .set({ nextInvoiceNumber: n + 1 })
+        .where(eq(org.orgSettings.id, 1));
+      return num;
+    }
+  }
+  throw conflict("Could not allocate an invoice number.");
+}
+
+async function writeInvoiceLines(tx: OrgTx, invoiceId: string, lines: DocLineInput[]) {
+  await tx.delete(org.invoiceLines).where(eq(org.invoiceLines.invoiceId, invoiceId));
+  let subtotal = 0;
+  const rows = lines.map((l, i) => {
+    const q = l.quantity_milli ?? 1000;
+    const price = l.unit_price ?? l.amount ?? 0;
+    const amount = lineAmount(q, price);
+    subtotal += amount;
+    return {
+      id: newId(),
+      invoiceId,
+      description: l.description.trim() || "Item",
+      quantityMilli: q,
+      unitPrice: price,
+      amount,
+      incomeAccountId: l.account_id,
+      lineOrder: i,
+    };
+  });
+  if (rows.length) await tx.insert(org.invoiceLines).values(rows);
+  return subtotal;
+}
+
+export async function createInvoiceTx(
+  tx: OrgTx,
+  orgId: string,
+  a: ActorInfo,
+  input: InvoiceInput,
+  extra: { recurringId?: string } = {},
+) {
+  const customer = await mustGetContact(tx, input.customer_id);
+  if (customer.kind === "vendor")
+    throw unprocessable("That contact is a vendor. Mark it as a customer first.", "invalid_contact");
+  await checkDocLines(tx, input.lines, "invoice");
+  const s = await settingsRow(tx);
+  const number = input.number?.trim() || (await nextInvoiceNumber(tx));
+  const clash = await tx
+    .select({ id: org.invoices.id })
+    .from(org.invoices)
+    .where(eq(org.invoices.number, number))
+    .get();
+  if (clash) throw conflict(`Invoice number ${number} is already used.`, "duplicate_number");
+  const id = newId();
+  const terms = input.terms ?? s.defaultTerms;
+  await tx.insert(org.invoices).values({
+    id,
+    number,
+    customerId: customer.id,
+    issueDate: input.issue_date,
+    dueDate: input.due_date ?? dueFromTerms(input.issue_date, terms),
+    status: "draft",
+    currency: s.baseCurrency,
+    memo: input.memo ?? null,
+    terms,
+    recurringId: extra.recurringId ?? null,
+    createdBy: a.userId,
+    createdByActor: a.actor,
+  });
+  const subtotal = await writeInvoiceLines(tx, id, input.lines);
+  if (subtotal <= 0) throw unprocessable("The invoice total must be more than zero.", "invalid_total");
+  await tx.update(org.invoices).set({ subtotal, total: subtotal }).where(eq(org.invoices.id, id));
+  const inv = await mustGetInvoice(tx, id);
+  await appendAudit(tx, orgId, a, {
+    action: "invoice.create",
+    targetType: "invoice",
+    targetId: id,
+    after: await invoiceView(tx, inv),
+  });
+  return inv;
+}
+
+async function assertEditableDraft(tx: Reader, inv: InvoiceRow | BillRow) {
+  if (inv.status !== "draft")
+    throw conflict(`This document is ${inv.status}; only drafts can be edited.`, "invalid_state");
+  if ((await entryStatus(tx, inv.entryId)) === "pending_review") {
+    throw conflict(
+      "This document is waiting in the review queue. Reject it there to edit.",
+      "pending_review",
+    );
+  }
+}
+
+export async function updateInvoiceTx(
+  tx: OrgTx,
+  orgId: string,
+  a: ActorInfo,
+  id: string,
+  input: Partial<InvoiceInput>,
+) {
+  const before = await mustGetInvoice(tx, id);
+  await assertEditableDraft(tx, before);
+  const beforeView = await invoiceView(tx, before);
+  const patch: Partial<typeof org.invoices.$inferInsert> = {};
+  if (input.customer_id) {
+    const c = await mustGetContact(tx, input.customer_id);
+    if (c.kind === "vendor") throw unprocessable("That contact is a vendor.", "invalid_contact");
+    patch.customerId = c.id;
+  }
+  if (input.number?.trim() && input.number.trim() !== before.number) {
+    const clash = await tx
+      .select({ id: org.invoices.id })
+      .from(org.invoices)
+      .where(eq(org.invoices.number, input.number.trim()))
+      .get();
+    if (clash) throw conflict(`Invoice number ${input.number} is already used.`, "duplicate_number");
+    patch.number = input.number.trim();
+  }
+  if (input.issue_date) patch.issueDate = input.issue_date;
+  if (input.terms !== undefined) patch.terms = input.terms;
+  if (input.due_date !== undefined)
+    patch.dueDate =
+      input.due_date ?? dueFromTerms(input.issue_date ?? before.issueDate, input.terms ?? before.terms);
+  else if (input.terms !== undefined || input.issue_date)
+    patch.dueDate = dueFromTerms(input.issue_date ?? before.issueDate, input.terms ?? before.terms);
+  if (input.memo !== undefined) patch.memo = input.memo;
+  if (input.lines) {
+    await checkDocLines(tx, input.lines, "invoice");
+    const subtotal = await writeInvoiceLines(tx, id, input.lines);
+    if (subtotal <= 0) throw unprocessable("The invoice total must be more than zero.", "invalid_total");
+    patch.subtotal = subtotal;
+    patch.total = subtotal;
+  }
+  patch.entryId = null;
+  await tx.update(org.invoices).set(patch).where(eq(org.invoices.id, id));
+  const after = await mustGetInvoice(tx, id);
+  await appendAudit(tx, orgId, a, {
+    action: "invoice.update",
+    targetType: "invoice",
+    targetId: id,
+    before: beforeView,
+    after: await invoiceView(tx, after),
+  });
+  return after;
+}
+
+export async function deleteInvoiceDraftTx(tx: OrgTx, orgId: string, a: ActorInfo, id: string) {
+  const inv = await mustGetInvoice(tx, id);
+  await assertEditableDraft(tx, inv);
+  const before = await invoiceView(tx, inv);
+  await tx.delete(org.invoiceLines).where(eq(org.invoiceLines.invoiceId, id));
+  await tx.delete(org.invoices).where(eq(org.invoices.id, id));
+  await appendAudit(tx, orgId, a, { action: "invoice.delete", targetType: "invoice", targetId: id, before });
+}
+
+/** Post the invoice: AR debit for the total, income credits grouped by account. */
+export async function finalizeInvoiceTx(
+  tx: OrgTx,
+  orgId: string,
+  a: ActorInfo,
+  id: string,
+  opts: { lockOverrideNote?: string | null; forcePost?: boolean } = {},
+) {
+  const inv = await mustGetInvoice(tx, id);
+  if (inv.status !== "draft") throw conflict(`This invoice is already ${inv.status}.`, "invalid_state");
+  if ((await entryStatus(tx, inv.entryId)) === "pending_review")
+    throw conflict("This invoice is already waiting for review.", "pending_review");
+  const view = await invoiceView(tx, inv);
+  const ar = await systemAccountId(tx, "ar");
+  const byAccount = new Map<string, number>();
+  for (const l of view.lines) byAccount.set(l.account_id, (byAccount.get(l.account_id) ?? 0) + l.amount);
+  const lines = [
+    { accountId: ar, amount: inv.total, contactId: inv.customerId, description: `Invoice ${inv.number}` },
+    ...[...byAccount.entries()]
+      .filter(([, amt]) => amt !== 0)
+      .map(([accountId, amt]) => ({ accountId, amount: -amt, contactId: inv.customerId, description: null })),
+  ];
+  const r = await submitEntryTx(
+    tx,
+    orgId,
+    a,
+    {
+      date: inv.issueDate,
+      memo: `Invoice ${inv.number} · ${view.customer_name}`,
+      lines,
+      sourceType: "invoice",
+      sourceId: inv.id,
+      lockOverrideNote: opts.lockOverrideNote ?? null,
+    },
+    {
+      forcePost: opts.forcePost,
+      reviewContext: { invoice: { id: inv.id, number: inv.number, customer: view.customer_name } },
+    },
+  );
+  await tx.update(org.invoices).set({ entryId: r.entry.id }).where(eq(org.invoices.id, inv.id));
+  await recomputeDocTx(tx, "invoice", inv.id);
+  await appendAudit(tx, orgId, a, {
+    action: "invoice.finalize",
+    targetType: "invoice",
+    targetId: inv.id,
+    after: { entry_id: r.entry.id, entry_status: r.entry.status },
+  });
+  return r;
+}
+
+export async function markInvoiceSentTx(
+  tx: OrgTx,
+  orgId: string,
+  a: ActorInfo,
+  id: string,
+  to: string | null,
+) {
+  const at = new Date().toISOString();
+  await tx.update(org.invoices).set({ sentAt: at }).where(eq(org.invoices.id, id));
+  await appendAudit(tx, orgId, a, {
+    action: "invoice.send",
+    targetType: "invoice",
+    targetId: id,
+    after: { to, sent_at: at },
+  });
+}
+
+async function liveApplications(tx: Reader, type: DocType, id: string) {
+  return tx
+    .select({ paymentId: org.paymentApplications.paymentId, amount: org.paymentApplications.amount })
+    .from(org.paymentApplications)
+    .innerJoin(org.payments, eq(org.payments.id, org.paymentApplications.paymentId))
+    .where(
+      and(
+        eq(org.paymentApplications.documentType, type),
+        eq(org.paymentApplications.documentId, id),
+        isNull(org.payments.voidedAt),
+      ),
+    )
+    .all();
+}
+
+async function voidDocTx(
+  tx: OrgTx,
+  orgId: string,
+  a: ActorInfo,
+  type: DocType,
+  id: string,
+  date?: string | null,
+) {
+  canReverseDocuments(a);
+  const table = type === "invoice" ? org.invoices : org.bills;
+  const doc = (await tx.select().from(table).where(eq(table.id, id)).get()) as
+    | InvoiceRow
+    | BillRow
+    | undefined;
+  if (!doc) throw notFound(type === "invoice" ? "Invoice" : "Bill");
+  if (doc.voidedAt) throw conflict("Already void.", "invalid_state");
+  if ((await liveApplications(tx, type, id)).length) {
+    throw conflict("Payments are applied to this document. Void or unapply them first.", "has_payments");
+  }
+  const es = await entryStatus(tx, doc.entryId);
+  if (es === "posted") {
+    const e = (await getEntry(tx, doc.entryId!))!;
+    if (!e.reversed_by_entry_id) {
+      await reverseEntryTx(
+        tx,
+        orgId,
+        a,
+        e.id,
+        { date: date ?? undefined, allowDocument: true, memo: `Void ${e.memo ?? ""}`.trim() },
+        reversalOpts(a),
+      );
+    }
+  } else if (es === "pending_review") {
+    await rejectEntryTx(tx, orgId, a, doc.entryId!, "Document voided");
+    await tx
+      .update(org.reviewItems)
+      .set({
+        status: "rejected",
+        decidedBy: a.userId,
+        decidedAt: new Date().toISOString(),
+        decisionNote: "Document voided",
+      })
+      .where(and(eq(org.reviewItems.itemId, doc.entryId!), eq(org.reviewItems.status, "pending")));
+  }
+  await tx
+    .update(table)
+    .set({ voidedAt: new Date().toISOString(), status: "void" as never })
+    .where(eq(table.id, id));
+  await appendAudit(tx, orgId, a, { action: `${type}.void`, targetType: type, targetId: id });
+}
+
+export const voidInvoiceTx = (tx: OrgTx, orgId: string, a: ActorInfo, id: string, date?: string | null) =>
+  voidDocTx(tx, orgId, a, "invoice", id, date);
+
+// ----------------------------------------------------------------------------- bills
+
+export interface BillInput {
+  vendor_id: string;
+  bill_number?: string | null;
+  issue_date: string;
+  due_date?: string | null;
+  memo?: string | null;
+  lines: DocLineInput[];
+  /** Save without posting. */
+  draft?: boolean;
+  lock_override_note?: string | null;
+}
+
+export async function billView(db: Reader, b: BillRow) {
+  const lines = await db
+    .select()
+    .from(org.billLines)
+    .where(eq(org.billLines.billId, b.id))
+    .orderBy(asc(org.billLines.lineOrder))
+    .all();
+  const vendor = await db.select().from(org.contacts).where(eq(org.contacts.id, b.vendorId)).get();
+  return {
+    id: b.id,
+    vendor_id: b.vendorId,
+    vendor_name: vendor?.name ?? "",
+    bill_number: b.billNumber,
+    issue_date: b.issueDate,
+    due_date: b.dueDate,
+    status: b.status,
+    entry_status: await entryStatus(db, b.entryId),
+    currency: b.currency,
+    total: b.total,
+    amount_paid: b.amountPaid,
+    balance_due: b.status === "void" ? 0 : b.total - b.amountPaid,
+    overdue: (b.status === "open" || b.status === "partial") && b.dueDate < today(),
+    memo: b.memo,
+    entry_id: b.entryId,
+    created_at: b.createdAt,
+    voided_at: b.voidedAt,
+    lines: lines.map((l) => ({
+      id: l.id,
+      description: l.description,
+      amount: l.amount,
+      account_id: l.expenseAccountId,
+    })),
+  };
+}
+export type BillView = Awaited<ReturnType<typeof billView>>;
+
+export async function mustGetBill(db: Reader, id: string) {
+  const b = await db.select().from(org.bills).where(eq(org.bills.id, id)).get();
+  if (!b) throw notFound("Bill");
+  return b;
+}
+
+export async function listBills(
+  db: Reader,
+  f: { status?: string[]; vendorId?: string; from?: string; to?: string; limit?: number },
+) {
+  const conds: SQL[] = [];
+  if (f.status?.length) conds.push(inArray(org.bills.status, f.status as BillRow["status"][]));
+  if (f.vendorId) conds.push(eq(org.bills.vendorId, f.vendorId));
+  if (f.from) conds.push(gte(org.bills.issueDate, f.from));
+  if (f.to) conds.push(lte(org.bills.issueDate, f.to));
+  const rows = await db
+    .select()
+    .from(org.bills)
+    .where(conds.length ? and(...conds) : undefined)
+    .orderBy(desc(org.bills.issueDate), desc(org.bills.id))
+    .limit(Math.min(f.limit ?? 200, 1000))
+    .all();
+  return Promise.all(rows.map((r) => billView(db, r)));
+}
+
+async function writeBillLines(tx: OrgTx, billId: string, lines: DocLineInput[]) {
+  await tx.delete(org.billLines).where(eq(org.billLines.billId, billId));
+  let total = 0;
+  const rows = lines.map((l, i) => {
+    const amount = l.amount ?? lineAmount(l.quantity_milli ?? 1000, l.unit_price ?? 0);
+    if (!Number.isSafeInteger(amount) || amount === 0)
+      throw unprocessable("Bill line amounts must be non-zero cents.", "invalid_amount");
+    total += amount;
+    return {
+      id: newId(),
+      billId,
+      description: l.description.trim() || "Item",
+      amount,
+      expenseAccountId: l.account_id,
+      lineOrder: i,
+    };
+  });
+  if (rows.length) await tx.insert(org.billLines).values(rows);
+  if (total <= 0) throw unprocessable("The bill total must be more than zero.", "invalid_total");
+  return total;
+}
+
+export async function createBillTx(tx: OrgTx, orgId: string, a: ActorInfo, input: BillInput) {
+  const vendor = await mustGetContact(tx, input.vendor_id);
+  if (vendor.kind === "customer")
+    throw unprocessable("That contact is a customer. Mark it as a vendor first.", "invalid_contact");
+  await checkDocLines(tx, input.lines, "bill");
+  const s = await settingsRow(tx);
+  const id = newId();
+  await tx.insert(org.bills).values({
+    id,
+    vendorId: vendor.id,
+    billNumber: input.bill_number ?? null,
+    issueDate: input.issue_date,
+    dueDate: input.due_date ?? addDays(input.issue_date, 30),
+    status: "draft",
+    currency: s.baseCurrency,
+    memo: input.memo ?? null,
+  });
+  const total = await writeBillLines(tx, id, input.lines);
+  await tx.update(org.bills).set({ total }).where(eq(org.bills.id, id));
+  await appendAudit(tx, orgId, a, {
+    action: "bill.create",
+    targetType: "bill",
+    targetId: id,
+    after: await billView(tx, await mustGetBill(tx, id)),
+  });
+  let result: SubmitResult | null = null;
+  if (!input.draft)
+    result = await finalizeBillTx(tx, orgId, a, id, { lockOverrideNote: input.lock_override_note });
+  return { bill: await mustGetBill(tx, id), result };
+}
+
+export async function updateBillTx(
+  tx: OrgTx,
+  orgId: string,
+  a: ActorInfo,
+  id: string,
+  input: Partial<BillInput>,
+) {
+  const before = await mustGetBill(tx, id);
+  await assertEditableDraft(tx, before);
+  const beforeView = await billView(tx, before);
+  const patch: Partial<typeof org.bills.$inferInsert> = { entryId: null };
+  if (input.vendor_id) {
+    const v = await mustGetContact(tx, input.vendor_id);
+    if (v.kind === "customer") throw unprocessable("That contact is a customer.", "invalid_contact");
+    patch.vendorId = v.id;
+  }
+  if (input.bill_number !== undefined) patch.billNumber = input.bill_number;
+  if (input.issue_date) patch.issueDate = input.issue_date;
+  if (input.due_date !== undefined)
+    patch.dueDate = input.due_date ?? addDays(input.issue_date ?? before.issueDate, 30);
+  if (input.memo !== undefined) patch.memo = input.memo;
+  if (input.lines) {
+    await checkDocLines(tx, input.lines, "bill");
+    patch.total = await writeBillLines(tx, id, input.lines);
+  }
+  await tx.update(org.bills).set(patch).where(eq(org.bills.id, id));
+  const after = await mustGetBill(tx, id);
+  await appendAudit(tx, orgId, a, {
+    action: "bill.update",
+    targetType: "bill",
+    targetId: id,
+    before: beforeView,
+    after: await billView(tx, after),
+  });
+  return after;
+}
+
+export async function deleteBillDraftTx(tx: OrgTx, orgId: string, a: ActorInfo, id: string) {
+  const b = await mustGetBill(tx, id);
+  await assertEditableDraft(tx, b);
+  const before = await billView(tx, b);
+  await tx.delete(org.billLines).where(eq(org.billLines.billId, id));
+  await tx.delete(org.bills).where(eq(org.bills.id, id));
+  await appendAudit(tx, orgId, a, { action: "bill.delete", targetType: "bill", targetId: id, before });
+}
+
+/** Post the bill: expense debits per line, AP credit for the total. */
+export async function finalizeBillTx(
+  tx: OrgTx,
+  orgId: string,
+  a: ActorInfo,
+  id: string,
+  opts: { lockOverrideNote?: string | null } = {},
+) {
+  const b = await mustGetBill(tx, id);
+  if (b.status !== "draft") throw conflict(`This bill is already ${b.status}.`, "invalid_state");
+  if ((await entryStatus(tx, b.entryId)) === "pending_review")
+    throw conflict("This bill is already waiting for review.", "pending_review");
+  const view = await billView(tx, b);
+  const ap = await systemAccountId(tx, "ap");
+  const lines = [
+    ...view.lines.map((l) => ({
+      accountId: l.account_id,
+      amount: l.amount,
+      contactId: b.vendorId,
+      description: l.description,
+    })),
+    {
+      accountId: ap,
+      amount: -b.total,
+      contactId: b.vendorId,
+      description: `Bill ${b.billNumber ?? ""}`.trim(),
+    },
+  ];
+  const r = await submitEntryTx(
+    tx,
+    orgId,
+    a,
+    {
+      date: b.issueDate,
+      memo: `Bill${b.billNumber ? ` ${b.billNumber}` : ""} · ${view.vendor_name}`,
+      lines,
+      sourceType: "bill",
+      sourceId: b.id,
+      lockOverrideNote: opts.lockOverrideNote ?? null,
+    },
+    { reviewContext: { bill: { id: b.id, number: b.billNumber, vendor: view.vendor_name } } },
+  );
+  await tx.update(org.bills).set({ entryId: r.entry.id }).where(eq(org.bills.id, b.id));
+  await recomputeDocTx(tx, "bill", b.id);
+  await appendAudit(tx, orgId, a, {
+    action: "bill.finalize",
+    targetType: "bill",
+    targetId: b.id,
+    after: { entry_id: r.entry.id, entry_status: r.entry.status },
+  });
+  return r;
+}
+
+export const voidBillTx = (tx: OrgTx, orgId: string, a: ActorInfo, id: string, date?: string | null) =>
+  voidDocTx(tx, orgId, a, "bill", id, date);
+
+// ----------------------------------------------------------------------------- payments
+
+export interface PaymentInput {
+  direction: PaymentRow["direction"];
+  contact_id: string;
+  date: string;
+  amount: number;
+  /** Ledger account the money moved through: a bank/cash asset, or a credit card for sent payments. */
+  account_id: string;
+  method?: string | null;
+  reference?: string | null;
+  memo?: string | null;
+  applications: { document_id: string; amount: number }[];
+  lock_override_note?: string | null;
+}
+
+export async function paymentView(db: Reader, p: PaymentRow) {
+  const apps = await db
+    .select()
+    .from(org.paymentApplications)
+    .where(eq(org.paymentApplications.paymentId, p.id))
+    .all();
+  const contact = await db.select().from(org.contacts).where(eq(org.contacts.id, p.contactId)).get();
+  const es = await entryStatus(db, p.entryId);
+  const applied = apps.reduce((s, x) => s + x.amount, 0);
+  const numbers = new Map<string, string>();
+  for (const x of apps) {
+    const doc =
+      x.documentType === "invoice"
+        ? await db
+            .select({ n: org.invoices.number })
+            .from(org.invoices)
+            .where(eq(org.invoices.id, x.documentId))
+            .get()
+        : await db
+            .select({ n: org.bills.billNumber })
+            .from(org.bills)
+            .where(eq(org.bills.id, x.documentId))
+            .get();
+    numbers.set(x.documentId, doc?.n ?? "");
+  }
+  return {
+    id: p.id,
+    direction: p.direction,
+    contact_id: p.contactId,
+    contact_name: contact?.name ?? "",
+    date: p.date,
+    amount: p.amount,
+    account_id: p.bankAccountId,
+    method: p.method,
+    reference: p.reference,
+    memo: p.memo,
+    entry_id: p.entryId,
+    entry_status: es,
+    voided_at: p.voidedAt,
+    applied,
+    unapplied: p.voidedAt ? 0 : p.amount - applied,
+    applications: apps.map((x) => ({
+      document_type: x.documentType,
+      document_id: x.documentId,
+      document_number: numbers.get(x.documentId) ?? "",
+      amount: x.amount,
+      applied_date: x.appliedDate,
+    })),
+    created_at: p.createdAt,
+  };
+}
+export type PaymentView = Awaited<ReturnType<typeof paymentView>>;
+
+export async function mustGetPayment(db: Reader, id: string) {
+  const p = await db.select().from(org.payments).where(eq(org.payments.id, id)).get();
+  if (!p) throw notFound("Payment");
+  return p;
+}
+
+export async function listPayments(
+  db: Reader,
+  f: { direction?: PaymentRow["direction"]; contactId?: string; withCredit?: boolean; limit?: number },
+) {
+  const conds: SQL[] = [];
+  if (f.direction) conds.push(eq(org.payments.direction, f.direction));
+  if (f.contactId) conds.push(eq(org.payments.contactId, f.contactId));
+  const rows = await db
+    .select()
+    .from(org.payments)
+    .where(conds.length ? and(...conds) : undefined)
+    .orderBy(desc(org.payments.date), desc(org.payments.id))
+    .limit(Math.min(f.limit ?? 200, 1000))
+    .all();
+  const views = await Promise.all(rows.map((r) => paymentView(db, r)));
+  return f.withCredit ? views.filter((v) => v.unapplied > 0 && v.entry_status === "posted") : views;
+}
+
+async function checkApplications(
+  tx: Reader,
+  p: { direction: PaymentRow["direction"]; contactId: string },
+  apps: { document_id: string; amount: number }[],
+) {
+  const type: DocType = p.direction === "received" ? "invoice" : "bill";
+  const seen = new Set<string>();
+  for (const x of apps) {
+    if (!Number.isSafeInteger(x.amount) || x.amount <= 0)
+      throw unprocessable("Applied amounts must be positive.", "invalid_amount");
+    if (seen.has(x.document_id)) throw unprocessable("Apply to each document once.", "duplicate_document");
+    seen.add(x.document_id);
+    const doc =
+      type === "invoice" ? await mustGetInvoice(tx, x.document_id) : await mustGetBill(tx, x.document_id);
+    const contactId = "customerId" in doc ? doc.customerId : doc.vendorId;
+    if (contactId !== p.contactId)
+      throw unprocessable("A document belongs to a different contact.", "contact_mismatch");
+    if (doc.voidedAt || (await entryStatus(tx, doc.entryId)) !== "posted") {
+      throw unprocessable(
+        `${type === "invoice" ? "Invoice" : "Bill"} ${"number" in doc ? doc.number : (doc.billNumber ?? "")} is not open.`,
+        "document_not_open",
+      );
+    }
+    const open = doc.total - (await appliedTo(tx, type, doc.id));
+    if (x.amount > open) {
+      throw unprocessable(
+        `That is more than the ${(open / 100).toFixed(2)} still open on this document.`,
+        "over_applied",
+      );
+    }
+  }
+  return type;
+}
+
+/**
+ * Record a payment received from a customer (or sent to a vendor), optionally applied to several
+ * invoices (bills). Any amount not applied stays as a credit for the contact (SPEC §8.1).
+ */
+export async function recordPaymentTx(tx: OrgTx, orgId: string, a: ActorInfo, input: PaymentInput) {
+  if (!Number.isSafeInteger(input.amount) || input.amount <= 0)
+    throw unprocessable("The payment amount must be positive.", "invalid_amount");
+  const contact = await mustGetContact(tx, input.contact_id);
+  const acct = (await accountMap(tx)).get(input.account_id);
+  if (!acct?.isActive)
+    throw unprocessable("Choose an active account the money moved through.", "invalid_account");
+  if (acct.type !== "asset" && !(input.direction === "sent" && acct.type === "liability")) {
+    throw unprocessable(
+      "Payments move through a bank or cash account (or a credit card for payments you make).",
+      "invalid_account",
+    );
+  }
+  const applied = input.applications.reduce((s, x) => s + x.amount, 0);
+  if (applied > input.amount) throw unprocessable("Applied amounts exceed the payment.", "over_applied");
+  const type = await checkApplications(
+    tx,
+    { direction: input.direction, contactId: contact.id },
+    input.applications,
+  );
+  const id = newId();
+  await tx.insert(org.payments).values({
+    id,
+    direction: input.direction,
+    contactId: contact.id,
+    date: input.date,
+    amount: input.amount,
+    bankAccountId: input.account_id,
+    method: input.method ?? null,
+    reference: input.reference ?? null,
+    memo: input.memo ?? null,
+  });
+  if (input.applications.length) {
+    await tx.insert(org.paymentApplications).values(
+      input.applications.map((x) => ({
+        paymentId: id,
+        documentType: type,
+        documentId: x.document_id,
+        amount: x.amount,
+        appliedDate: input.date,
+      })),
+    );
+  }
+  const control = await systemAccountId(tx, input.direction === "received" ? "ar" : "ap");
+  const sign = input.direction === "received" ? 1 : -1;
+  const r = await submitEntryTx(
+    tx,
+    orgId,
+    a,
+    {
+      date: input.date,
+      memo: `${input.direction === "received" ? "Payment from" : "Payment to"} ${contact.name}${input.reference ? ` (${input.reference})` : ""}`,
+      lines: [
+        {
+          accountId: input.account_id,
+          amount: sign * input.amount,
+          contactId: contact.id,
+          description: input.memo ?? null,
+        },
+        { accountId: control, amount: -sign * input.amount, contactId: contact.id, description: null },
+      ],
+      sourceType: input.direction === "received" ? "invoice_payment" : "bill_payment",
+      sourceId: id,
+      lockOverrideNote: input.lock_override_note ?? null,
+    },
+    { reviewContext: { payment: { id, contact: contact.name, applications: input.applications } } },
+  );
+  await tx.update(org.payments).set({ entryId: r.entry.id }).where(eq(org.payments.id, id));
+  for (const x of input.applications) await recomputeDocTx(tx, type, x.document_id);
+  await appendAudit(tx, orgId, a, {
+    action: "payment.create",
+    targetType: "payment",
+    targetId: id,
+    after: {
+      direction: input.direction,
+      contact: contact.name,
+      amount: input.amount,
+      applications: input.applications,
+      entry_status: r.entry.status,
+    },
+  });
+  return { payment: await mustGetPayment(tx, id), result: r };
+}
+
+/** Apply an existing payment's unapplied credit to more documents (SPEC §8.1 customer credits). */
+export async function applyPaymentTx(
+  tx: OrgTx,
+  orgId: string,
+  a: ActorInfo,
+  id: string,
+  apps: { document_id: string; amount: number }[],
+  date?: string,
+) {
+  const p = await mustGetPayment(tx, id);
+  if (p.voidedAt) throw conflict("This payment is void.", "invalid_state");
+  if ((await entryStatus(tx, p.entryId)) !== "posted")
+    throw conflict("This payment is not posted yet.", "invalid_state");
+  const view = await paymentView(tx, p);
+  const total = apps.reduce((s, x) => s + x.amount, 0);
+  if (total > view.unapplied)
+    throw unprocessable(`Only ${(view.unapplied / 100).toFixed(2)} is unapplied.`, "over_applied");
+  const type = await checkApplications(tx, { direction: p.direction, contactId: p.contactId }, apps);
+  const on = date ?? today();
+  for (const x of apps) {
+    const existing = await tx
+      .select()
+      .from(org.paymentApplications)
+      .where(
+        and(
+          eq(org.paymentApplications.paymentId, id),
+          eq(org.paymentApplications.documentType, type),
+          eq(org.paymentApplications.documentId, x.document_id),
+        ),
+      )
+      .get();
+    if (existing) {
+      await tx
+        .update(org.paymentApplications)
+        .set({ amount: existing.amount + x.amount })
+        .where(
+          and(
+            eq(org.paymentApplications.paymentId, id),
+            eq(org.paymentApplications.documentType, type),
+            eq(org.paymentApplications.documentId, x.document_id),
+          ),
+        );
+    } else {
+      await tx.insert(org.paymentApplications).values({
+        paymentId: id,
+        documentType: type,
+        documentId: x.document_id,
+        amount: x.amount,
+        appliedDate: on,
+      });
+    }
+    await recomputeDocTx(tx, type, x.document_id);
+  }
+  await appendAudit(tx, orgId, a, {
+    action: "payment.apply",
+    targetType: "payment",
+    targetId: id,
+    after: { applications: apps, date: on },
+  });
+  return mustGetPayment(tx, id);
+}
+
+/** Remove one application (the amount returns to the payment's unapplied credit). */
+export async function unapplyPaymentTx(
+  tx: OrgTx,
+  orgId: string,
+  a: ActorInfo,
+  id: string,
+  documentId: string,
+) {
+  const p = await mustGetPayment(tx, id);
+  const type: DocType = p.direction === "received" ? "invoice" : "bill";
+  const existing = await tx
+    .select()
+    .from(org.paymentApplications)
+    .where(and(eq(org.paymentApplications.paymentId, id), eq(org.paymentApplications.documentId, documentId)))
+    .get();
+  if (!existing) throw notFound("Application");
+  await tx
+    .delete(org.paymentApplications)
+    .where(
+      and(eq(org.paymentApplications.paymentId, id), eq(org.paymentApplications.documentId, documentId)),
+    );
+  await recomputeDocTx(tx, type, documentId);
+  await appendAudit(tx, orgId, a, {
+    action: "payment.unapply",
+    targetType: "payment",
+    targetId: id,
+    before: { document_id: documentId, amount: existing.amount },
+  });
+}
+
+export async function voidPaymentTx(
+  tx: OrgTx,
+  orgId: string,
+  a: ActorInfo,
+  id: string,
+  date?: string | null,
+) {
+  canReverseDocuments(a);
+  const p = await mustGetPayment(tx, id);
+  if (p.voidedAt) throw conflict("This payment is already void.", "invalid_state");
+  const es = await entryStatus(tx, p.entryId);
+  if (es === "posted") {
+    const e = (await getEntry(tx, p.entryId!))!;
+    if (!e.reversed_by_entry_id) {
+      await reverseEntryTx(
+        tx,
+        orgId,
+        a,
+        e.id,
+        { date: date ?? undefined, allowDocument: true, memo: `Void ${e.memo ?? "payment"}` },
+        reversalOpts(a),
+      );
+    }
+  } else if (es === "pending_review") {
+    await rejectEntryTx(tx, orgId, a, p.entryId!, "Payment voided");
+    await tx
+      .update(org.reviewItems)
+      .set({
+        status: "rejected",
+        decidedBy: a.userId,
+        decidedAt: new Date().toISOString(),
+        decisionNote: "Payment voided",
+      })
+      .where(and(eq(org.reviewItems.itemId, p.entryId!), eq(org.reviewItems.status, "pending")));
+  }
+  await tx.update(org.payments).set({ voidedAt: new Date().toISOString() }).where(eq(org.payments.id, id));
+  // Unlink any bank transaction matched to this payment so it can be reviewed again.
+  if (p.entryId) {
+    await tx
+      .update(org.bankTransactions)
+      .set({ status: "new", matchedEntryId: null, reviewItemId: null })
+      .where(eq(org.bankTransactions.matchedEntryId, p.entryId));
+  }
+  const type: DocType = p.direction === "received" ? "invoice" : "bill";
+  for (const x of await tx
+    .select()
+    .from(org.paymentApplications)
+    .where(eq(org.paymentApplications.paymentId, id))
+    .all()) {
+    await recomputeDocTx(tx, type, x.documentId);
+  }
+  await appendAudit(tx, orgId, a, { action: "payment.void", targetType: "payment", targetId: id });
+}
+
+/** Open invoices (bills) of a contact, oldest first, for the payment form. */
+export async function openDocuments(db: Reader, type: DocType, contactId?: string) {
+  if (type === "invoice") {
+    const rows = await db
+      .select()
+      .from(org.invoices)
+      .where(
+        and(
+          inArray(org.invoices.status, ["sent", "partial"]),
+          contactId ? eq(org.invoices.customerId, contactId) : undefined,
+        ),
+      )
+      .orderBy(asc(org.invoices.dueDate))
+      .all();
+    return Promise.all(rows.map((r) => invoiceView(db, r)));
+  }
+  const rows = await db
+    .select()
+    .from(org.bills)
+    .where(
+      and(
+        inArray(org.bills.status, ["open", "partial"]),
+        contactId ? eq(org.bills.vendorId, contactId) : undefined,
+      ),
+    )
+    .orderBy(asc(org.bills.dueDate))
+    .all();
+  return Promise.all(rows.map((r) => billView(db, r)));
+}
+
+/**
+ * Record a customer or vendor payment straight from a bank transaction (SPEC §8.3): the payment
+ * moves through the bank's ledger account on the transaction date, and the transaction is linked.
+ */
+export async function payFromBankTxnTx(
+  tx: OrgTx,
+  orgId: string,
+  a: ActorInfo,
+  txnId: string,
+  input: {
+    contact_id: string;
+    applications: { document_id: string; amount: number }[];
+    memo?: string | null;
+    lock_override_note?: string | null;
+  },
+) {
+  const t = await mustGetBankTxn(tx, txnId);
+  assertReviewable(t);
+  const bank = await mustGetBankAccount(tx, t.bankAccountId);
+  const out = await recordPaymentTx(tx, orgId, a, {
+    direction: t.amount > 0 ? "received" : "sent",
+    contact_id: input.contact_id,
+    date: t.date,
+    amount: Math.abs(t.amount),
+    account_id: bank.ledgerAccountId,
+    memo: input.memo ?? t.description,
+    reference: null,
+    method: "bank",
+    applications: input.applications,
+    lock_override_note: input.lock_override_note ?? null,
+  });
+  const posted = out.result.entry.status === "posted";
+  await tx
+    .update(org.bankTransactions)
+    .set({
+      status: posted ? "matched" : "new",
+      matchedEntryId: out.result.entry.id,
+      reviewItemId: out.result.reviewItemId,
+    })
+    .where(eq(org.bankTransactions.id, t.id));
+  return { ...out, transaction: bankTxnView(await mustGetBankTxn(tx, t.id)) };
+}
+
+// ----------------------------------------------------------------------------- recurring invoices
+
+export type RecurringRow = typeof org.recurringInvoices.$inferSelect;
+export interface RecurringInput {
+  customer_id: string;
+  name: string;
+  frequency: RecurringRow["frequency"];
+  next_date: string;
+  end_date?: string | null;
+  due_days?: number;
+  auto_send?: boolean;
+  is_active?: boolean;
+  template: { memo?: string | null; terms?: string | null; lines: DocLineInput[] };
+}
+
+export function recurringView(r: RecurringRow) {
+  return {
+    id: r.id,
+    customer_id: r.customerId,
+    name: r.name,
+    frequency: r.frequency,
+    next_date: r.nextDate,
+    end_date: r.endDate,
+    due_days: r.dueDays,
+    auto_send: r.autoSend,
+    is_active: r.isActive,
+    template: JSON.parse(r.templateJson) as RecurringInput["template"],
+    created_at: r.createdAt,
+  };
+}
+
+export function advanceDate(d: string, f: RecurringRow["frequency"]) {
+  switch (f) {
+    case "weekly":
+      return addDays(d, 7);
+    case "monthly":
+      return addMonths(d, 1);
+    case "quarterly":
+      return addMonths(d, 3);
+    case "yearly":
+      return addMonths(d, 12);
+  }
+}
+
+export async function saveRecurringTx(
+  tx: OrgTx,
+  orgId: string,
+  a: ActorInfo,
+  input: RecurringInput,
+  id?: string,
+) {
+  await mustGetContact(tx, input.customer_id);
+  await checkDocLines(tx, input.template.lines, "invoice");
+  const values = {
+    customerId: input.customer_id,
+    name: input.name,
+    frequency: input.frequency,
+    nextDate: input.next_date,
+    endDate: input.end_date ?? null,
+    dueDays: input.due_days ?? 30,
+    autoSend: input.auto_send ?? false,
+    isActive: input.is_active ?? true,
+    templateJson: JSON.stringify(input.template),
+  };
+  const rid = id ?? newId();
+  if (id) {
+    const before = await tx
+      .select()
+      .from(org.recurringInvoices)
+      .where(eq(org.recurringInvoices.id, id))
+      .get();
+    if (!before) throw notFound("Recurring invoice");
+    await tx.update(org.recurringInvoices).set(values).where(eq(org.recurringInvoices.id, id));
+  } else {
+    await tx.insert(org.recurringInvoices).values({ id: rid, ...values });
+  }
+  const row = (await tx.select().from(org.recurringInvoices).where(eq(org.recurringInvoices.id, rid)).get())!;
+  await appendAudit(tx, orgId, a, {
+    action: id ? "recurring_invoice.update" : "recurring_invoice.create",
+    targetType: "recurring_invoice",
+    targetId: rid,
+    after: recurringView(row),
+  });
+  return row;
+}
+
+/** Create the invoices that are due from recurring templates. Returns invoices to email (auto-send). */
+export async function runRecurringTx(tx: OrgTx, orgId: string, asOf = today()) {
+  const system: ActorInfo = { actor: "system", role: "owner", userId: null };
+  const due = await tx
+    .select()
+    .from(org.recurringInvoices)
+    .where(and(eq(org.recurringInvoices.isActive, true), lte(org.recurringInvoices.nextDate, asOf)))
+    .all();
+  const created: { invoiceId: string; autoSend: boolean }[] = [];
+  for (const r of due) {
+    let next = r.nextDate;
+    const tpl = JSON.parse(r.templateJson) as RecurringInput["template"];
+    // Catch up at most 12 periods per run.
+    for (let i = 0; i < 12 && next <= asOf && (!r.endDate || next <= r.endDate); i++) {
+      const inv = await createInvoiceTx(
+        tx,
+        orgId,
+        system,
+        {
+          customer_id: r.customerId,
+          issue_date: next,
+          due_date: addDays(next, r.dueDays),
+          terms: tpl.terms ?? null,
+          memo: tpl.memo ?? null,
+          lines: tpl.lines,
+        },
+        { recurringId: r.id },
+      );
+      if (r.autoSend) await finalizeInvoiceTx(tx, orgId, system, inv.id);
+      created.push({ invoiceId: inv.id, autoSend: r.autoSend });
+      next = advanceDate(next, r.frequency);
+    }
+    const ended = Boolean(r.endDate && next > r.endDate);
+    await tx
+      .update(org.recurringInvoices)
+      .set({ nextDate: next, isActive: !ended })
+      .where(eq(org.recurringInvoices.id, r.id));
+  }
+  return created;
+}
+
+// ----------------------------------------------------------------------------- hooks
+
+async function onDocEntry(
+  tx: OrgTx,
+  type: DocType,
+  entryId: string,
+  sourceId: string | null,
+  rejected: boolean,
+) {
+  if (!sourceId) return;
+  const table = type === "invoice" ? org.invoices : org.bills;
+  const doc = (await tx.select().from(table).where(eq(table.id, sourceId)).get()) as
+    | InvoiceRow
+    | BillRow
+    | undefined;
+  if (!doc) return;
+  if (rejected) {
+    if (doc.entryId === entryId) await tx.update(table).set({ entryId: null }).where(eq(table.id, doc.id));
+  } else if (!doc.entryId) {
+    await tx.update(table).set({ entryId }).where(eq(table.id, doc.id));
+  }
+  await recomputeDocTx(tx, type, doc.id);
+}
+
+async function onPaymentEntry(tx: OrgTx, entryId: string, sourceId: string | null, rejected: boolean) {
+  if (!sourceId) return;
+  const p = await tx.select().from(org.payments).where(eq(org.payments.id, sourceId)).get();
+  if (!p) return;
+  if (rejected && !p.voidedAt)
+    await tx
+      .update(org.payments)
+      .set({ voidedAt: new Date().toISOString() })
+      .where(eq(org.payments.id, p.id));
+  if (!rejected && !p.entryId)
+    await tx.update(org.payments).set({ entryId }).where(eq(org.payments.id, p.id));
+  const type: DocType = p.direction === "received" ? "invoice" : "bill";
+  for (const x of await tx
+    .select()
+    .from(org.paymentApplications)
+    .where(eq(org.paymentApplications.paymentId, p.id))
+    .all()) {
+    await recomputeDocTx(tx, type, x.documentId);
+  }
+}
+
+// Reversals carry the document's source type; they don't change the document (void does that).
+for (const [src, type] of [
+  ["invoice", "invoice"],
+  ["bill", "bill"],
+] as const) {
+  onEntryPosted(src, (tx, _o, e) =>
+    e.reverses_entry_id ? Promise.resolve() : onDocEntry(tx, type, e.id, e.source_id, false),
+  );
+  onEntryRejected(src, (tx, _o, e) =>
+    e.reverses_entry_id ? Promise.resolve() : onDocEntry(tx, type, e.id, e.source_id, true),
+  );
+}
+for (const src of ["invoice_payment", "bill_payment"]) {
+  onEntryPosted(src, (tx, _o, e) =>
+    e.reverses_entry_id ? Promise.resolve() : onPaymentEntry(tx, e.id, e.source_id, false),
+  );
+  onEntryRejected(src, (tx, _o, e) =>
+    e.reverses_entry_id ? Promise.resolve() : onPaymentEntry(tx, e.id, e.source_id, true),
+  );
+}

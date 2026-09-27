@@ -1,0 +1,30 @@
+{
+  "name": "@cosimo/web",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "gen:api": "bun ../server/scripts/dump-openapi.ts 2>/dev/null > openapi.json && openapi-typescript openapi.json -o src/api/schema.d.ts && rm openapi.json"
+  },
+  "dependencies": {
+    "@cosimo/core": "workspace:*",
+    "@cosimo/shared": "workspace:*",
+    "@tanstack/react-query": "^5.103.2",
+    "@tanstack/react-router": "^1.170.39",
+    "openapi-fetch": "^0.17.0",
+    "react": "^19.3.0",
+    "react-dom": "^19.3.0"
+  },
+  "devDependencies": {
+    "@tailwindcss/vite": "^4.3.3",
+    "@types/react": "^19",
+    "@types/react-dom": "^19",
+    "@vitejs/plugin-react": "^6.1.1",
+    "openapi-typescript": "^7.13.0",
+    "tailwindcss": "^4.3.3",
+    "vite": "^8.3.1",
+    "typescript": "^5.9.3"
+  }
+}

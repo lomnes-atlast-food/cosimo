@@ -1,0 +1,21 @@
+# Keep the build context small and free of local state/secrets.
+**/node_modules
+**/dist
+.git
+.github
+**/test-results
+**/playwright-report
+**/coverage
+**/.env*
+!**/.env.example
+**/*.db
+**/*.db-*
+**/*.db.*
+**/data
+.cosimo
+**/*.tsbuildinfo
+**/*.bun-build
+**/.DS_Store
+graphify-out
+Dockerfile
+.dockerignore

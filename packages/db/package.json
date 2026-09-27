@@ -1,0 +1,23 @@
+{
+  "name": "@cosimo/db",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts",
+    "./*": "./src/*.ts"
+  },
+  "scripts": {
+    "generate": "drizzle-kit generate --config drizzle.system.config.ts && drizzle-kit generate --config drizzle.org.config.ts && bun scripts/gen-migrations.ts",
+    "gen:migrations": "bun scripts/gen-migrations.ts"
+  },
+  "dependencies": {
+    "@cosimo/shared": "workspace:*",
+    "@libsql/client": "^0.18.0",
+    "drizzle-orm": "^0.45.3",
+    "ulid": "^3.0.2"
+  },
+  "devDependencies": {
+    "drizzle-kit": "^0.31.11"
+  }
+}

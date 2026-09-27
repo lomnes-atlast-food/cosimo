@@ -1,0 +1,30 @@
+﻿Account List
+Northwind Studio LLC
+
+Account #,Account,Type,Detail Type,Description,Balance
+1000,Business Checking,Bank,Checking,Main operating account,"12,345.67"
+1200,Accounts Receivable (A/R),Accounts receivable (A/R),Accounts Receivable (A/R),,"1,200.00"
+1300,Undeposited Funds,Other Current Assets,Undeposited Funds,,0.00
+1500,Computer Equipment,Fixed Assets,Machinery & Equipment,,"2,400.00"
+1590,Accumulated Depreciation,Fixed Assets,Accumulated Depreciation,,-400.00
+2000,Accounts Payable (A/P),Accounts payable (A/P),Accounts Payable (A/P),,450.00
+2100,Business Visa,Credit Card,Credit Card,Company card ending 4242,-320.00
+2200,Sales Tax Payable,Other Current Liabilities,Sales Tax Payable,,0.00
+2700,SBA Loan,Long Term Liabilities,Notes Payable,,"10,000.00"
+3000,Opening Balance Equity,Equity,Opening Balance Equity,,0.00
+3100,Owner's Investment,Equity,Owner's Equity,,"5,000.00"
+3200,Owner's Draw,Equity,Owner draws,,
+3900,Retained Earnings,Equity,Retained Earnings,,
+4000,Design Income,Income,Service/Fee Income,Branding and web design,"2,750.00"
+4900,Interest Earned,Other Income,Interest Earned,,
+5000,Stock Photography,Cost of Goods Sold,Supplies & Materials - COGS,,320.00
+6300,Bank Charges,Expenses,Bank Charges,,15.00
+6130,Rent,Expenses,Rent or Lease of Buildings,,
+6190,Utilities,Expenses,Utilities,,
+,Utilities:Internet,Expenses,Utilities,Fiber internet for the studio,89.99
+6100,Software Subscriptions,Expenses,Other Miscellaneous Service Cost,,
+6900,Penalties,Other Expense,Penalties & Settlements,,
+6999,Uncategorized Expense,Expenses,Other Miscellaneous Service Cost,,
+TOTAL,,,,,
+
+Friday, March 06, 2026 09:14 AM GMT-08:00

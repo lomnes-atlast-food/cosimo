@@ -1,0 +1,10 @@
+{
+  "target": "local",
+  "admin_email": "owner@example.com",
+  "admin_name": "Sam Owner",
+  "admin_auth": "claim_link",
+  "org_name": "Sam Consulting LLC",
+  "entity_type": "single_member_llc",
+  "service": false,
+  "sample_data": true
+}

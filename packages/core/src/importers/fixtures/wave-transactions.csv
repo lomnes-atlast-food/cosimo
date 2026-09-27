@@ -1,0 +1,21 @@
+Transaction ID,Transaction Date,Account Name,Transaction Description,Transaction Line Description,Amount (One column),Debit Amount (Two Column Approach),Credit Amount (Two Column Approach),Other Accounts for this Transaction,Customer,Vendor,Invoice Number,Bill Number,Notes / Memo,Amount Before Sales Tax,Sales Tax Amount,Sales Tax Name,Transaction Date Added,Transaction Date Last Modified,Account Group,Account Type,Account ID
+1001,2026-01-02,Business Checking,Owner investment,,5000.00,5000.00,,Owner Investment,,,,,,,,,2026-01-02,2026-01-02,Assets,Cash and Bank,A100
+1001,2026-01-02,Owner Investment,Owner investment,,-5000.00,,5000.00,Business Checking,,,,,,,,,2026-01-02,2026-01-02,Equity,Owner Investment / Drawings,E300
+1002,2026-01-05,Accounts Receivable,Invoice 1001,Brand identity package,2750.00,2750.00,,Sales,Acme Robotics,,1001,,Net 15,2750.00,0.00,,2026-01-05,2026-01-05,Assets,Accounts Receivable,A120
+1002,2026-01-05,Sales,Invoice 1001,Brand identity package,-2750.00,,2750.00,Accounts Receivable,Acme Robotics,,1001,,Net 15,2750.00,0.00,,2026-01-05,2026-01-05,Income,Income,I400
+1003,2026-01-12,Office Supplies,Bill 77,Stock photo license pack,320.00,320.00,,Accounts Payable,,Pixel Supply Co,,77,,320.00,0.00,,2026-01-12,2026-01-12,Expenses,Operating Expense,X610
+1003,2026-01-12,Accounts Payable,Bill 77,Stock photo license pack,-320.00,,320.00,Office Supplies,,Pixel Supply Co,,77,,320.00,0.00,,2026-01-12,2026-01-12,Liabilities,Accounts Payable,L200
+1004,2026-01-15,Business Checking,Payment from Acme Robotics,,2750.00,2750.00,,Accounts Receivable,Acme Robotics,,,,,,,,2026-01-15,2026-01-15,Assets,Cash and Bank,A100
+1004,2026-01-15,Accounts Receivable,Payment from Acme Robotics,,-2750.00,,2750.00,Business Checking,Acme Robotics,,,,,,,,2026-01-15,2026-01-15,Assets,Accounts Receivable,A120
+1005,2026-01-20,Accounts Payable,Payment to Pixel Supply Co,,320.00,320.00,,Business Checking,,Pixel Supply Co,,,,,,,2026-01-20,2026-01-20,Liabilities,Accounts Payable,L200
+1005,2026-01-20,Business Checking,Payment to Pixel Supply Co,,-320.00,,320.00,Accounts Payable,,Pixel Supply Co,,,,,,,2026-01-20,2026-01-20,Assets,Cash and Bank,A100
+1006,2026-01-31,Bank Service Charges,Monthly service fee,,15.00,15.00,,Business Checking,,,,,,,,,2026-01-31,2026-01-31,Expenses,Operating Expense,X650
+1006,2026-01-31,Business Checking,Monthly service fee,,-15.00,,15.00,Bank Service Charges,,,,,,,,,2026-01-31,2026-01-31,Assets,Cash and Bank,A100
+1007,2026-02-03,Office Supplies,Staples and Figma and lunch,Printer paper,45.10,45.10,,Visa Card,,Downtown Office Mart,,,,,,,2026-02-03,2026-02-04,Expenses,Operating Expense,X610
+1007,2026-02-03,Software,Staples and Figma and lunch,Figma seat,29.99,29.99,,Visa Card,,Downtown Office Mart,,,,,,,2026-02-03,2026-02-04,Expenses,Operating Expense,X620
+1007,2026-02-03,Meals and Entertainment,Staples and Figma and lunch,Client lunch,60.00,60.00,,Visa Card,,Downtown Office Mart,,,,,,,2026-02-03,2026-02-04,Expenses,Operating Expense,X630
+1007,2026-02-03,Visa Card,Staples and Figma and lunch,,-135.09,,135.09,"Office Supplies, Software, Meals and Entertainment",,Downtown Office Mart,,,,,,,2026-02-03,2026-02-04,Liabilities,Credit Card,L210
+1008,2026-02-10,Owner Drawings,Owner draw,,500.00,500.00,,Business Checking,,,,,,,,,2026-02-10,2026-02-10,Equity,Owner Investment / Drawings,E310
+1008,2026-02-10,Business Checking,Owner draw,,-500.00,,500.00,Owner Drawings,,,,,,,,,2026-02-10,2026-02-10,Assets,Cash and Bank,A100
+1009,2026-02-12,Interest Income,Interest paid,,-1.25,,1.25,Business Checking,,,,,,,,,2026-02-12,2026-02-12,Income,Other Income,I490
+1009,2026-02-12,Business Checking,Interest paid,,1.25,1.25,,Interest Income,,,,,,,,,2026-02-12,2026-02-12,Assets,Cash and Bank,A100

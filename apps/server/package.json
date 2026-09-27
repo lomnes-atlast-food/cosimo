@@ -1,0 +1,33 @@
+{
+  "name": "@cosimo/server",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "bin": {
+    "cosimo": "./src/cli/main.ts"
+  },
+  "scripts": {
+    "dev": "bun --watch src/cli/main.ts serve",
+    "build:binary": "bun scripts/build-binary.ts"
+  },
+  "dependencies": {
+    "@clack/prompts": "^1.8.1",
+    "@cosimo/core": "workspace:*",
+    "@cosimo/db": "workspace:*",
+    "@cosimo/shared": "workspace:*",
+    "@hono/zod-openapi": "^1.6.3",
+    "@libsql/client": "^0.18.0",
+    "drizzle-orm": "^0.45.3",
+    "fflate": "^0.8.3",
+    "hono": "^4.13.9",
+    "nodemailer": "^10.0.10",
+    "otpauth": "^9.5.2",
+    "pdf-lib": "^1.17.1",
+    "smol-toml": "^1.9.0",
+    "ulid": "^3.0.2",
+    "zod": "^4.6.5"
+  },
+  "devDependencies": {
+    "@types/nodemailer": "^8.0.2"
+  }
+}

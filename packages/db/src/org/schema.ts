@@ -1,0 +1,600 @@
+import { sql } from "drizzle-orm";
+import { check, index, integer, primaryKey, sqliteTable, text, uniqueIndex } from "drizzle-orm/sqlite-core";
+
+const now = sql`(strftime('%Y-%m-%dT%H:%M:%fZ','now'))`;
+
+// ---------------------------------------------------------------------------
+// Settings and structure
+// ---------------------------------------------------------------------------
+
+export const orgSettings = sqliteTable(
+  "org_settings",
+  {
+    id: integer("id").primaryKey().default(1),
+    orgId: text("org_id").notNull(),
+    legalName: text("legal_name").notNull(),
+    dba: text("dba"),
+    entityType: text("entity_type").notNull().default("single_member_llc"),
+    taxIdLast4: text("tax_id_last4"),
+    addressJson: text("address_json"),
+    baseCurrency: text("base_currency").notNull().default("USD"),
+    fiscalYearStartMonth: integer("fiscal_year_start_month").notNull().default(1),
+    defaultBasis: text("default_basis", { enum: ["cash", "accrual"] })
+      .notNull()
+      .default("cash"),
+    booksStartDate: text("books_start_date"),
+    softLockDate: text("soft_lock_date"),
+    hardLockDate: text("hard_lock_date"),
+    invoicePrefix: text("invoice_prefix").notNull().default("INV-"),
+    nextInvoiceNumber: integer("next_invoice_number").notNull().default(1001),
+    logoAttachmentId: text("logo_attachment_id"),
+    /** Entries at or above this absolute amount (cents) require review from any actor. */
+    reviewThreshold: integer("review_threshold").notNull().default(250000),
+    invoiceColor: text("invoice_color").notNull().default("#1f3a5f"),
+    paymentInstructions: text("payment_instructions"),
+    defaultTerms: text("default_terms").notNull().default("Net 30"),
+    remindersEnabled: integer("reminders_enabled", { mode: "boolean" }).notNull().default(false),
+    plaidEnv: text("plaid_env"),
+    plaidClientId: text("plaid_client_id"),
+    plaidSecretEnc: text("plaid_secret_enc"),
+    createdAt: text("created_at").notNull().default(now),
+  },
+  (t) => [check("org_settings_singleton", sql`${t.id} = 1`)],
+);
+
+export const accounts = sqliteTable(
+  "accounts",
+  {
+    id: text("id").primaryKey(),
+    code: text("code").notNull(),
+    name: text("name").notNull(),
+    type: text("type", { enum: ["asset", "liability", "equity", "income", "expense"] }).notNull(),
+    subtype: text("subtype").notNull().default("other"),
+    parentId: text("parent_id"),
+    taxLine: text("tax_line"),
+    description: text("description"),
+    isActive: integer("is_active", { mode: "boolean" }).notNull().default(true),
+    isSystem: integer("is_system", { mode: "boolean" }).notNull().default(false),
+    /** stable key for system accounts, e.g. "ar", "ap", "retained_earnings" */
+    systemKey: text("system_key"),
+    currency: text("currency").notNull().default("USD"),
+    createdAt: text("created_at").notNull().default(now),
+  },
+  (t) => [
+    uniqueIndex("accounts_code_uq").on(t.code),
+    uniqueIndex("accounts_system_key_uq").on(t.systemKey),
+    check("accounts_type_ck", sql`${t.type} in ('asset','liability','equity','income','expense')`),
+  ],
+);
+
+// ---------------------------------------------------------------------------
+// Ledger
+// ---------------------------------------------------------------------------
+
+export const journalEntries = sqliteTable(
+  "journal_entries",
+  {
+    id: text("id").primaryKey(),
+    date: text("date").notNull(),
+    memo: text("memo"),
+    status: text("status", { enum: ["draft", "pending_review", "posted", "rejected"] })
+      .notNull()
+      .default("draft"),
+    sourceType: text("source_type").notNull().default("manual"),
+    sourceId: text("source_id"),
+    reversesEntryId: text("reverses_entry_id"),
+    reversedByEntryId: text("reversed_by_entry_id"),
+    createdBy: text("created_by"),
+    createdByActor: text("created_by_actor", { enum: ["user", "api_token", "mcp", "rule", "system"] })
+      .notNull()
+      .default("user"),
+    createdAt: text("created_at").notNull().default(now),
+    postedAt: text("posted_at"),
+    postedBy: text("posted_by"),
+    lockOverrideNote: text("lock_override_note"),
+    chainSeq: integer("chain_seq"),
+    prevHash: text("prev_hash"),
+    entryHash: text("entry_hash"),
+  },
+  (t) => [
+    uniqueIndex("journal_entries_chain_seq_uq").on(t.chainSeq),
+    index("journal_entries_date_idx").on(t.date),
+    index("journal_entries_status_idx").on(t.status),
+    index("journal_entries_source_idx").on(t.sourceType, t.sourceId),
+    check("journal_entries_status_ck", sql`${t.status} in ('draft','pending_review','posted','rejected')`),
+  ],
+);
+
+export const journalLines = sqliteTable(
+  "journal_lines",
+  {
+    id: text("id").primaryKey(),
+    entryId: text("entry_id")
+      .notNull()
+      .references(() => journalEntries.id),
+    accountId: text("account_id")
+      .notNull()
+      .references(() => accounts.id),
+    amount: integer("amount").notNull(),
+    currency: text("currency").notNull(),
+    description: text("description"),
+    contactId: text("contact_id"),
+    lineOrder: integer("line_order").notNull().default(0),
+  },
+  (t) => [
+    index("journal_lines_entry_idx").on(t.entryId),
+    index("journal_lines_account_idx").on(t.accountId),
+    check("journal_lines_amount_int", sql`typeof(${t.amount}) = 'integer'`),
+  ],
+);
+
+/** Transient row written inside a posting transaction so triggers know who is posting. */
+export const postingContext = sqliteTable("posting_context", {
+  id: integer("id").primaryKey().default(1),
+  actor: text("actor").notNull(),
+  role: text("role").notNull(),
+  note: text("note"),
+});
+
+// ---------------------------------------------------------------------------
+// Contacts, receivables, payables
+// ---------------------------------------------------------------------------
+
+export const contacts = sqliteTable(
+  "contacts",
+  {
+    id: text("id").primaryKey(),
+    kind: text("kind", { enum: ["customer", "vendor", "both"] }).notNull(),
+    name: text("name").notNull(),
+    email: text("email"),
+    phone: text("phone"),
+    addressJson: text("address_json"),
+    taxIdLast4: text("tax_id_last4"),
+    is1099Vendor: integer("is_1099_vendor", { mode: "boolean" }).notNull().default(false),
+    defaultAccountId: text("default_account_id"),
+    notes: text("notes"),
+    createdAt: text("created_at").notNull().default(now),
+    archivedAt: text("archived_at"),
+  },
+  (t) => [index("contacts_name_idx").on(t.name)],
+);
+
+export const invoices = sqliteTable(
+  "invoices",
+  {
+    id: text("id").primaryKey(),
+    number: text("number").notNull(),
+    customerId: text("customer_id")
+      .notNull()
+      .references(() => contacts.id),
+    issueDate: text("issue_date").notNull(),
+    dueDate: text("due_date").notNull(),
+    status: text("status", { enum: ["draft", "sent", "partial", "paid", "void"] })
+      .notNull()
+      .default("draft"),
+    currency: text("currency").notNull().default("USD"),
+    subtotal: integer("subtotal").notNull().default(0),
+    total: integer("total").notNull().default(0),
+    amountPaid: integer("amount_paid").notNull().default(0),
+    memo: text("memo"),
+    terms: text("terms"),
+    entryId: text("entry_id"),
+    recurringId: text("recurring_id"),
+    createdBy: text("created_by"),
+    createdByActor: text("created_by_actor").notNull().default("user"),
+    createdAt: text("created_at").notNull().default(now),
+    sentAt: text("sent_at"),
+    lastReminderAt: text("last_reminder_at"),
+    voidedAt: text("voided_at"),
+  },
+  (t) => [uniqueIndex("invoices_number_uq").on(t.number), index("invoices_customer_idx").on(t.customerId)],
+);
+
+export const invoiceLines = sqliteTable(
+  "invoice_lines",
+  {
+    id: text("id").primaryKey(),
+    invoiceId: text("invoice_id")
+      .notNull()
+      .references(() => invoices.id),
+    description: text("description").notNull(),
+    quantityMilli: integer("quantity_milli").notNull().default(1000),
+    unitPrice: integer("unit_price").notNull(),
+    amount: integer("amount").notNull(),
+    incomeAccountId: text("income_account_id")
+      .notNull()
+      .references(() => accounts.id),
+    lineOrder: integer("line_order").notNull().default(0),
+  },
+  (t) => [index("invoice_lines_invoice_idx").on(t.invoiceId)],
+);
+
+export const recurringInvoices = sqliteTable("recurring_invoices", {
+  id: text("id").primaryKey(),
+  customerId: text("customer_id")
+    .notNull()
+    .references(() => contacts.id),
+  name: text("name").notNull(),
+  frequency: text("frequency", { enum: ["weekly", "monthly", "quarterly", "yearly"] }).notNull(),
+  nextDate: text("next_date").notNull(),
+  endDate: text("end_date"),
+  dueDays: integer("due_days").notNull().default(30),
+  templateJson: text("template_json").notNull(),
+  autoSend: integer("auto_send", { mode: "boolean" }).notNull().default(false),
+  isActive: integer("is_active", { mode: "boolean" }).notNull().default(true),
+  createdAt: text("created_at").notNull().default(now),
+});
+
+export const bills = sqliteTable(
+  "bills",
+  {
+    id: text("id").primaryKey(),
+    vendorId: text("vendor_id")
+      .notNull()
+      .references(() => contacts.id),
+    billNumber: text("bill_number"),
+    issueDate: text("issue_date").notNull(),
+    dueDate: text("due_date").notNull(),
+    status: text("status", { enum: ["draft", "open", "partial", "paid", "void"] })
+      .notNull()
+      .default("open"),
+    currency: text("currency").notNull().default("USD"),
+    total: integer("total").notNull().default(0),
+    amountPaid: integer("amount_paid").notNull().default(0),
+    memo: text("memo"),
+    entryId: text("entry_id"),
+    createdAt: text("created_at").notNull().default(now),
+    voidedAt: text("voided_at"),
+  },
+  (t) => [index("bills_vendor_idx").on(t.vendorId)],
+);
+
+export const billLines = sqliteTable(
+  "bill_lines",
+  {
+    id: text("id").primaryKey(),
+    billId: text("bill_id")
+      .notNull()
+      .references(() => bills.id),
+    description: text("description").notNull(),
+    amount: integer("amount").notNull(),
+    expenseAccountId: text("expense_account_id")
+      .notNull()
+      .references(() => accounts.id),
+    lineOrder: integer("line_order").notNull().default(0),
+  },
+  (t) => [index("bill_lines_bill_idx").on(t.billId)],
+);
+
+export const payments = sqliteTable(
+  "payments",
+  {
+    id: text("id").primaryKey(),
+    direction: text("direction", { enum: ["received", "sent"] }).notNull(),
+    contactId: text("contact_id")
+      .notNull()
+      .references(() => contacts.id),
+    date: text("date").notNull(),
+    amount: integer("amount").notNull(),
+    bankAccountId: text("bank_account_id")
+      .notNull()
+      .references(() => accounts.id),
+    method: text("method"),
+    reference: text("reference"),
+    memo: text("memo"),
+    entryId: text("entry_id"),
+    createdAt: text("created_at").notNull().default(now),
+    voidedAt: text("voided_at"),
+  },
+  (t) => [index("payments_contact_idx").on(t.contactId), check("payments_amount_pos", sql`${t.amount} > 0`)],
+);
+
+export const paymentApplications = sqliteTable(
+  "payment_applications",
+  {
+    paymentId: text("payment_id")
+      .notNull()
+      .references(() => payments.id),
+    documentType: text("document_type", { enum: ["invoice", "bill"] }).notNull(),
+    documentId: text("document_id").notNull(),
+    amount: integer("amount").notNull(),
+    appliedDate: text("applied_date"),
+  },
+  (t) => [
+    primaryKey({ columns: [t.paymentId, t.documentType, t.documentId] }),
+    index("payment_applications_doc_idx").on(t.documentType, t.documentId),
+    check("payment_applications_amount_pos", sql`${t.amount} > 0`),
+  ],
+);
+
+// ---------------------------------------------------------------------------
+// Banking
+// ---------------------------------------------------------------------------
+
+export const bankConnections = sqliteTable("bank_connections", {
+  id: text("id").primaryKey(),
+  provider: text("provider", { enum: ["plaid"] })
+    .notNull()
+    .default("plaid"),
+  itemId: text("item_id").notNull(),
+  accessTokenEnc: text("access_token_enc").notNull(),
+  institutionName: text("institution_name"),
+  institutionId: text("institution_id"),
+  status: text("status", { enum: ["active", "needs_reauth", "error", "disconnected"] })
+    .notNull()
+    .default("active"),
+  errorCode: text("error_code"),
+  syncCursor: text("sync_cursor"),
+  lastSyncedAt: text("last_synced_at"),
+  createdAt: text("created_at").notNull().default(now),
+});
+
+export const bankAccounts = sqliteTable(
+  "bank_accounts",
+  {
+    id: text("id").primaryKey(),
+    connectionId: text("connection_id"),
+    ledgerAccountId: text("ledger_account_id")
+      .notNull()
+      .references(() => accounts.id),
+    providerAccountId: text("provider_account_id"),
+    name: text("name").notNull(),
+    mask: text("mask"),
+    kind: text("kind", { enum: ["checking", "savings", "credit_card", "other"] })
+      .notNull()
+      .default("checking"),
+    currency: text("currency").notNull().default("USD"),
+    isActive: integer("is_active", { mode: "boolean" }).notNull().default(true),
+    createdAt: text("created_at").notNull().default(now),
+  },
+  (t) => [uniqueIndex("bank_accounts_ledger_uq").on(t.ledgerAccountId)],
+);
+
+export const importBatches = sqliteTable("import_batches", {
+  id: text("id").primaryKey(),
+  bankAccountId: text("bank_account_id")
+    .notNull()
+    .references(() => bankAccounts.id),
+  source: text("source", { enum: ["plaid", "csv", "ofx", "qfx"] }).notNull(),
+  filename: text("filename"),
+  fileHash: text("file_hash"),
+  rowCount: integer("row_count").notNull().default(0),
+  importedCount: integer("imported_count").notNull().default(0),
+  duplicateCount: integer("duplicate_count").notNull().default(0),
+  errorCount: integer("error_count").notNull().default(0),
+  createdBy: text("created_by"),
+  createdAt: text("created_at").notNull().default(now),
+});
+
+export const bankTransactions = sqliteTable(
+  "bank_transactions",
+  {
+    id: text("id").primaryKey(),
+    bankAccountId: text("bank_account_id")
+      .notNull()
+      .references(() => bankAccounts.id),
+    providerTransactionId: text("provider_transaction_id"),
+    pendingTransactionId: text("pending_transaction_id"),
+    batchId: text("batch_id"),
+    date: text("date").notNull(),
+    /** Signed from the org's perspective: positive = money into the account. */
+    amount: integer("amount").notNull(),
+    description: text("description").notNull(),
+    normalizedDescription: text("normalized_description").notNull(),
+    payee: text("payee"),
+    isPending: integer("is_pending", { mode: "boolean" }).notNull().default(false),
+    dedupeHash: text("dedupe_hash").notNull(),
+    status: text("status", { enum: ["new", "categorized", "matched", "excluded"] })
+      .notNull()
+      .default("new"),
+    matchedEntryId: text("matched_entry_id"),
+    ruleId: text("rule_id"),
+    suggestionJson: text("suggestion_json"),
+    reviewItemId: text("review_item_id"),
+    createdAt: text("created_at").notNull().default(now),
+  },
+  (t) => [
+    uniqueIndex("bank_tx_provider_uq")
+      .on(t.bankAccountId, t.providerTransactionId)
+      .where(sql`${t.providerTransactionId} is not null`),
+    uniqueIndex("bank_tx_dedupe_uq").on(t.bankAccountId, t.dedupeHash),
+    index("bank_tx_status_idx").on(t.status, t.date),
+    index("bank_tx_account_date_idx").on(t.bankAccountId, t.date),
+  ],
+);
+
+export const csvProfiles = sqliteTable("csv_profiles", {
+  id: text("id").primaryKey(),
+  bankAccountId: text("bank_account_id")
+    .notNull()
+    .unique()
+    .references(() => bankAccounts.id),
+  columnMapJson: text("column_map_json").notNull(),
+  dateFormat: text("date_format").notNull(),
+  amountMode: text("amount_mode", { enum: ["signed", "debit_credit", "amount_type"] }).notNull(),
+  signConvention: text("sign_convention", { enum: ["positive_is_deposit", "positive_is_withdrawal"] })
+    .notNull()
+    .default("positive_is_deposit"),
+  skipRows: integer("skip_rows").notNull().default(0),
+});
+
+export const rules = sqliteTable("rules", {
+  id: text("id").primaryKey(),
+  name: text("name").notNull(),
+  priority: integer("priority").notNull().default(100),
+  conditionsJson: text("conditions_json").notNull(),
+  actionsJson: text("actions_json").notNull(),
+  isActive: integer("is_active", { mode: "boolean" }).notNull().default(true),
+  timesApplied: integer("times_applied").notNull().default(0),
+  createdByActor: text("created_by_actor").notNull().default("user"),
+  createdAt: text("created_at").notNull().default(now),
+});
+
+export const reviewItems = sqliteTable(
+  "review_items",
+  {
+    id: text("id").primaryKey(),
+    itemType: text("item_type", {
+      enum: ["journal_entry", "bank_categorization", "rule", "invoice_draft", "import_batch"],
+    }).notNull(),
+    itemId: text("item_id").notNull(),
+    proposedByActor: text("proposed_by_actor").notNull(),
+    proposedById: text("proposed_by_id"),
+    reason: text("reason").notNull(),
+    rationale: text("rationale"),
+    payloadJson: text("payload_json"),
+    originalPayloadJson: text("original_payload_json"),
+    amount: integer("amount"),
+    status: text("status", { enum: ["pending", "approved", "rejected", "expired"] })
+      .notNull()
+      .default("pending"),
+    decidedBy: text("decided_by"),
+    decidedAt: text("decided_at"),
+    decisionNote: text("decision_note"),
+    createdAt: text("created_at").notNull().default(now),
+  },
+  (t) => [index("review_items_status_idx").on(t.status, t.createdAt)],
+);
+
+export const reviewPolicy = sqliteTable("review_policy", {
+  id: text("id").primaryKey(),
+  name: text("name"),
+  actor: text("actor").notNull(),
+  conditionJson: text("condition_json").notNull().default("{}"),
+  action: text("action", { enum: ["auto_approve", "require_review"] }).notNull(),
+  priority: integer("priority").notNull().default(100),
+});
+
+export const reconciliations = sqliteTable("reconciliations", {
+  id: text("id").primaryKey(),
+  bankAccountId: text("bank_account_id")
+    .notNull()
+    .references(() => accounts.id),
+  statementEndDate: text("statement_end_date").notNull(),
+  statementEndingBalance: integer("statement_ending_balance").notNull(),
+  beginningBalance: integer("beginning_balance").notNull().default(0),
+  clearedBalance: integer("cleared_balance").notNull().default(0),
+  status: text("status", { enum: ["in_progress", "completed", "undone"] })
+    .notNull()
+    .default("in_progress"),
+  createdBy: text("created_by"),
+  createdAt: text("created_at").notNull().default(now),
+  completedBy: text("completed_by"),
+  completedAt: text("completed_at"),
+  undoneBy: text("undone_by"),
+  undoneAt: text("undone_at"),
+});
+
+export const reconciliationItems = sqliteTable(
+  "reconciliation_items",
+  {
+    reconciliationId: text("reconciliation_id")
+      .notNull()
+      .references(() => reconciliations.id),
+    journalLineId: text("journal_line_id")
+      .notNull()
+      .references(() => journalLines.id),
+  },
+  (t) => [
+    primaryKey({ columns: [t.reconciliationId, t.journalLineId] }),
+    index("reconciliation_items_line_idx").on(t.journalLineId),
+  ],
+);
+
+// ---------------------------------------------------------------------------
+// Documents and history
+// ---------------------------------------------------------------------------
+
+export const attachments = sqliteTable("attachments", {
+  id: text("id").primaryKey(),
+  storageKey: text("storage_key").notNull(),
+  filename: text("filename").notNull(),
+  mimeType: text("mime_type").notNull(),
+  sizeBytes: integer("size_bytes").notNull(),
+  sha256: text("sha256").notNull(),
+  uploadedBy: text("uploaded_by"),
+  createdAt: text("created_at").notNull().default(now),
+});
+
+export const attachmentLinks = sqliteTable(
+  "attachment_links",
+  {
+    attachmentId: text("attachment_id")
+      .notNull()
+      .references(() => attachments.id),
+    targetType: text("target_type").notNull(),
+    targetId: text("target_id").notNull(),
+  },
+  (t) => [
+    primaryKey({ columns: [t.attachmentId, t.targetType, t.targetId] }),
+    index("attachment_links_target_idx").on(t.targetType, t.targetId),
+  ],
+);
+
+export const auditLog = sqliteTable(
+  "audit_log",
+  {
+    id: text("id").primaryKey(),
+    seq: integer("seq").notNull(),
+    at: text("at").notNull(),
+    userId: text("user_id"),
+    apiTokenId: text("api_token_id"),
+    oauthClientId: text("oauth_client_id"),
+    actor: text("actor").notNull(),
+    action: text("action").notNull(),
+    targetType: text("target_type"),
+    targetId: text("target_id"),
+    beforeJson: text("before_json"),
+    afterJson: text("after_json"),
+    ip: text("ip"),
+    prevHash: text("prev_hash").notNull(),
+    hash: text("hash").notNull(),
+  },
+  (t) => [
+    uniqueIndex("audit_log_seq_uq").on(t.seq),
+    index("audit_log_target_idx").on(t.targetType, t.targetId),
+    index("audit_log_at_idx").on(t.at),
+  ],
+);
+
+export const chainCheckpoints = sqliteTable(
+  "chain_checkpoints",
+  {
+    id: text("id").primaryKey(),
+    chain: text("chain", { enum: ["ledger", "audit"] }).notNull(),
+    seq: integer("seq").notNull(),
+    headHash: text("head_hash").notNull(),
+    reason: text("reason"),
+    createdAt: text("created_at").notNull().default(now),
+    exportedTo: text("exported_to"),
+  },
+  (t) => [index("chain_checkpoints_chain_idx").on(t.chain, t.seq)],
+);
+
+export const comments = sqliteTable(
+  "comments",
+  {
+    id: text("id").primaryKey(),
+    targetType: text("target_type").notNull(),
+    targetId: text("target_id").notNull(),
+    userId: text("user_id").notNull(),
+    body: text("body").notNull(),
+    createdAt: text("created_at").notNull().default(now),
+  },
+  (t) => [index("comments_target_idx").on(t.targetType, t.targetId)],
+);
+
+export const orgNotes = sqliteTable("org_notes", {
+  id: text("id").primaryKey(),
+  kind: text("kind", { enum: ["profile", "note"] }).notNull(),
+  bodyMd: text("body_md").notNull(),
+  authorActor: text("author_actor").notNull(),
+  authorId: text("author_id"),
+  createdAt: text("created_at").notNull().default(now),
+  updatedAt: text("updated_at").notNull().default(now),
+});
+
+export const schemaMeta = sqliteTable("schema_meta", {
+  key: text("key").primaryKey(),
+  value: text("value").notNull(),
+});
