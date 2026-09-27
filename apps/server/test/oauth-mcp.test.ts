@@ -498,7 +498,11 @@ describe("MCP", () => {
     expect(init.body.result.protocolVersion).toBe("2025-06-18");
     expect(init.body.result.serverInfo.name).toBe("cosimo");
     expect((await mcp(token, "notifications/initialized", {}, null)).status).toBe(202);
-    const tools = (await mcp(token, "tools/list")).body.result.tools as { name: string; inputSchema: any }[];
+    const tools = (await mcp(token, "tools/list")).body.result.tools as {
+      name: string;
+      inputSchema: any;
+      annotations: { readOnlyHint: boolean };
+    }[];
     const names = tools.map((t) => t.name);
     for (const n of [
       "list_orgs",
@@ -509,9 +513,14 @@ describe("MCP", () => {
       "create_rule",
       "search_transactions",
       "get_entry",
+      "list_entries",
       "create_manual_entry",
       "list_invoices",
       "create_invoice_draft",
+      "list_bills",
+      "list_bill_payments",
+      "create_bill_draft",
+      "get_cash_snapshot",
       "list_pending_reviews",
       "get_review_item",
       "append_note",
@@ -521,6 +530,8 @@ describe("MCP", () => {
       expect(names.some((n) => n.includes(forbidden))).toBe(false);
     const entryTool = tools.find((t) => t.name === "create_manual_entry")!;
     expect(entryTool.inputSchema.required).toContain("rationale");
+    const billTool = tools.find((t) => t.name === "create_bill_draft")!;
+    expect(billTool.annotations.readOnlyHint).toBe(false);
 
     const res = (await mcp(token, "resources/list")).body.result.resources.map((r: any) => r.uri);
     expect(res).toEqual(["org://profile", "org://notes"]);
@@ -658,6 +669,183 @@ describe("MCP", () => {
     expect(
       (await owner.json("GET", `/api/v1/orgs/${orgId}/invoices/${b.structuredContent.invoice_id}`)).status,
     ).toBe(404);
+  });
+
+  test("bill drafts go to review; approval posts, rejection deletes; a customer-only contact is refused", async () => {
+    const vendor = await owner.json("POST", `/api/v1/orgs/${orgId}/contacts`, {
+      kind: "vendor",
+      name: "Acme Supplies",
+    });
+    const expense = (await call(token, "get_account_balances", {})).structuredContent.accounts.find(
+      (a: any) => a.type === "expense" && a.subtype !== "uncategorized",
+    );
+    const draft = async () =>
+      call(token, "create_bill_draft", {
+        vendor_id: vendor.body.id,
+        issue_date: "2026-05-01",
+        lines: [{ description: "Office supplies", amount: 4200, account: expense.code }],
+        rationale: "Vendor invoice for office supplies",
+      });
+    const a = await draft();
+    expect(a.structuredContent).toMatchObject({ status: "pending_review", total: 4200 });
+    const bill = await owner.json("GET", `/api/v1/orgs/${orgId}/bills/${a.structuredContent.bill_id}`);
+    expect(bill.body.status).toBe("draft");
+    await owner.json(
+      "POST",
+      `/api/v1/orgs/${orgId}/review/${a.structuredContent.review_item_id}/approve`,
+      {},
+    );
+    const done = await owner.json("GET", `/api/v1/orgs/${orgId}/bills/${a.structuredContent.bill_id}`);
+    expect(done.body.status).toBe("open");
+
+    const b = await draft();
+    await owner.json("POST", `/api/v1/orgs/${orgId}/review/${b.structuredContent.review_item_id}/reject`, {
+      note: "no",
+    });
+    expect(
+      (await owner.json("GET", `/api/v1/orgs/${orgId}/bills/${b.structuredContent.bill_id}`)).status,
+    ).toBe(404);
+
+    const custOnly = await owner.json("POST", `/api/v1/orgs/${orgId}/contacts`, {
+      kind: "customer",
+      name: "Customer Only",
+    });
+    const refused = await call(token, "create_bill_draft", {
+      vendor_id: custOnly.body.id,
+      issue_date: "2026-05-01",
+      lines: [{ description: "Office supplies", amount: 100, account: expense.code }],
+      rationale: "Should be refused",
+    });
+    expect(refused.isError).toBe(true);
+
+    // A review policy that auto-approves the draft posts the bill right away.
+    const pol = await owner.json("POST", `/api/v1/orgs/${orgId}/review-policies`, {
+      name: "Small MCP bills",
+      actor: "mcp",
+      condition: { amount_lt: 1000, item_types: ["bill_draft"] },
+      action: "auto_approve",
+    });
+    expect(pol.status).toBe(201);
+    const auto = await call(token, "create_bill_draft", {
+      vendor_id: vendor.body.id,
+      issue_date: "2026-05-01",
+      lines: [{ description: "Stamps", amount: 500, account: expense.code }],
+      rationale: "Small vendor bill",
+    });
+    expect(auto.structuredContent).toMatchObject({ status: "open", review_item_id: null });
+    expect(auto.structuredContent.entry_id).toBeTruthy();
+    const posted = await owner.json("GET", `/api/v1/orgs/${orgId}/bills/${auto.structuredContent.bill_id}`);
+    expect(posted.body.status).toBe("open");
+    await owner.json("DELETE", `/api/v1/orgs/${orgId}/review-policies/${pol.body.id}`);
+  });
+
+  test("list_bills, has_attachment, and list_bill_payments", async () => {
+    const vendor = await owner.json("POST", `/api/v1/orgs/${orgId}/contacts`, {
+      kind: "vendor",
+      name: "Overdue Vendor",
+    });
+    const accounts = (await call(token, "get_account_balances", {})).structuredContent.accounts;
+    const expense = accounts.find((a: any) => a.type === "expense" && a.subtype !== "uncategorized");
+    const cash = accounts.find((a: any) => a.code === "1000");
+    const bill = await owner.json("POST", `/api/v1/orgs/${orgId}/bills`, {
+      vendor_id: vendor.body.id,
+      issue_date: "2020-01-01",
+      due_date: "2020-01-31",
+      lines: [{ description: "Old bill", amount: 900, account_id: expense.id }],
+    });
+    expect(bill.status).toBe(201);
+    const billId = bill.body.bill.id as string;
+
+    const h = await env.ctx.orgs.mustOpen(orgId);
+    const attachmentId = newId();
+    await h.write(async (tx) => {
+      await tx.insert(org.attachments).values({
+        id: attachmentId,
+        storageKey: "x",
+        filename: "receipt.pdf",
+        mimeType: "application/pdf",
+        sizeBytes: 1,
+        sha256: "0".repeat(64),
+      });
+      await tx.insert(org.attachmentLinks).values({ attachmentId, targetType: "bill", targetId: billId });
+    });
+
+    const list = await call(token, "list_bills", { vendor_id: vendor.body.id, overdue: true });
+    const listed = list.structuredContent.bills.find((b: any) => b.id === billId);
+    expect(listed).toMatchObject({ overdue: true, has_attachment: true });
+    expect(listed.lines[0]).toMatchObject({ account_id: expense.id, account_code: expense.code });
+
+    const notOverdue = await call(token, "list_bills", { vendor_id: vendor.body.id, overdue: false });
+    expect(notOverdue.structuredContent.bills.some((b: any) => b.id === billId)).toBe(false);
+
+    const pay = await owner.json("POST", `/api/v1/orgs/${orgId}/payments`, {
+      direction: "sent",
+      contact_id: vendor.body.id,
+      date: "2020-02-01",
+      amount: 900,
+      account_id: cash.id,
+      applications: [{ document_id: billId, amount: 900 }],
+    });
+    expect(pay.status).toBe(201);
+    const payments = await call(token, "list_bill_payments", { vendor_id: vendor.body.id });
+    expect(payments.structuredContent.payments.some((p: any) => p.contact_id === vendor.body.id)).toBe(true);
+  });
+
+  test("get_cash_snapshot returns a dashboard", async () => {
+    const snap = await call(token, "get_cash_snapshot", {});
+    expect(snap.structuredContent).toMatchObject({
+      as_of: expect.any(String),
+      cash: { total: expect.any(Number) },
+      bills: { overdue: { count: expect.any(Number) }, due_soon: { count: expect.any(Number) } },
+    });
+  });
+
+  test("get_entry and list_entries carry account/contact names, including an archived contact", async () => {
+    const contact = await owner.json("POST", `/api/v1/orgs/${orgId}/contacts`, {
+      kind: "customer",
+      name: "Formerly Active Co",
+    });
+    await owner.json("PATCH", `/api/v1/orgs/${orgId}/contacts/${contact.body.id}`, { archived: true });
+    const r = await call(token, "create_manual_entry", {
+      date: "2026-08-01",
+      memo: "Enrichment check",
+      lines: [
+        { account: "1000", amount: 700, contact_id: contact.body.id },
+        { account: "3100", amount: -700 },
+      ],
+      rationale: "Testing name enrichment",
+    });
+    await owner.json(
+      "POST",
+      `/api/v1/orgs/${orgId}/review/${r.structuredContent.review_item_id}/approve`,
+      {},
+    );
+    const entryId = r.structuredContent.entry_id as string;
+
+    const got = await call(token, "get_entry", { entry_id: entryId });
+    const line = got.structuredContent.lines.find((l: any) => l.contact_id === contact.body.id);
+    expect(line).toMatchObject({ account_code: "1000", contact_name: "Formerly Active Co" });
+    expect(got.structuredContent.has_attachment).toBe(false);
+
+    const list = await call(token, "list_entries", { from: "2026-08-01", to: "2026-08-01" });
+    const listed = list.structuredContent.data.find((e: any) => e.id === entryId);
+    const listedLine = listed.lines.find((l: any) => l.contact_id === contact.body.id);
+    expect(listedLine.contact_name).toBe("Formerly Active Co");
+  });
+
+  test("list_contacts with include_archived", async () => {
+    const contact = await owner.json("POST", `/api/v1/orgs/${orgId}/contacts`, {
+      kind: "vendor",
+      name: "Archived Vendor Co",
+    });
+    await owner.json("PATCH", `/api/v1/orgs/${orgId}/contacts/${contact.body.id}`, { archived: true });
+    const hidden = await call(token, "list_contacts", { query: "Archived Vendor" });
+    expect(hidden.structuredContent.contacts.some((c: any) => c.id === contact.body.id)).toBe(false);
+    const shown = await call(token, "list_contacts", {
+      query: "Archived Vendor",
+      include_archived: true,
+    });
+    expect(shown.structuredContent.contacts.some((c: any) => c.id === contact.body.id)).toBe(true);
   });
 
   test("append_note and the profile/notes resources", async () => {

@@ -19,6 +19,9 @@ so don't offer to.
 3. Read `org://notes`: what people and earlier assistants learned about these books.
 4. `get_account_balances`: the chart of accounts. Refer to accounts by **code** (for example
    `6100`) in tool calls.
+5. For a quick overview instead of running full reports, use `get_cash_snapshot`: cash and card
+   balances, month/YTD income and expense, review and categorize counts, overdue invoices, and
+   bills overdue or due soon.
 
 ## Conventions
 
@@ -76,6 +79,14 @@ Work one month at a time, oldest first.
 4. For new work the person describes, propose an invoice with `create_invoice_draft` (customer,
    lines with quantity, unit price in cents, and income account code). Approving it finalizes the
    invoice. Sending it stays with the person.
+
+## Bills
+
+1. `list_bills` with `overdue: true`, or `get_cash_snapshot` for the bills due soon.
+2. For a vendor bill the person describes or forwards, propose it with `create_bill_draft`
+   (vendor, lines with a description, amount in cents, and an expense account code). Approving it
+   posts the bill to Accounts Payable. The vendor contact must be marked vendor, not customer-only.
+3. `list_bill_payments` shows what's already been paid, so you don't propose a bill twice.
 
 ## Year-end package
 

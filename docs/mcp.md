@@ -31,9 +31,11 @@ Read:
 | `list_orgs` | The organization and the connection's role |
 | `get_account_balances` | Chart of accounts with balances as of a date |
 | `run_report` | Any report (P&L, balance sheet, trial balance, cash flow, tax lines, general ledger, AR/AP aging, 1099) |
+| `get_cash_snapshot` | Cash and card balances, month/YTD P&L, review and categorize counts, overdue invoices, bills due soon |
 | `list_uncategorized_transactions`, `search_transactions` | Bank and card transactions |
-| `get_entry`, `list_entries` | Journal entries |
-| `list_contacts`, `list_invoices` | Customers, vendors, invoices |
+| `get_entry`, `list_entries` | Journal entries, with account and contact names filled in and whether each has an attachment |
+| `list_contacts` | Customers and vendors; pass `include_archived` to see archived ones too |
+| `list_invoices`, `list_bills`, `list_bill_payments` | Invoices to customers, bills from vendors, and payments sent to vendors |
 | `list_pending_reviews`, `get_review_item` | The review queue |
 
 `list_uncategorized_transactions` leaves out transactions still pending at the bank: they aren't
@@ -50,6 +52,7 @@ Propose (each takes a `rationale`, which you see in Review):
 | `create_rule` | Activates the rule |
 | `create_manual_entry` | Posts the entry |
 | `create_invoice_draft` | Finalizes the invoice (you still decide when to send it) |
+| `create_bill_draft` | Posts the bill to Accounts Payable |
 | `append_note` | Adds a dated note attributed to the assistant (no review; notes don't touch the books) |
 
 There are no tools to approve, reject, void, reverse, delete, or change lock dates. OAuth access

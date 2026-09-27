@@ -436,10 +436,13 @@ Expose a Model Context Protocol endpoint at `/mcp` (streamable HTTP), authentica
 
 Tools, at minimum:
 
-- `list_orgs`, `get_account_balances`, `run_report`
+- `list_orgs`, `get_account_balances`, `run_report`, `get_cash_snapshot`
 - `list_uncategorized_transactions`, `categorize_transaction`, `create_rule`
-- `search_transactions`, `get_entry`, `create_manual_entry` (draft only unless the token role allows posting)
-- `list_invoices`, `create_invoice_draft`
+- `search_transactions`, `get_entry`, `list_entries`, `create_manual_entry` (draft only unless the token role allows posting)
+- `list_contacts`, `list_invoices`, `create_invoice_draft`
+- `list_bills`, `list_bill_payments`, `create_bill_draft`
+
+`get_entry` and `list_entries` fill in each line's account code/name and, when set, contact name, and whether the entry has an attachment; the REST `EntryView` itself carries only IDs.
 
 Destructive actions (reverse, void, delete, change lock date) are not exposed through MCP in v1.
 

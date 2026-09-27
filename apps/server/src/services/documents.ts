@@ -713,7 +713,7 @@ export async function finalizeBillTx(
   orgId: string,
   a: ActorInfo,
   id: string,
-  opts: { lockOverrideNote?: string | null } = {},
+  opts: { lockOverrideNote?: string | null; forcePost?: boolean } = {},
 ) {
   const b = await mustGetBill(tx, id);
   if (b.status !== "draft") throw conflict(`This bill is already ${b.status}.`, "invalid_state");
@@ -747,7 +747,10 @@ export async function finalizeBillTx(
       sourceId: b.id,
       lockOverrideNote: opts.lockOverrideNote ?? null,
     },
-    { reviewContext: { bill: { id: b.id, number: b.billNumber, vendor: view.vendor_name } } },
+    {
+      forcePost: opts.forcePost,
+      reviewContext: { bill: { id: b.id, number: b.billNumber, vendor: view.vendor_name } },
+    },
   );
   await tx.update(org.bills).set({ entryId: r.entry.id }).where(eq(org.bills.id, b.id));
   await recomputeDocTx(tx, "bill", b.id);

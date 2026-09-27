@@ -435,7 +435,7 @@ export const reviewItems = sqliteTable(
   {
     id: text("id").primaryKey(),
     itemType: text("item_type", {
-      enum: ["journal_entry", "bank_categorization", "rule", "invoice_draft", "import_batch"],
+      enum: ["journal_entry", "bank_categorization", "rule", "invoice_draft", "bill_draft", "import_batch"],
     }).notNull(),
     itemId: text("item_id").notNull(),
     proposedByActor: text("proposed_by_actor").notNull(),
