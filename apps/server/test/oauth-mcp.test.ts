@@ -1,7 +1,8 @@
 /**
  * OAuth 2.1 (SPEC §10.4) and MCP (SPEC §10.2). OAuth: dynamic registration, PKCE code flow,
  * refresh rotation, revocation, role capping, org scoping, redirect validation. MCP: writes land in
- * the review queue and don't affect reports, an MCP client cannot approve, notes and resources.
+ * the review queue and don't affect reports, an MCP client cannot approve, notes and resources,
+ * contacts, and corrections (reversal, replacement, payment date change) through review.
  */
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { createHash, randomBytes } from "node:crypto";
@@ -524,6 +525,11 @@ describe("MCP", () => {
       "list_pending_reviews",
       "get_review_item",
       "append_note",
+      "create_contact",
+      "update_contact",
+      "propose_reversal",
+      "propose_replacement",
+      "propose_payment_date_change",
     ])
       expect(names).toContain(n);
     for (const forbidden of ["approve", "reject", "void", "reverse", "delete", "lock"])
@@ -669,6 +675,32 @@ describe("MCP", () => {
     expect(
       (await owner.json("GET", `/api/v1/orgs/${orgId}/invoices/${b.structuredContent.invoice_id}`)).status,
     ).toBe(404);
+
+    // A review policy that auto-approves the draft finalizes the invoice right away (#31).
+    const pol = await owner.json("POST", `/api/v1/orgs/${orgId}/review-policies`, {
+      name: "Small MCP invoices",
+      actor: "mcp",
+      condition: { amount_lt: 1000, item_types: ["invoice_draft"] },
+      action: "auto_approve",
+    });
+    expect(pol.status).toBe(201);
+    const auto = await call(token, "create_invoice_draft", {
+      customer_id: cust.body.id,
+      issue_date: "2026-05-02",
+      lines: [{ description: "Small fix", quantity: 1, unit_price: 500, account: "4000" }],
+      rationale: "Small follow-up job",
+    });
+    expect(auto.structuredContent.review_item_id).toBeNull();
+    expect(auto.structuredContent.status).not.toBe("draft");
+    expect(auto.structuredContent.status).not.toBe("pending_review");
+    expect(auto.structuredContent.entry_id).toBeTruthy();
+    const posted = await owner.json(
+      "GET",
+      `/api/v1/orgs/${orgId}/invoices/${auto.structuredContent.invoice_id}`,
+    );
+    expect(posted.body.status).toBe("sent");
+    expect(posted.body.sent_at ?? null).toBeNull();
+    await owner.json("DELETE", `/api/v1/orgs/${orgId}/review-policies/${pol.body.id}`);
   });
 
   test("bill drafts go to review; approval posts, rejection deletes; a customer-only contact is refused", async () => {
@@ -846,6 +878,347 @@ describe("MCP", () => {
       include_archived: true,
     });
     expect(shown.structuredContent.contacts.some((c: any) => c.id === contact.body.id)).toBe(true);
+  });
+
+  test("create_contact and update_contact apply directly, with an audit row", async () => {
+    const made = await call(token, "create_contact", { kind: "vendor", name: "New Paper Co" });
+    expect(made.isError).toBe(false);
+    const vendorId = made.structuredContent.contact.id as string;
+    expect(made.structuredContent.contact).toMatchObject({ kind: "vendor", name: "New Paper Co" });
+    expect(made.structuredContent.review_item_id).toBeUndefined();
+
+    // The new vendor is usable right away.
+    const expense = (await call(token, "get_account_balances", {})).structuredContent.accounts.find(
+      (a: any) => a.type === "expense" && a.subtype !== "uncategorized",
+    );
+    const bill = await call(token, "create_bill_draft", {
+      vendor_id: vendorId,
+      issue_date: "2026-05-03",
+      lines: [{ description: "Paper", amount: 1500, account: expense.code }],
+      rationale: "Paper invoice",
+    });
+    expect(bill.isError).toBe(false);
+
+    const upd = await call(token, "update_contact", {
+      contact_id: vendorId,
+      email: "billing@newpaper.example",
+      default_account: expense.code,
+    });
+    expect(upd.structuredContent.contact).toMatchObject({
+      email: "billing@newpaper.example",
+      default_account_id: expense.id,
+    });
+    await call(token, "update_contact", { contact_id: vendorId, archived: true });
+    const hidden = await call(token, "list_contacts", { query: "New Paper" });
+    expect(hidden.structuredContent.contacts.some((c: any) => c.id === vendorId)).toBe(false);
+    const shown = await call(token, "list_contacts", { query: "New Paper", include_archived: true });
+    expect(shown.structuredContent.contacts.some((c: any) => c.id === vendorId)).toBe(true);
+
+    const audit = (await owner.json("GET", `/api/v1/orgs/${orgId}/audit?limit=50&target_id=${vendorId}`)).body
+      .data;
+    expect(audit.some((x: any) => x.action === "contact.create" && x.actor === "mcp")).toBe(true);
+    expect(audit.some((x: any) => x.action === "contact.update" && x.actor === "mcp")).toBe(true);
+
+    // A read-only connection can't add contacts.
+    const ro = (await authorize(viewer, await register("Viewer AI"))).tok.body.access_token;
+    const refused = await call(ro, "create_contact", { kind: "vendor", name: "Nope" });
+    expect(refused.isError).toBe(true);
+  });
+
+  /** Two expense accounts and a posted entry moving `amount` from cash to the first one. */
+  async function postedExpense(date: string, amount: number) {
+    const accounts = (await call(token, "get_account_balances", {})).structuredContent.accounts;
+    const [a, b] = accounts.filter((x: any) => x.type === "expense" && x.subtype !== "uncategorized");
+    const cash = accounts.find((x: any) => x.code === "1000");
+    const e = await owner.json("POST", `/api/v1/orgs/${orgId}/entries`, {
+      date,
+      memo: "Booked to the wrong account",
+      lines: [
+        { account_id: a.id, amount },
+        { account_id: cash.id, amount: -amount },
+      ],
+    });
+    expect(e.body.status).toBe("posted");
+    return { entryId: e.body.entry.id as string, a, b, cash };
+  }
+  const pnl = async (year: string) =>
+    (
+      await owner.json(
+        "GET",
+        `/api/v1/orgs/${orgId}/reports/profit_and_loss?from=${year}-01-01&to=${year}-12-31`,
+      )
+    ).body.lines;
+  const balance = async (id: string) =>
+    (await call(token, "get_account_balances", {})).structuredContent.accounts.find((x: any) => x.id === id)
+      .balance ?? 0;
+
+  test("propose_reversal goes to review; duplicates and document entries are refused", async () => {
+    const { entryId } = await postedExpense("2024-03-10", 1234);
+    const before = await pnl("2024");
+    const r = await call(token, "propose_reversal", {
+      entry_id: entryId,
+      rationale: "Duplicate of the card charge",
+    });
+    expect(r.structuredContent.status).toBe("pending_review");
+    const reviewId = r.structuredContent.review_item_id as string;
+    const pending = await call(token, "list_pending_reviews", { limit: 200 });
+    expect(pending.structuredContent.data.some((x: any) => x.id === reviewId)).toBe(true);
+    expect(await pnl("2024")).toEqual(before);
+
+    const again = await call(token, "propose_reversal", { entry_id: entryId, rationale: "Once more" });
+    expect(again.isError).toBe(true);
+    expect(again.content[0]!.text).toContain("already_reversed");
+
+    await owner.json("POST", `/api/v1/orgs/${orgId}/review/${reviewId}/approve`, {});
+    const orig = await call(token, "get_entry", { entry_id: entryId });
+    expect(orig.structuredContent.reversed_by_entry_id).toBe(r.structuredContent.entry_id);
+
+    // An entry created by a document is refused.
+    const bills = await call(token, "list_bills", { status: ["open"] });
+    const billEntry = bills.structuredContent.bills.find((b: any) => b.entry_id)?.entry_id;
+    expect(billEntry).toBeTruthy();
+    const doc = await call(token, "propose_reversal", { entry_id: billEntry, rationale: "Wrong bill" });
+    expect(doc.isError).toBe(true);
+    expect(doc.content[0]!.text).toContain("document_entry");
+  });
+
+  test("propose_replacement is one review item: reject posts nothing, approve posts both", async () => {
+    const { entryId, a, b, cash } = await postedExpense("2023-04-10", 2500);
+    const propose = () =>
+      call(token, "propose_replacement", {
+        entry_id: entryId,
+        date: "2023-04-10",
+        memo: "Booked to the right account",
+        lines: [
+          { account: b.code, amount: 2500 },
+          { account: cash.code, amount: -2500 },
+        ],
+        rationale: "This was software, not supplies",
+      });
+    const before = await pnl("2023");
+    const [aBefore, bBefore] = [await balance(a.id), await balance(b.id)];
+
+    const first = await propose();
+    expect(first.structuredContent.status).toBe("pending_review");
+    expect(await pnl("2023")).toEqual(before);
+    const dup = await propose();
+    expect(dup.isError).toBe(true);
+    expect(dup.content[0]!.text).toContain("already_pending");
+    // A plain reversal can't slip in while the replacement waits.
+    const rev = await call(token, "propose_reversal", { entry_id: entryId, rationale: "Cancel it" });
+    expect(rev.isError).toBe(true);
+
+    await owner.json(
+      "POST",
+      `/api/v1/orgs/${orgId}/review/${first.structuredContent.review_item_id}/reject`,
+      {
+        note: "no",
+      },
+    );
+    expect(await pnl("2023")).toEqual(before);
+    expect(
+      (await call(token, "get_entry", { entry_id: entryId })).structuredContent.reversed_by_entry_id,
+    ).toBeNull();
+
+    const second = await propose();
+    const item = await call(token, "get_review_item", {
+      review_item_id: second.structuredContent.review_item_id,
+    });
+    expect(item.structuredContent).toMatchObject({ item_type: "entry_replacement", item_id: entryId });
+    const ok = await owner.json(
+      "POST",
+      `/api/v1/orgs/${orgId}/review/${second.structuredContent.review_item_id}/approve`,
+      {},
+    );
+    expect(ok.status).toBe(200);
+    expect(
+      (await call(token, "get_entry", { entry_id: entryId })).structuredContent.reversed_by_entry_id,
+    ).toBeTruthy();
+    expect(await balance(a.id)).toBe(aBefore - 2500);
+    expect(await balance(b.id)).toBe(bBefore + 2500);
+    expect(await pnl("2023")).not.toEqual(before);
+
+    // Auto-approved by a policy: both halves post at once.
+    const other = await postedExpense("2023-05-10", 300);
+    const pol = await owner.json("POST", `/api/v1/orgs/${orgId}/review-policies`, {
+      name: "Small MCP corrections",
+      actor: "mcp",
+      condition: { amount_lt: 1000, item_types: ["entry_replacement"] },
+      action: "auto_approve",
+    });
+    expect(pol.status).toBe(201);
+    const auto = await call(token, "propose_replacement", {
+      entry_id: other.entryId,
+      date: "2023-05-10",
+      lines: [
+        { account: other.b.code, amount: 300 },
+        { account: other.cash.code, amount: -300 },
+      ],
+      rationale: "Same fix",
+    });
+    expect(auto.structuredContent).toMatchObject({ status: "posted", review_item_id: null });
+    const replacement = await call(token, "get_entry", {
+      entry_id: auto.structuredContent.replacement_entry_id,
+    });
+    expect(replacement.structuredContent.status).toBe("posted");
+    const reversal = await call(token, "get_entry", { entry_id: auto.structuredContent.reversal_entry_id });
+    expect(reversal.structuredContent).toMatchObject({ status: "posted", reverses_entry_id: other.entryId });
+    await owner.json("DELETE", `/api/v1/orgs/${orgId}/review-policies/${pol.body.id}`);
+    expect((await owner.json("POST", `/api/v1/orgs/${orgId}/verify`)).body.ok).toBe(true);
+  });
+
+  test("propose_payment_date_change moves a matched bill payment to a new date", async () => {
+    const vendor = (await call(token, "create_contact", { kind: "vendor", name: "Redate Vendor" }))
+      .structuredContent.contact;
+    const accounts = (await call(token, "get_account_balances", {})).structuredContent.accounts;
+    const expense = accounts.find((a: any) => a.type === "expense" && a.subtype !== "uncategorized");
+    const bill = await owner.json("POST", `/api/v1/orgs/${orgId}/bills`, {
+      vendor_id: vendor.id,
+      issue_date: "2026-07-01",
+      lines: [{ description: "Service", amount: 25_000, account_id: expense.id }],
+    });
+    const billId = bill.body.bill.id as string;
+    const ba = (
+      await owner.json("POST", `/api/v1/orgs/${orgId}/bank-accounts`, {
+        name: "Redate Checking",
+        kind: "checking",
+      })
+    ).body;
+    await owner.json("POST", `/api/v1/orgs/${orgId}/bank-accounts/${ba.id}/import`, {
+      filename: "jul.csv",
+      content: "Date,Description,Amount\n2026-07-15,PAYMENT REDATE VENDOR,-250.00\n",
+    });
+    const txn = (
+      await owner.json("GET", `/api/v1/orgs/${orgId}/bank-transactions?bank_account_id=${ba.id}&status=new`)
+    ).body.data[0];
+    const paid = await owner.json(
+      "POST",
+      `/api/v1/orgs/${orgId}/bank-transactions/${txn.id}/record-payment`,
+      {
+        contact_id: vendor.id,
+        applications: [{ document_id: billId, amount: 25_000 }],
+      },
+    );
+    expect(paid.status).toBe(200);
+    const paymentId = paid.body.payment.id as string;
+    const oldEntryId = paid.body.entry.id as string;
+    const payment = async () => (await owner.json("GET", `/api/v1/orgs/${orgId}/payments/${paymentId}`)).body;
+
+    // Rejecting leaves everything as it was.
+    const a = await call(token, "propose_payment_date_change", {
+      payment_id: paymentId,
+      date: "2026-07-12",
+      rationale: "The bank cleared it on the 12th",
+    });
+    expect(a.structuredContent.status).toBe("pending_review");
+    const dup = await call(token, "propose_payment_date_change", {
+      payment_id: paymentId,
+      date: "2026-07-13",
+      rationale: "Again",
+    });
+    expect(dup.isError).toBe(true);
+    expect(dup.content[0]!.text).toContain("already_pending");
+    await owner.json("POST", `/api/v1/orgs/${orgId}/review/${a.structuredContent.review_item_id}/reject`, {
+      note: "no",
+    });
+    expect(await payment()).toMatchObject({ date: "2026-07-15", entry_id: oldEntryId });
+
+    // Approving moves the payment and keeps the bill paid and the bank transaction matched.
+    const b = await call(token, "propose_payment_date_change", {
+      payment_id: paymentId,
+      date: "2026-07-12",
+      rationale: "The bank cleared it on the 12th",
+    });
+    const item = await call(token, "get_review_item", { review_item_id: b.structuredContent.review_item_id });
+    expect(item.structuredContent).toMatchObject({
+      item_type: "payment_redate",
+      payload: { from_date: "2026-07-15", to_date: "2026-07-12" },
+    });
+    const ok = await owner.json(
+      "POST",
+      `/api/v1/orgs/${orgId}/review/${b.structuredContent.review_item_id}/approve`,
+      {},
+    );
+    expect(ok.status).toBe(200);
+    const after = await payment();
+    expect(after.date).toBe("2026-07-12");
+    expect(after.entry_id).not.toBe(oldEntryId);
+    expect(after.applications[0].applied_date).toBe("2026-07-12");
+    const newEntry = (await call(token, "get_entry", { entry_id: after.entry_id })).structuredContent;
+    expect(newEntry).toMatchObject({ status: "posted", date: "2026-07-12", source_type: "bill_payment" });
+    const old = (await call(token, "get_entry", { entry_id: oldEntryId })).structuredContent;
+    const reversal = (await call(token, "get_entry", { entry_id: old.reversed_by_entry_id }))
+      .structuredContent;
+    expect(reversal).toMatchObject({ status: "posted", date: "2026-07-15" });
+    const t = (await owner.json("GET", `/api/v1/orgs/${orgId}/bank-transactions/${txn.id}`)).body;
+    expect(t).toMatchObject({ status: "matched", entry_id: after.entry_id });
+    expect((await owner.json("GET", `/api/v1/orgs/${orgId}/bills/${billId}`)).body.status).toBe("paid");
+    expect((await owner.json("POST", `/api/v1/orgs/${orgId}/verify`)).body.ok).toBe(true);
+
+    // A voided payment is refused.
+    const cash = accounts.find((x: any) => x.code === "1000");
+    const bill2 = await owner.json("POST", `/api/v1/orgs/${orgId}/bills`, {
+      vendor_id: vendor.id,
+      issue_date: "2026-07-01",
+      lines: [{ description: "Service", amount: 1000, account_id: expense.id }],
+    });
+    const p2 = await owner.json("POST", `/api/v1/orgs/${orgId}/payments`, {
+      direction: "sent",
+      contact_id: vendor.id,
+      date: "2026-07-20",
+      amount: 1000,
+      account_id: cash.id,
+      applications: [{ document_id: bill2.body.bill.id, amount: 1000 }],
+    });
+    await owner.json("POST", `/api/v1/orgs/${orgId}/payments/${p2.body.payment.id}/void`, {});
+    const voided = await call(token, "propose_payment_date_change", {
+      payment_id: p2.body.payment.id,
+      date: "2026-07-21",
+      rationale: "Should be refused",
+    });
+    expect(voided.isError).toBe(true);
+
+    // A payment cleared in a completed reconciliation is refused.
+    const recBank = (
+      await owner.json("POST", `/api/v1/orgs/${orgId}/bank-accounts`, {
+        name: "Recon Checking",
+        kind: "checking",
+      })
+    ).body;
+    const bill3 = await owner.json("POST", `/api/v1/orgs/${orgId}/bills`, {
+      vendor_id: vendor.id,
+      issue_date: "2026-07-01",
+      lines: [{ description: "Service", amount: 3000, account_id: expense.id }],
+    });
+    const p3 = await owner.json("POST", `/api/v1/orgs/${orgId}/payments`, {
+      direction: "sent",
+      contact_id: vendor.id,
+      date: "2026-07-22",
+      amount: 3000,
+      account_id: recBank.ledger_account_id,
+      applications: [{ document_id: bill3.body.bill.id, amount: 3000 }],
+    });
+    const rec = await owner.json("POST", `/api/v1/orgs/${orgId}/reconciliations`, {
+      account_id: recBank.ledger_account_id,
+      statement_end_date: "2026-07-31",
+      statement_ending_balance: -3000,
+    });
+    const recLine = (
+      await owner.json("GET", `/api/v1/orgs/${orgId}/reconciliations/${rec.body.id}`)
+    ).body.lines.find((l: any) => l.amount === -3000);
+    await owner.json("POST", `/api/v1/orgs/${orgId}/reconciliations/${rec.body.id}/lines`, {
+      line_ids: [recLine.id],
+      cleared: true,
+    });
+    const done = await owner.json("POST", `/api/v1/orgs/${orgId}/reconciliations/${rec.body.id}/complete`);
+    expect(done.body.status).toBe("completed");
+    const reconciled = await call(token, "propose_payment_date_change", {
+      payment_id: p3.body.payment.id,
+      date: "2026-07-23",
+      rationale: "Should be refused",
+    });
+    expect(reconciled.isError).toBe(true);
+    expect(reconciled.content[0]!.text).toContain("reconciled");
   });
 
   test("append_note and the profile/notes resources", async () => {

@@ -256,7 +256,7 @@ function ledgerError(errors: { code: string; message: string; line?: number }[])
   return unprocessable(first.message, first.code, { errors });
 }
 
-async function validateForSave(tx: Reader, lines: LineInput[], forPosting: boolean) {
+export async function validateForSave(tx: Reader, lines: LineInput[], forPosting: boolean) {
   const s = await settingsRow(tx);
   const errors = validateLines(lines, await accountMap(tx), s.baseCurrency, { forPosting });
   if (errors.length) throw ledgerError(errors);
@@ -410,7 +410,8 @@ async function holdForReviewTx(
   return reviewId;
 }
 
-async function assertReversible(tx: Reader, originalId: string, reversalId: string | null) {
+/** Throws unless the entry is posted, not reversed, and has no other live reversal. */
+export async function assertReversible(tx: Reader, originalId: string, reversalId: string | null) {
   const orig = await tx.select().from(org.journalEntries).where(eq(org.journalEntries.id, originalId)).get();
   if (!orig) throw notFound("Entry to reverse");
   if (orig.status !== "posted") throw conflict("Only posted entries can be reversed.", "invalid_state");

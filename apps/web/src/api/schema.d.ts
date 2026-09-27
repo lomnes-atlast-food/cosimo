@@ -8902,7 +8902,7 @@ export interface paths {
                              * @example 12345
                              */
                             amount_gte?: number;
-                            item_types?: ("journal_entry" | "bank_categorization" | "rule" | "invoice_draft" | "bill_draft")[];
+                            item_types?: ("journal_entry" | "bank_categorization" | "rule" | "invoice_draft" | "bill_draft" | "entry_replacement" | "payment_redate")[];
                             account_used_for_payee?: boolean;
                             rule_auto_post?: boolean;
                         };
@@ -9033,7 +9033,7 @@ export interface paths {
                              * @example 12345
                              */
                             amount_gte?: number;
-                            item_types?: ("journal_entry" | "bank_categorization" | "rule" | "invoice_draft" | "bill_draft")[];
+                            item_types?: ("journal_entry" | "bank_categorization" | "rule" | "invoice_draft" | "bill_draft" | "entry_replacement" | "payment_redate")[];
                             account_used_for_payee?: boolean;
                             rule_auto_post?: boolean;
                         };
@@ -18103,7 +18103,7 @@ export interface components {
         ReviewItem: {
             id: string;
             /** @enum {string} */
-            item_type: "journal_entry" | "bank_categorization" | "rule" | "invoice_draft" | "bill_draft" | "import_batch";
+            item_type: "journal_entry" | "bank_categorization" | "rule" | "invoice_draft" | "bill_draft" | "entry_replacement" | "payment_redate" | "import_batch";
             item_id: string;
             proposed_by_actor: string;
             proposed_by_id: string | null;

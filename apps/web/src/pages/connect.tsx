@@ -116,8 +116,11 @@ export function ConnectPage() {
                 )}
               </Field>
               <ul className="list-inside list-disc text-zinc-600 dark:text-zinc-400">
-                <li>Everything it creates or changes waits in your review queue until you approve it.</li>
-                <li>It can't approve its own proposals, void, reverse, delete, or change lock dates.</li>
+                <li>
+                  Everything it writes to the books, corrections included, waits in your review queue until
+                  you approve it. Only contacts and notes apply directly.
+                </li>
+                <li>It can't approve its own proposals, void, delete, or change lock dates.</li>
                 <li>You can disconnect it at any time from your account page.</li>
               </ul>
               <div className="flex gap-2">

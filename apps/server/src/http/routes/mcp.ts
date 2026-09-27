@@ -33,7 +33,7 @@ const INSTRUCTIONS = `Cosimo is double-entry bookkeeping for one organization.
 - Start by reading the resources org://profile (what the business does, which accounts to use) and org://notes (what has been learned before).
 - Money is integer cents; journal lines are debit-positive; bank amounts are positive for money in.
 - Every write tool needs a short rationale. Writes are proposals: they wait in the review queue until a person approves them. Tell the person what is waiting (list_pending_reviews).
-- You cannot approve, reject, void, reverse, delete, or change lock dates.
+- You cannot approve, reject, void, delete, or change lock dates. Reversals, replacements, and payment date changes are proposals.
 - When you learn something durable about how this business books things, record it with append_note.`;
 
 export interface McpResource {
