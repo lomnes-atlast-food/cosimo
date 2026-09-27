@@ -112,7 +112,11 @@ export function mountOAuth(app: OpenAPIHono<AppEnv>, ctx: AppContext) {
       return c.body(null, 204);
     });
 
+  const DCR_AUTH_METHODS = ["none", "client_secret_post", "client_secret_basic"];
+
   app.post("/oauth/register", async (c) => {
+    // Parsed outside the try so a rejection can log what the client asked for.
+    let b: Record<string, unknown> | null = null;
     try {
       rateLimit(c, "oauth-register", 20, 3_600_000);
       if (!(await ctx.settings.get("dynamic_client_registration")))
@@ -121,24 +125,31 @@ export function mountOAuth(app: OpenAPIHono<AppEnv>, ctx: AppContext) {
           "Dynamic client registration is turned off on this server. Ask the admin for a client ID.",
           403,
         );
-      const b = (await c.req.json().catch(() => null)) as Record<string, unknown> | null;
-      if (!b) throw new OAuthError("invalid_client_metadata", "Send JSON client metadata.");
-      const method = (b.token_endpoint_auth_method as string | undefined) ?? "none";
-      if (method !== "none")
+      b = (await c.req.json().catch(() => null)) as Record<string, unknown> | null;
+      if (!b || typeof b !== "object" || Array.isArray(b))
+        throw new OAuthError("invalid_client_metadata", "Send JSON client metadata.");
+      // Public clients (none) or confidential ones (a secret, sent by post body or Basic auth).
+      const method = b.token_endpoint_auth_method ?? "none";
+      if (typeof method !== "string" || !DCR_AUTH_METHODS.includes(method))
         throw new OAuthError(
           "invalid_client_metadata",
-          "Dynamically registered clients are public: token_endpoint_auth_method must be none.",
+          "token_endpoint_auth_method must be none, client_secret_post or client_secret_basic.",
         );
-      const grants = (b.grant_types as string[] | undefined) ?? ["authorization_code", "refresh_token"];
-      if (grants.some((g) => g !== "authorization_code" && g !== "refresh_token"))
+      const grants = b.grant_types ?? ["authorization_code", "refresh_token"];
+      if (!Array.isArray(grants) || grants.some((g) => g !== "authorization_code" && g !== "refresh_token"))
         throw new OAuthError(
           "invalid_client_metadata",
           "Only authorization_code and refresh_token grants are supported.",
         );
+      const responseTypes = b.response_types ?? ["code"];
+      if (!Array.isArray(responseTypes) || responseTypes.some((t) => t !== "code"))
+        throw new OAuthError("invalid_client_metadata", 'Only the "code" response type is supported.');
+      const confidential = method !== "none";
       const r = await svc().registerClient({
         client_name: b.client_name as string | undefined,
         redirect_uris: b.redirect_uris,
         via: "dynamic",
+        confidential,
       });
       await instanceAudit(ctx.system, {
         userId: null,
@@ -146,21 +157,37 @@ export function mountOAuth(app: OpenAPIHono<AppEnv>, ctx: AppContext) {
         targetType: "oauth_client",
         targetId: r.client_id,
         ip: c.get("ip"),
+        detail: { confidential },
       });
+      // RFC 7591 §3.2.1: a confidential client gets its secret now, and it never expires.
       return oauthJson(
         c,
         {
           client_id: r.client_id,
+          ...(r.client_secret ? { client_secret: r.client_secret, client_secret_expires_at: 0 } : {}),
           client_id_issued_at: Math.floor(Date.now() / 1000),
           client_name: r.client_name,
           redirect_uris: r.redirect_uris,
           grant_types: ["authorization_code", "refresh_token"],
           response_types: ["code"],
-          token_endpoint_auth_method: "none",
+          token_endpoint_auth_method: method,
         },
         201,
       );
     } catch (e) {
+      // Only non-secret metadata, never the raw body. The logger redacts keys containing
+      // "token", so the auth method goes under auth_method.
+      if (e instanceof OAuthError)
+        ctx.logger.warn("oauth register rejected", {
+          error: e.error,
+          error_description: e.message,
+          request_id: c.get("requestId"),
+          client_name: b?.client_name,
+          redirect_uris: b?.redirect_uris,
+          auth_method: b?.token_endpoint_auth_method,
+          grant_types: b?.grant_types,
+          response_types: b?.response_types,
+        });
       return oauthFail(c, e);
     }
   });

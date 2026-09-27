@@ -151,7 +151,19 @@ describe("OAuth 2.1", () => {
           token_endpoint_auth_method: "client_secret_basic",
         })
       ).status,
-    ).toBe(400);
+    ).toBe(201);
+    const jwt = await raw("POST", "/oauth/register", {
+      redirect_uris: [REDIRECT],
+      token_endpoint_auth_method: "private_key_jwt",
+    });
+    expect(jwt.status).toBe(400);
+    expect(jwt.body.error).toBe("invalid_client_metadata");
+    const implicit = await raw("POST", "/oauth/register", {
+      redirect_uris: [REDIRECT],
+      response_types: ["token"],
+    });
+    expect(implicit.status).toBe(400);
+    expect(implicit.body.error).toBe("invalid_client_metadata");
   });
 
   test("code flow with PKCE, refresh rotation, and revocation", async () => {
@@ -226,6 +238,77 @@ describe("OAuth 2.1", () => {
     expect(
       (await tokenClient(env, r1.body.access_token).json("GET", `/api/v1/orgs/${orgId}/accounts`)).status,
     ).toBe(401);
+  });
+
+  test("dynamic registration with claude.ai's metadata registers a confidential client and completes the code flow", async () => {
+    const CLAUDE = "https://claude.ai/api/mcp/auth_callback";
+    const reg = await raw("POST", "/oauth/register", {
+      client_name: "Claude",
+      redirect_uris: [CLAUDE],
+      grant_types: ["authorization_code", "refresh_token"],
+      response_types: ["code"],
+      token_endpoint_auth_method: "client_secret_post",
+    });
+    expect(reg.status).toBe(201);
+    expect(reg.body.client_secret).toStartWith("cosimo_ocs_");
+    expect(reg.body.client_secret_expires_at).toBe(0);
+    expect(reg.body.token_endpoint_auth_method).toBe("client_secret_post");
+    const { client_id: clientId, client_secret: secret } = reg.body as {
+      client_id: string;
+      client_secret: string;
+    };
+
+    const { verifier, challenge } = pkce();
+    const q = {
+      client_id: clientId,
+      redirect_uri: CLAUDE,
+      response_type: "code",
+      code_challenge: challenge,
+      code_challenge_method: "S256",
+      state: "xyz",
+      resource: `${env.config.server.public_url}/mcp`,
+    };
+    const start = await raw("GET", `/oauth/authorize?${new URLSearchParams(q)}`);
+    expect(start.status).toBe(302);
+    expect(start.headers.get("location")).toStartWith("/connect?");
+    const consent = await owner.json("POST", "/api/v1/oauth/consent", { ...q, approve: true, org_id: orgId });
+    expect(consent.status).toBe(200);
+    const back = new URL(consent.body.redirect_to);
+    expect(back.origin + back.pathname).toBe(CLAUDE);
+    const form = {
+      grant_type: "authorization_code",
+      code: back.searchParams.get("code")!,
+      redirect_uri: CLAUDE,
+      client_id: clientId,
+      code_verifier: verifier,
+    };
+
+    // The secret issued at registration is enforced at the token endpoint.
+    const noSecret = await raw("POST", "/oauth/token", new URLSearchParams(form));
+    expect(noSecret.status).toBe(401);
+    expect(noSecret.body.error).toBe("invalid_client");
+    const tok = await raw("POST", "/oauth/token", new URLSearchParams({ ...form, client_secret: secret }));
+    expect(tok.status).toBe(200);
+    expect(tok.body.access_token).toStartWith("cosimo_oat_");
+
+    // Either secret method works for any confidential client: refresh with Basic auth.
+    const basic = Buffer.from(`${clientId}:${secret}`).toString("base64");
+    const refreshed = await raw(
+      "POST",
+      "/oauth/token",
+      new URLSearchParams({ grant_type: "refresh_token", refresh_token: tok.body.refresh_token }),
+      { authorization: `Basic ${basic}` },
+    );
+    expect(refreshed.status).toBe(200);
+
+    const list = await admin.json("GET", "/api/v1/admin/oauth-clients");
+    expect(list.status).toBe(200);
+    expect(list.body.data.find((x: { client_id: string }) => x.client_id === clientId)).toMatchObject({
+      client_name: "Claude",
+      redirect_uris: [CLAUDE],
+      registered_via: "dynamic",
+      confidential: true,
+    });
   });
 
   test("PKCE and redirect mismatches are rejected", async () => {

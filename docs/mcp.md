@@ -10,7 +10,10 @@ person approves it.
 **With OAuth (recommended).** In your AI client, add a connector (custom MCP server) with the URL
 `https://books.example.com/mcp`. The client finds the sign-in page by itself. You sign in to
 Cosimo, pick one organization, choose the access level, and approve. The access level can't be
-higher than your own role, and the default is Bookkeeper.
+higher than your own role, and the default is Bookkeeper. Custom connectors in claude.ai need only
+the URL. If dynamic client registration is turned off, an admin registers a client with the
+redirect URI `https://claude.ai/api/mcp/auth_callback`, and you enter its client ID and secret in
+the connector's advanced settings.
 
 **With an API token.** For scripts and clients without OAuth, create a token under Account →
 Personal API tokens, or with `cosimo token create`. Send it as `Authorization: Bearer <token>`.
@@ -71,9 +74,12 @@ project instructions.
   - Protected resource metadata is at `/.well-known/oauth-protected-resource/mcp` and
     authorization server metadata at `/.well-known/oauth-authorization-server`. A request without
     a token gets `401` with `WWW-Authenticate: Bearer resource_metadata="…"`.
-  - Clients can register themselves with dynamic client registration (`POST /oauth/register`,
-    public clients only). An instance admin can turn this off and register clients by hand
-    instead, in Admin → Settings → OAuth clients. Those clients get a secret.
+  - Clients can register themselves with dynamic client registration (`POST /oauth/register`),
+    either as public clients (`token_endpoint_auth_method` `none`) or as confidential ones
+    (`client_secret_post` or `client_secret_basic`). A confidential client gets its secret in the
+    registration response, and the secret doesn't expire. An instance admin can turn dynamic
+    registration off and register clients by hand instead, in Admin → Settings → OAuth clients.
+    Those clients get a secret.
   - Authorization uses the code flow with PKCE, and only `S256` is accepted. Codes are single-use
     and last 10 minutes. Replaying a code revokes the tokens it produced.
   - Access tokens last 1 hour. Refresh tokens last 30 days and rotate on every use, so an old
