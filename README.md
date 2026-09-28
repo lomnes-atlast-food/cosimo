@@ -2,8 +2,8 @@
 
 **Your books, on your server. Open-source bookkeeping that replaces QuickBooks Online and Xero.**
 
-[![Release](https://img.shields.io/github/v/release/lomnes-atlast-food/cosimo)](https://github.com/lomnes-atlast-food/cosimo/releases/latest)
-[![CI](https://github.com/lomnes-atlast-food/cosimo/actions/workflows/ci.yml/badge.svg)](https://github.com/lomnes-atlast-food/cosimo/actions/workflows/ci.yml)
+[![Release](https://img.shields.io/github/v/release/steve-lomnes/cosimo)](https://github.com/steve-lomnes/cosimo/releases/latest)
+[![CI](https://github.com/steve-lomnes/cosimo/actions/workflows/ci.yml/badge.svg)](https://github.com/steve-lomnes/cosimo/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
 
 [Quickstart](#quickstart) · [Deploy](docs/deployment.md) · [Import from QuickBooks, Xero or Wave](docs/importing.md) · [Use with AI](docs/mcp.md)
@@ -112,20 +112,20 @@ rent. See [what Cosimo doesn't do yet](#what-cosimo-doesnt-do-yet) before you sw
 macOS and Linux:
 
 ```sh
-curl -fsSL https://github.com/lomnes-atlast-food/cosimo/releases/latest/download/install.sh | sh
+curl -fsSL https://github.com/steve-lomnes/cosimo/releases/latest/download/install.sh | sh
 ```
 
 Windows (PowerShell):
 
 ```powershell
-irm https://github.com/lomnes-atlast-food/cosimo/releases/latest/download/install.ps1 | iex
+irm https://github.com/steve-lomnes/cosimo/releases/latest/download/install.ps1 | iex
 ```
 
 The installer checks the release's SHA-256 (and its cosign signature, when `cosign` is installed),
 then runs `cosimo init`. Pick local, Docker, or Fly.io, answer a few questions, and open the claim
 link it prints to set your password. It can seed a sample business so you can look around first.
 
-Prefer containers? The image is `ghcr.io/lomnes-atlast-food/cosimo:<version>`. See
+Prefer containers? The image is `ghcr.io/steve-lomnes/cosimo:<version>`. See
 [docs/deployment.md](docs/deployment.md).
 
 ## Use it with Claude, or any MCP client

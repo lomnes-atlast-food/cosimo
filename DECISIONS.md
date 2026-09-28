@@ -6,10 +6,10 @@ Choices made during the build. SPEC.md is the source of truth for requirements; 
 
 | Topic | Decision |
 |---|---|
-| Repo | `github.com/lomnes-atlast-food/cosimo`, **private**. It will be made public later, so never commit secrets. Keep history clean from day one. |
+| Repo | `github.com/steve-lomnes/cosimo`, **private**. It will be made public later, so never commit secrets. Keep history clean from day one. |
 | License | MIT, copyright 2026 Stephen Lomnes |
 | Scope | All 8 phases of SPEC §16, in order. Commit and push after each phase. Anything left unfinished goes into an issue with a spec reference. |
-| Domain / install URL | Install from GitHub Releases of `lomnes-atlast-food/cosimo` (`install.sh`/`install.ps1` as release assets); a short `get.` domain is a future option, not required. Base URLs live in one constant file (`packages/shared/src/distribution.ts`, mirrored as variables at the top of the scripts). |
+| Domain / install URL | Install from GitHub Releases of `steve-lomnes/cosimo` (`install.sh`/`install.ps1` as release assets); a short `get.` domain is a future option, not required. Base URLs live in one constant file (`packages/shared/src/distribution.ts`, mirrored as variables at the top of the scripts). |
 | npm | Don't publish. Package names are `@cosimo/*` in the workspace. Leave `bunx cosimo` documented but unreleased. |
 | Turso | Test the libSQL server path against the locally installed `sqld` (0.24.x) and in CI via the `ghcr.io/tursodatabase/libsql-server` container. Turso Platform API provisioning is mocked, and live tests are gated behind `COSIMO_TEST_TURSO=1`. |
 | Plaid | Sandbox keys come from the gitignored `.env.local` (`PLAID_CLIENT_ID`, `PLAID_SECRET`, `PLAID_ENV=sandbox`). Sandbox tests are gated behind `COSIMO_TEST_PLAID=1` and run locally. CI runs only the mocked tests. |
@@ -353,3 +353,5 @@ Choices made during the build. SPEC.md is the source of truth for requirements; 
   (`cosimo org delete`). Any signed-in user can load their own copy of the demo from `/orgs`
   (`POST /sample-org`), which is why `loadSampleData` is idempotent per user rather than a
   once-per-instance seed.
+- **2026-09-28**: GitHub account renamed to steve-lomnes; repo, image and signing identity moved;
+  installers accept both identities for older releases.

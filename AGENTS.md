@@ -2,7 +2,7 @@
 
 Cosimo is self-hosted double-entry bookkeeping. This file tells an AI agent how to install it for a
 person, check that it works, and connect to it for ongoing bookkeeping. The same file is published
-at `https://raw.githubusercontent.com/lomnes-atlast-food/cosimo/main/AGENTS.md`.
+at `https://raw.githubusercontent.com/steve-lomnes/cosimo/main/AGENTS.md`.
 
 Everything below is a stable interface: `cosimo init --questions --json`, `cosimo init --answers
 … --yes --json`, the result JSON, the exit codes, and `cosimo doctor --json`.
@@ -12,13 +12,13 @@ Everything below is a stable interface: `cosimo init --questions --json`, `cosim
 macOS and Linux:
 
 ```sh
-curl -fsSL https://github.com/lomnes-atlast-food/cosimo/releases/latest/download/install.sh | sh
+curl -fsSL https://github.com/steve-lomnes/cosimo/releases/latest/download/install.sh | sh
 ```
 
 Windows (PowerShell):
 
 ```powershell
-irm https://github.com/lomnes-atlast-food/cosimo/releases/latest/download/install.ps1 | iex
+irm https://github.com/steve-lomnes/cosimo/releases/latest/download/install.ps1 | iex
 ```
 
 The installer:
@@ -34,12 +34,12 @@ Non-interactive, for agents: install first, then run init with the answers. When
 stdin carries the script, so answers can't come from stdin in the same command.
 
 ```sh
-curl -fsSL https://github.com/lomnes-atlast-food/cosimo/releases/latest/download/install.sh | sh -s -- --no-init
+curl -fsSL https://github.com/steve-lomnes/cosimo/releases/latest/download/install.sh | sh -s -- --no-init
 cosimo init --answers - --yes --json < answers.json     # or a heredoc; see below
 ```
 
 An answers file also works in one line:
-`curl -fsSL https://github.com/lomnes-atlast-food/cosimo/releases/latest/download/install.sh | sh -s -- --answers ./cosimo-answers.json --yes --json`.
+`curl -fsSL https://github.com/steve-lomnes/cosimo/releases/latest/download/install.sh | sh -s -- --answers ./cosimo-answers.json --yes --json`.
 
 ## 2. Run a short Q&A, then apply the answers
 
@@ -175,7 +175,7 @@ approve, reject, void, delete, or move lock dates.
 >
 > **Agent:** fetches `cosimo init --questions --json`, then asks for the domain, the human's email
 > and name, the business name, and whether to connect Plaid now. It uses defaults for everything
-> else. Over SSH it runs `curl -fsSL https://github.com/lomnes-atlast-food/cosimo/releases/latest/download/install.sh | sh -s -- --no-init`, then
+> else. Over SSH it runs `curl -fsSL https://github.com/steve-lomnes/cosimo/releases/latest/download/install.sh | sh -s -- --no-init`, then
 > `cosimo init --answers - --yes --json` with the answers on stdin (`target: docker`, `admin_auth:
 > claim_link`), then `docker compose exec cosimo cosimo doctor --json` from the directory init wrote.
 > It replies:

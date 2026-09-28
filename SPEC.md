@@ -513,13 +513,13 @@ This section defines the primary adoption path. The target experience: a person,
 macOS and Linux:
 
 ```sh
-curl -fsSL https://github.com/lomnes-atlast-food/cosimo/releases/latest/download/install.sh | sh
+curl -fsSL https://github.com/steve-lomnes/cosimo/releases/latest/download/install.sh | sh
 ```
 
 Windows (PowerShell):
 
 ```powershell
-irm https://github.com/lomnes-atlast-food/cosimo/releases/latest/download/install.ps1 | iex
+irm https://github.com/steve-lomnes/cosimo/releases/latest/download/install.ps1 | iex
 ```
 
 Alternatives, documented alongside:
@@ -544,7 +544,7 @@ It MUST NOT use `sudo` unless the user passes `--system`. It MUST print every ac
 Fully non-interactive form, for agents and automation:
 
 ```sh
-curl -fsSL https://github.com/lomnes-atlast-food/cosimo/releases/latest/download/install.sh | sh -s -- --answers ./cosimo-answers.json --yes --json
+curl -fsSL https://github.com/steve-lomnes/cosimo/releases/latest/download/install.sh | sh -s -- --answers ./cosimo-answers.json --yes --json
 ```
 
 ### 13.3 `cosimo init` Questions
@@ -667,7 +667,7 @@ Running `init` again on a machine with an existing instance exits with code 5 un
 
 ### 13.5 `AGENTS.md`
 
-The repository root and `https://raw.githubusercontent.com/lomnes-atlast-food/cosimo/main/AGENTS.md` MUST publish an `AGENTS.md` that tells an AI agent, in plain terms:
+The repository root and `https://raw.githubusercontent.com/steve-lomnes/cosimo/main/AGENTS.md` MUST publish an `AGENTS.md` that tells an AI agent, in plain terms:
 
 1. The one command to install.
 2. How to fetch the question schema and run a short Q&A with the human, asking only required questions plus those whose default doesn't fit.
@@ -825,7 +825,7 @@ Resolve these before or at the start of the build session. Defaults apply if not
 
 | Decision | Default |
 |---|---|
-| Domain for the `get.` install address, and GitHub organization | Resolved: `github.com/lomnes-atlast-food/cosimo`, with the install scripts served as release assets rather than from a placeholder `get.cosimo.dev` domain. A short install domain (`curl -fsSL https://get.cosimo.dev \| sh`) is a future option, not required. The unscoped npm name `cosimo` was unpublished in January 2026; if it can't be claimed, publish as `@<org>/cosimo` with the binary still named `cosimo`. |
+| Domain for the `get.` install address, and GitHub organization | Resolved: `github.com/steve-lomnes/cosimo`, with the install scripts served as release assets rather than from a placeholder `get.cosimo.dev` domain. A short install domain (`curl -fsSL https://get.cosimo.dev \| sh`) is a future option, not required. The unscoped npm name `cosimo` was unpublished in January 2026; if it can't be claimed, publish as `@<org>/cosimo` with the binary still named `cosimo`. |
 | License | MIT for maximum adoption. AGPL-3.0 is the alternative if you want hosted forks to share changes. |
 | Multi-currency in v1 | Out |
 | Recurring invoices in v1 | Included as a SHOULD |

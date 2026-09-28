@@ -1,6 +1,6 @@
 # Cosimo installer for Windows (x64).
 #
-#   irm https://github.com/lomnes-atlast-food/cosimo/releases/latest/download/install.ps1 | iex
+#   irm https://github.com/steve-lomnes/cosimo/releases/latest/download/install.ps1 | iex
 #
 # Downloads cosimo-windows-x64.exe from GitHub Releases, verifies its SHA-256
 # against checksums.txt, installs it to %LOCALAPPDATA%\Programs\cosimo, adds
@@ -9,7 +9,7 @@
 # `irm | iex` cannot pass arguments, so for automation either download the
 # script and run it with arguments (they are passed to `cosimo init`):
 #
-#   & ([scriptblock]::Create((irm https://github.com/lomnes-atlast-food/cosimo/releases/latest/download/install.ps1))) --answers .\answers.json --yes --json
+#   & ([scriptblock]::Create((irm https://github.com/steve-lomnes/cosimo/releases/latest/download/install.ps1))) --answers .\answers.json --yes --json
 #
 # or configure it with environment variables:
 #   COSIMO_VERSION        Release to install (default: latest; e.g. 0.1.0)
@@ -22,7 +22,7 @@ $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
 
 # Mirrors packages/shared/src/distribution.ts
-$GitHubRepo = 'lomnes-atlast-food/cosimo'
+$GitHubRepo = 'steve-lomnes/cosimo'
 $ReleasesBaseUrl = "https://github.com/$GitHubRepo/releases"
 $Asset = 'cosimo-windows-x64.exe'
 

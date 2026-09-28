@@ -50,8 +50,8 @@ ARG COSIMO_COMMIT
 
 LABEL org.opencontainers.image.title="Cosimo" \
       org.opencontainers.image.description="Self-hosted double-entry bookkeeping" \
-      org.opencontainers.image.source="https://github.com/lomnes-atlast-food/cosimo" \
-      org.opencontainers.image.url="https://github.com/lomnes-atlast-food/cosimo" \
+      org.opencontainers.image.source="https://github.com/steve-lomnes/cosimo" \
+      org.opencontainers.image.url="https://github.com/steve-lomnes/cosimo" \
       org.opencontainers.image.licenses="MIT" \
       org.opencontainers.image.version="${COSIMO_VERSION}" \
       org.opencontainers.image.revision="${COSIMO_COMMIT}"

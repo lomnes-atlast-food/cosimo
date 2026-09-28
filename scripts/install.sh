@@ -1,8 +1,8 @@
 #!/bin/sh
 # Cosimo installer for macOS and Linux (POSIX sh).
 #
-#   curl -fsSL https://github.com/lomnes-atlast-food/cosimo/releases/latest/download/install.sh | sh
-#   curl -fsSL https://github.com/lomnes-atlast-food/cosimo/releases/latest/download/install.sh | sh -s -- --answers ./cosimo-answers.json --yes --json
+#   curl -fsSL https://github.com/steve-lomnes/cosimo/releases/latest/download/install.sh | sh
+#   curl -fsSL https://github.com/steve-lomnes/cosimo/releases/latest/download/install.sh | sh -s -- --answers ./cosimo-answers.json --yes --json
 #
 # Downloads the release binary from GitHub Releases, verifies its SHA-256
 # against checksums.txt (and the cosign signature bundle on checksums.txt when
@@ -16,9 +16,13 @@
 set -eu
 
 # Mirrors packages/shared/src/distribution.ts
-GITHUB_REPO="lomnes-atlast-food/cosimo"
+GITHUB_REPO="steve-lomnes/cosimo"
 RELEASES_BASE_URL="https://github.com/${GITHUB_REPO}/releases"
-CERT_IDENTITY_REGEXP="^https://github.com/${GITHUB_REPO}/.github/workflows/release.yml@"
+# Downloads always come from GITHUB_REPO above (the current account), so accepting the old
+# identity here doesn't let the old namespace supply files. Releases through 0.6.5 were signed
+# under the previous GitHub account name; this regexp accepts both so those
+# releases still verify.
+CERT_IDENTITY_REGEXP="^https://github.com/(steve-lomnes|lomnes-atlast-food)/cosimo/.github/workflows/release.yml@"
 CERT_OIDC_ISSUER="https://token.actions.githubusercontent.com"
 
 VERSION="${COSIMO_VERSION:-latest}"
@@ -35,7 +39,7 @@ Usage: install.sh [--system] [--no-init] [--help] [-- cosimo init args...]
 Installs the cosimo binary and runs `cosimo init`, passing through any
 arguments that are not installer flags, e.g.:
 
-  curl -fsSL https://github.com/lomnes-atlast-food/cosimo/releases/latest/download/install.sh | sh -s -- --answers ./answers.json --yes --json
+  curl -fsSL https://github.com/steve-lomnes/cosimo/releases/latest/download/install.sh | sh -s -- --answers ./answers.json --yes --json
 
 Installer flags:
   --system    Install to /usr/local/bin (uses sudo if not already root)
@@ -70,7 +74,7 @@ done
 case $(uname -s) in
   Darwin) os=darwin ;;
   Linux) os=linux ;;
-  *) die "unsupported OS '$(uname -s)'. On Windows use: irm https://github.com/lomnes-atlast-food/cosimo/releases/latest/download/install.ps1 | iex" ;;
+  *) die "unsupported OS '$(uname -s)'. On Windows use: irm https://github.com/steve-lomnes/cosimo/releases/latest/download/install.ps1 | iex" ;;
 esac
 case $(uname -m) in
   x86_64 | amd64) arch=x64 ;;

@@ -41,7 +41,7 @@ For non-trivial changes: plan in the main session, have the `implementer` subage
 - Before calling ExitPlanMode, tell the user in one line that the subagent inherits the session's permission mode, so they should pick "accept edits" or auto when they approve. A plan-mode or manual-approval session stalls a background builder.
 
 ### After the user approves
-Every approved plan ships through an issue and a PR, so the work is documented on GitHub (`lomnes-atlast-food/cosimo`). The user has authorized every step below for approved plans; don't ask again. Don't wait to be asked:
+Every approved plan ships through an issue and a PR, so the work is documented on GitHub (`steve-lomnes/cosimo`). The user has authorized every step below for approved plans; don't ask again. Don't wait to be asked:
 
 1. **Issue.** Search for an existing one first (`gh issue list --search "<keywords>" --state all`). If none fits, create it with `gh issue create`. The title is the change; the body is the plan's Context section plus the user's decisions. Note the number, `#N`.
 2. **Worktree.** Each change gets its own worktree, so several can be in progress at once:
