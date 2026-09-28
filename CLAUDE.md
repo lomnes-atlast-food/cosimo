@@ -9,6 +9,9 @@ Maintainer-only notes live in `CLAUDE.local.md` (gitignored).
 
 Browser tests: `bun run build:web`, then `bun run e2e`. A fresh worktree has no web build, and without one every e2e test times out on "The web UI has not been built". Set `COSIMO_E2E_PORT` to run beside another e2e run. CI retries a serial file (such as `books.e2e.ts`) as a whole against the same database, so failures on the retry can be fallout; read the first attempt's error.
 
+## Scanner findings
+When `bun audit` or OSV flags an advisory that doesn't affect Cosimo (the vulnerable code never runs here), don't open a tracking issue that waits on an upstream fix. Add an ignore to `osv-scanner.toml` with an `ignoreUntil` date and a `reason` that stands alone: why Cosimo isn't affected and what would let the ignore go. If an issue already exists, comment with that reasoning and close it as not planned. When the date passes, CI fails: check again, then fix, extend, or remove the ignore.
+
 ## Worktrees
 Worktrees live next to the repo in `../cosimo-worktrees/<issue>-<slug>`, one per change. Each has its own `node_modules`, so run `bun install` in a new worktree before any checks.
 
