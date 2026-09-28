@@ -51,8 +51,12 @@ export function qtyText(milli: number) {
 }
 export function parseQty(s: string): number | null {
   const t = s.trim();
-  if (!/^-?\d+(\.\d{1,3})?$/.test(t)) return null;
-  const [w, f = ""] = t.replace("-", "").split(".");
-  const v = Number(w) * 1000 + Number(f.padEnd(3, "0"));
-  return t.startsWith("-") ? -v : v;
+  if (!/^\d*(\.\d*)?$/.test(t) || !/\d/.test(t)) return null;
+  let [w = "", f = ""] = t.split(".");
+  if (f.length > 3) {
+    if (/[1-9]/.test(f.slice(3))) return null; // extra non-zero digits past 3 decimals
+    f = f.slice(0, 3);
+  }
+  const v = Number(w || 0) * 1000 + Number(f.padEnd(3, "0"));
+  return v > 0 ? v : null;
 }
