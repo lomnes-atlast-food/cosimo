@@ -504,9 +504,13 @@ describe(`exports (${DB_MODE})`, () => {
       statement_end_date: "2026-12-31",
       statement_ending_balance: 0,
     });
-    for (const format of ["pdf", "csv"]) {
-      const r = await owner.req("GET", `${base()}/reconciliations/${start.body.id}/export?format=${format}`);
-      expect(r.status).toBe(200);
-    }
+    const csv = await owner.req("GET", `${base()}/reconciliations/${start.body.id}/export?format=csv`);
+    expect(csv.status).toBe(200);
+    const csvText = await csv.text();
+    expect(csvText.split("\r\n")[0]).toMatch(/^Account,/);
+    expect(csvText).toContain("date,memo,amount,cleared");
+    const pdf = await owner.req("GET", `${base()}/reconciliations/${start.body.id}/export?format=pdf`);
+    expect(pdf.status).toBe(200);
+    expect(pdf.headers.get("content-type")).toBe("application/pdf");
   });
 });
