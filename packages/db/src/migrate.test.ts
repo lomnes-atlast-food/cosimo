@@ -36,7 +36,7 @@ test("0002 detaches invalid sub-accounts and copies the top-level detail type an
       args: [id, code, `Account ${code}`, type, subtype, parent, tax, sys, key],
     });
 
-  expect(await migrate(client, orgMigrations)).toEqual(["0002_account_hierarchy"]);
+  expect(await migrate(client, orgMigrations.slice(0, upTo + 1))).toEqual(["0002_account_hierarchy"]);
   const rs = await client.execute("SELECT id, type, subtype, parent_id, tax_line FROM accounts ORDER BY id");
   const got = Object.fromEntries(
     rs.rows.map((r) => [String(r.id), [r.type, r.subtype, r.parent_id, r.tax_line]]),
@@ -53,4 +53,130 @@ test("0002 detaches invalid sub-accounts and copies the top-level detail type an
     d: ["expense", "travel", null, "schc.24a"],
     s: ["expense", "other", null, null],
   });
+});
+
+test("0003 moves recurring invoices to recurring templates, back-fills runs, and heals drifted dates", async () => {
+  const upTo = orgMigrations.findIndex((m) => m.tag === "0003_recurring_templates");
+  expect(upTo).toBeGreaterThan(0);
+  expect(await migrate(client, orgMigrations.slice(0, upTo))).toEqual([]);
+  await client.execute("INSERT INTO contacts (id, kind, name) VALUES ('c1', 'customer', 'Globex')");
+  const lines = JSON.stringify([
+    { description: "Retainer", quantity_milli: 1000, unit_price: 50000, account_id: "p" },
+  ]);
+  const templates: [string, string, string, string | null, number, number, number][] = [
+    // id, frequency, next_date, end_date, due_days, auto_send, is_active
+    ["t_drift", "monthly", "2026-04-28", null, 15, 0, 1],
+    ["t_weekly", "weekly", "2026-05-08", null, 30, 1, 1],
+    ["t_ended", "monthly", "2026-07-01", "2026-06-30", 30, 0, 0],
+    ["t_paused", "quarterly", "2026-09-15", null, 30, 0, 0],
+    ["t_leap", "yearly", "2026-02-28", null, 30, 0, 1],
+  ];
+  for (const [id, freq, next, end, due, send, active] of templates)
+    await client.execute({
+      sql: "INSERT INTO recurring_invoices (id, customer_id, name, frequency, next_date, end_date, due_days, template_json, auto_send, is_active) VALUES (?, 'c1', ?, ?, ?, ?, ?, ?, ?, ?)",
+      args: [
+        id,
+        `Template ${id}`,
+        freq,
+        next,
+        end,
+        due,
+        JSON.stringify({ memo: `Memo ${id}`, lines: JSON.parse(lines) }),
+        send,
+        active,
+      ],
+    });
+  const invoices: [string, string, string, string | null][] = [
+    // id, recurring_id, issue_date, sent_at
+    ["i1", "t_drift", "2026-01-31", null],
+    ["i2", "t_drift", "2026-02-28", null],
+    ["i3", "t_drift", "2026-03-28", null],
+    ["i4", "t_weekly", "2026-05-01", "2026-05-01T08:00:00.000Z"],
+    ["i5", "t_ended", "2026-05-01", null],
+    ["i6", "t_ended", "2026-06-01", null],
+    // A manual edit left a second invoice on the same date.
+    ["i7", "t_ended", "2026-06-01", null],
+    ["i8", "t_leap", "2024-02-29", null],
+    ["i9", "t_leap", "2025-02-28", null],
+  ];
+  for (const [id, rid, date, sent] of invoices)
+    await client.execute({
+      sql: "INSERT INTO invoices (id, number, customer_id, issue_date, due_date, recurring_id, sent_at) VALUES (?, ?, 'c1', ?, ?, ?, ?)",
+      args: [id, `INV-${id}`, date, date, rid, sent],
+    });
+
+  expect(await migrate(client, orgMigrations)).toEqual(["0003_recurring_templates"]);
+  const rs = await client.execute(
+    "SELECT id, kind, contact_id, run_mode, status, unit, interval, anchor_day, start_date, end_date, next_index, next_date, last_run_date FROM recurring_templates ORDER BY id",
+  );
+  const got = Object.fromEntries(rs.rows.map((r) => [String(r.id), { ...r }]));
+  expect(got.t_drift).toMatchObject({
+    kind: "invoice",
+    contact_id: "c1",
+    run_mode: "draft",
+    status: "active",
+    unit: "month",
+    interval: 1,
+    // Healed: anchored on the first invoice's day, and the next date is back on the 30th of April.
+    anchor_day: 31,
+    start_date: "2026-04-30",
+    next_index: 0,
+    next_date: "2026-04-30",
+    last_run_date: "2026-03-28",
+  });
+  expect(got.t_weekly).toMatchObject({
+    run_mode: "post_and_send",
+    status: "active",
+    unit: "week",
+    interval: 1,
+    anchor_day: null,
+    start_date: "2026-05-08",
+    next_date: "2026-05-08",
+  });
+  expect(got.t_ended).toMatchObject({
+    status: "ended",
+    unit: "month",
+    end_date: "2026-06-30",
+    next_date: null,
+  });
+  expect(got.t_paused).toMatchObject({
+    status: "paused",
+    unit: "month",
+    interval: 3,
+    next_date: "2026-09-15",
+  });
+  // February 29 anchors the yearly template; 2026 has no 29th, so the date stays on the 28th.
+  expect(got.t_leap).toMatchObject({ unit: "year", anchor_day: 29, next_date: "2026-02-28" });
+
+  const tpl = await client.execute("SELECT template_json FROM recurring_templates WHERE id = 't_drift'");
+  expect(JSON.parse(String(tpl.rows[0]!.template_json))).toEqual({
+    memo: "Memo t_drift",
+    terms: null,
+    due_days: 15,
+    lines: JSON.parse(lines),
+  });
+
+  const runs = await client.execute(
+    "SELECT template_id, occurrence_index, scheduled_date, status, doc_type, doc_id, send_status FROM recurring_runs ORDER BY template_id, scheduled_date",
+  );
+  expect(
+    runs.rows.map((r) => [r.template_id, r.occurrence_index, r.scheduled_date, r.doc_id, r.send_status]),
+  ).toEqual([
+    ["t_drift", -3, "2026-01-31", "i1", "not_needed"],
+    ["t_drift", -2, "2026-02-28", "i2", "not_needed"],
+    ["t_drift", -1, "2026-03-28", "i3", "not_needed"],
+    ["t_ended", -3, "2026-05-01", "i5", "not_needed"],
+    ["t_ended", -2, "2026-06-01", "i6", "not_needed"],
+    ["t_leap", -2, "2024-02-29", "i8", "not_needed"],
+    ["t_leap", -1, "2025-02-28", "i9", "not_needed"],
+    ["t_weekly", -1, "2026-05-01", "i4", "sent"],
+  ]);
+  expect(runs.rows.every((r) => r.status === "created" && r.doc_type === "invoice")).toBe(true);
+
+  const old = await client.execute(
+    "SELECT count(*) AS n FROM sqlite_master WHERE type = 'table' AND name = 'recurring_invoices'",
+  );
+  expect(Number(old.rows[0]!.n)).toBe(0);
+  const billCols = await client.execute("SELECT name FROM pragma_table_info('bills')");
+  expect(billCols.rows.map((r) => r.name)).toContain("recurring_id");
 });

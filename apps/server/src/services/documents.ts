@@ -6,7 +6,7 @@
  * post/reject hooks at the bottom of this file.
  */
 import { newId, type OrgDb, type OrgTx, org } from "@cosimo/db";
-import { addDays, addMonths, today } from "@cosimo/shared";
+import { addDays, today } from "@cosimo/shared";
 import { and, asc, desc, eq, gte, inArray, isNull, lte, type SQL, sql } from "drizzle-orm";
 import { conflict, forbidden, notFound, unprocessable } from "../http/errors.ts";
 import type { ActorInfo } from "./actor.ts";
@@ -215,7 +215,7 @@ export async function listInvoices(
   return Promise.all(rows.map((r) => invoiceView(db, r)));
 }
 
-async function checkDocLines(tx: Reader, lines: DocLineInput[], kind: DocType) {
+export async function checkDocLines(tx: Reader, lines: DocLineInput[], kind: DocType) {
   if (!lines.length) throw unprocessable("Add at least one line.", "empty");
   const accts = await accountMap(tx);
   for (const l of lines) {
@@ -571,6 +571,7 @@ export async function billView(db: Reader, b: BillRow) {
     overdue: (b.status === "open" || b.status === "partial") && b.dueDate < today(),
     memo: b.memo,
     entry_id: b.entryId,
+    recurring_id: b.recurringId,
     created_at: b.createdAt,
     voided_at: b.voidedAt,
     lines: lines.map((l) => ({
@@ -630,7 +631,13 @@ async function writeBillLines(tx: OrgTx, billId: string, lines: DocLineInput[]) 
   return total;
 }
 
-export async function createBillTx(tx: OrgTx, orgId: string, a: ActorInfo, input: BillInput) {
+export async function createBillTx(
+  tx: OrgTx,
+  orgId: string,
+  a: ActorInfo,
+  input: BillInput,
+  extra: { recurringId?: string } = {},
+) {
   const vendor = await mustGetContact(tx, input.vendor_id);
   if (vendor.kind === "customer")
     throw unprocessable("That contact is a customer. Mark it as a vendor first.", "invalid_contact");
@@ -646,6 +653,7 @@ export async function createBillTx(tx: OrgTx, orgId: string, a: ActorInfo, input
     status: "draft",
     currency: s.baseCurrency,
     memo: input.memo ?? null,
+    recurringId: extra.recurringId ?? null,
   });
   const total = await writeBillLines(tx, id, input.lines);
   await tx.update(org.bills).set({ total }).where(eq(org.bills.id, id));
@@ -1198,133 +1206,6 @@ export async function payFromBankTxnTx(
     })
     .where(eq(org.bankTransactions.id, t.id));
   return { ...out, transaction: bankTxnView(await mustGetBankTxn(tx, t.id)) };
-}
-
-// ----------------------------------------------------------------------------- recurring invoices
-
-export type RecurringRow = typeof org.recurringInvoices.$inferSelect;
-export interface RecurringInput {
-  customer_id: string;
-  name: string;
-  frequency: RecurringRow["frequency"];
-  next_date: string;
-  end_date?: string | null;
-  due_days?: number;
-  auto_send?: boolean;
-  is_active?: boolean;
-  template: { memo?: string | null; terms?: string | null; lines: DocLineInput[] };
-}
-
-export function recurringView(r: RecurringRow) {
-  return {
-    id: r.id,
-    customer_id: r.customerId,
-    name: r.name,
-    frequency: r.frequency,
-    next_date: r.nextDate,
-    end_date: r.endDate,
-    due_days: r.dueDays,
-    auto_send: r.autoSend,
-    is_active: r.isActive,
-    template: JSON.parse(r.templateJson) as RecurringInput["template"],
-    created_at: r.createdAt,
-  };
-}
-
-export function advanceDate(d: string, f: RecurringRow["frequency"]) {
-  switch (f) {
-    case "weekly":
-      return addDays(d, 7);
-    case "monthly":
-      return addMonths(d, 1);
-    case "quarterly":
-      return addMonths(d, 3);
-    case "yearly":
-      return addMonths(d, 12);
-  }
-}
-
-export async function saveRecurringTx(
-  tx: OrgTx,
-  orgId: string,
-  a: ActorInfo,
-  input: RecurringInput,
-  id?: string,
-) {
-  await mustGetContact(tx, input.customer_id);
-  await checkDocLines(tx, input.template.lines, "invoice");
-  const values = {
-    customerId: input.customer_id,
-    name: input.name,
-    frequency: input.frequency,
-    nextDate: input.next_date,
-    endDate: input.end_date ?? null,
-    dueDays: input.due_days ?? 30,
-    autoSend: input.auto_send ?? false,
-    isActive: input.is_active ?? true,
-    templateJson: JSON.stringify(input.template),
-  };
-  const rid = id ?? newId();
-  if (id) {
-    const before = await tx
-      .select()
-      .from(org.recurringInvoices)
-      .where(eq(org.recurringInvoices.id, id))
-      .get();
-    if (!before) throw notFound("Recurring invoice");
-    await tx.update(org.recurringInvoices).set(values).where(eq(org.recurringInvoices.id, id));
-  } else {
-    await tx.insert(org.recurringInvoices).values({ id: rid, ...values });
-  }
-  const row = (await tx.select().from(org.recurringInvoices).where(eq(org.recurringInvoices.id, rid)).get())!;
-  await appendAudit(tx, orgId, a, {
-    action: id ? "recurring_invoice.update" : "recurring_invoice.create",
-    targetType: "recurring_invoice",
-    targetId: rid,
-    after: recurringView(row),
-  });
-  return row;
-}
-
-/** Create the invoices that are due from recurring templates. Returns invoices to email (auto-send). */
-export async function runRecurringTx(tx: OrgTx, orgId: string, asOf = today()) {
-  const system: ActorInfo = { actor: "system", role: "owner", userId: null };
-  const due = await tx
-    .select()
-    .from(org.recurringInvoices)
-    .where(and(eq(org.recurringInvoices.isActive, true), lte(org.recurringInvoices.nextDate, asOf)))
-    .all();
-  const created: { invoiceId: string; autoSend: boolean }[] = [];
-  for (const r of due) {
-    let next = r.nextDate;
-    const tpl = JSON.parse(r.templateJson) as RecurringInput["template"];
-    // Catch up at most 12 periods per run.
-    for (let i = 0; i < 12 && next <= asOf && (!r.endDate || next <= r.endDate); i++) {
-      const inv = await createInvoiceTx(
-        tx,
-        orgId,
-        system,
-        {
-          customer_id: r.customerId,
-          issue_date: next,
-          due_date: addDays(next, r.dueDays),
-          terms: tpl.terms ?? null,
-          memo: tpl.memo ?? null,
-          lines: tpl.lines,
-        },
-        { recurringId: r.id },
-      );
-      if (r.autoSend) await finalizeInvoiceTx(tx, orgId, system, inv.id);
-      created.push({ invoiceId: inv.id, autoSend: r.autoSend });
-      next = advanceDate(next, r.frequency);
-    }
-    const ended = Boolean(r.endDate && next > r.endDate);
-    await tx
-      .update(org.recurringInvoices)
-      .set({ nextDate: next, isActive: !ended })
-      .where(eq(org.recurringInvoices.id, r.id));
-  }
-  return created;
 }
 
 // ----------------------------------------------------------------------------- hooks

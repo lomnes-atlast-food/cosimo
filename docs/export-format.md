@@ -90,9 +90,9 @@ The tables most readers want:
 | `attachments`, `attachment_links` | Attachment metadata; the bytes are in `attachments/<storage_key>` |
 | `audit_log`, `chain_checkpoints` | The audit chain and recorded chain heads |
 
-Other tables (`posting_context`, `recurring_invoices`, `import_batches`, `csv_profiles`,
-`bank_connections`, `comments`, `org_notes`, `schema_meta`) are exported too, so an import is
-complete.
+Other tables (`posting_context`, `recurring_templates`, `recurring_runs`, `import_batches`,
+`csv_profiles`, `bank_connections`, `comments`, `org_notes`, `schema_meta`) are exported too, so an
+import is complete.
 
 A trial balance, for example, is the sum of `journal_lines.amount` per `account_id`, over lines
 whose entry has `status = "posted"`.

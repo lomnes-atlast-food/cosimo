@@ -8902,7 +8902,7 @@ export interface paths {
                              * @example 12345
                              */
                             amount_gte?: number;
-                            item_types?: ("journal_entry" | "bank_categorization" | "rule" | "invoice_draft" | "bill_draft" | "entry_replacement" | "payment_redate")[];
+                            item_types?: ("journal_entry" | "bank_categorization" | "rule" | "invoice_draft" | "bill_draft" | "entry_replacement" | "payment_redate" | "recurring_template")[];
                             account_used_for_payee?: boolean;
                             rule_auto_post?: boolean;
                         };
@@ -9033,7 +9033,7 @@ export interface paths {
                              * @example 12345
                              */
                             amount_gte?: number;
-                            item_types?: ("journal_entry" | "bank_categorization" | "rule" | "invoice_draft" | "bill_draft" | "entry_replacement" | "payment_redate")[];
+                            item_types?: ("journal_entry" | "bank_categorization" | "rule" | "invoice_draft" | "bill_draft" | "entry_replacement" | "payment_redate" | "recurring_template")[];
                             account_used_for_payee?: boolean;
                             rule_auto_post?: boolean;
                         };
@@ -13130,390 +13130,6 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/api/v1/orgs/{orgId}/recurring-invoices": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        /** List recurring invoice templates */
-        get: {
-            parameters: {
-                query?: never;
-                header?: never;
-                path: {
-                    orgId: string;
-                };
-                cookie?: never;
-            };
-            requestBody?: never;
-            responses: {
-                /** @description OK */
-                200: {
-                    headers: {
-                        [name: string]: unknown;
-                    };
-                    content: {
-                        "application/json": {
-                            data: components["schemas"]["RecurringInvoice"][];
-                        };
-                    };
-                };
-                /** @description Invalid request */
-                400: {
-                    headers: {
-                        [name: string]: unknown;
-                    };
-                    content: {
-                        "application/json": components["schemas"]["Error"];
-                    };
-                };
-                /** @description Not authenticated */
-                401: {
-                    headers: {
-                        [name: string]: unknown;
-                    };
-                    content: {
-                        "application/json": components["schemas"]["Error"];
-                    };
-                };
-                /** @description Forbidden */
-                403: {
-                    headers: {
-                        [name: string]: unknown;
-                    };
-                    content: {
-                        "application/json": components["schemas"]["Error"];
-                    };
-                };
-                /** @description Not found */
-                404: {
-                    headers: {
-                        [name: string]: unknown;
-                    };
-                    content: {
-                        "application/json": components["schemas"]["Error"];
-                    };
-                };
-                /** @description Conflict */
-                409: {
-                    headers: {
-                        [name: string]: unknown;
-                    };
-                    content: {
-                        "application/json": components["schemas"]["Error"];
-                    };
-                };
-                /** @description Rule or invariant violation */
-                422: {
-                    headers: {
-                        [name: string]: unknown;
-                    };
-                    content: {
-                        "application/json": components["schemas"]["Error"];
-                    };
-                };
-                /** @description Rate limited */
-                429: {
-                    headers: {
-                        [name: string]: unknown;
-                    };
-                    content: {
-                        "application/json": components["schemas"]["Error"];
-                    };
-                };
-            };
-        };
-        put?: never;
-        /** Create a recurring invoice template (invoices are created daily when due) */
-        post: {
-            parameters: {
-                query?: never;
-                header?: {
-                    /** @description Makes a retry safe: the same key and body replay the first response. */
-                    "Idempotency-Key"?: string;
-                };
-                path: {
-                    orgId: string;
-                };
-                cookie?: never;
-            };
-            requestBody: {
-                content: {
-                    "application/json": {
-                        /** @example 01J9Z3K5Q7W8X9Y0A1B2C3D4E5 */
-                        customer_id: string;
-                        name: string;
-                        /** @enum {string} */
-                        frequency: "weekly" | "monthly" | "quarterly" | "yearly";
-                        /**
-                         * Format: date
-                         * @example 2026-01-31
-                         */
-                        next_date: string;
-                        /**
-                         * Format: date
-                         * @example 2026-01-31
-                         */
-                        end_date?: string | null;
-                        due_days?: number;
-                        auto_send?: boolean;
-                        is_active?: boolean;
-                        template: {
-                            memo?: string | null;
-                            terms?: string | null;
-                            lines: {
-                                description: string;
-                                /** @description Quantity × 1000 (1 = 1000) */
-                                quantity_milli?: number;
-                                /**
-                                 * @description Integer minor units (cents)
-                                 * @example 12345
-                                 */
-                                unit_price?: number;
-                                /**
-                                 * @description Bills: the line amount
-                                 * @example 12345
-                                 */
-                                amount?: number;
-                                /** @example 01J9Z3K5Q7W8X9Y0A1B2C3D4E5 */
-                                account_id: string;
-                            }[];
-                        };
-                    };
-                };
-            };
-            responses: {
-                /** @description Created */
-                201: {
-                    headers: {
-                        [name: string]: unknown;
-                    };
-                    content: {
-                        "application/json": components["schemas"]["RecurringInvoice"];
-                    };
-                };
-                /** @description Invalid request */
-                400: {
-                    headers: {
-                        [name: string]: unknown;
-                    };
-                    content: {
-                        "application/json": components["schemas"]["Error"];
-                    };
-                };
-                /** @description Not authenticated */
-                401: {
-                    headers: {
-                        [name: string]: unknown;
-                    };
-                    content: {
-                        "application/json": components["schemas"]["Error"];
-                    };
-                };
-                /** @description Forbidden */
-                403: {
-                    headers: {
-                        [name: string]: unknown;
-                    };
-                    content: {
-                        "application/json": components["schemas"]["Error"];
-                    };
-                };
-                /** @description Not found */
-                404: {
-                    headers: {
-                        [name: string]: unknown;
-                    };
-                    content: {
-                        "application/json": components["schemas"]["Error"];
-                    };
-                };
-                /** @description Conflict */
-                409: {
-                    headers: {
-                        [name: string]: unknown;
-                    };
-                    content: {
-                        "application/json": components["schemas"]["Error"];
-                    };
-                };
-                /** @description Rule or invariant violation */
-                422: {
-                    headers: {
-                        [name: string]: unknown;
-                    };
-                    content: {
-                        "application/json": components["schemas"]["Error"];
-                    };
-                };
-                /** @description Rate limited */
-                429: {
-                    headers: {
-                        [name: string]: unknown;
-                    };
-                    content: {
-                        "application/json": components["schemas"]["Error"];
-                    };
-                };
-            };
-        };
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/api/v1/orgs/{orgId}/recurring-invoices/{recurringId}": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        get?: never;
-        /** Replace a recurring invoice template */
-        put: {
-            parameters: {
-                query?: never;
-                header?: {
-                    /** @description Makes a retry safe: the same key and body replay the first response. */
-                    "Idempotency-Key"?: string;
-                };
-                path: {
-                    orgId: string;
-                    recurringId: string;
-                };
-                cookie?: never;
-            };
-            requestBody: {
-                content: {
-                    "application/json": {
-                        /** @example 01J9Z3K5Q7W8X9Y0A1B2C3D4E5 */
-                        customer_id: string;
-                        name: string;
-                        /** @enum {string} */
-                        frequency: "weekly" | "monthly" | "quarterly" | "yearly";
-                        /**
-                         * Format: date
-                         * @example 2026-01-31
-                         */
-                        next_date: string;
-                        /**
-                         * Format: date
-                         * @example 2026-01-31
-                         */
-                        end_date?: string | null;
-                        due_days?: number;
-                        auto_send?: boolean;
-                        is_active?: boolean;
-                        template: {
-                            memo?: string | null;
-                            terms?: string | null;
-                            lines: {
-                                description: string;
-                                /** @description Quantity × 1000 (1 = 1000) */
-                                quantity_milli?: number;
-                                /**
-                                 * @description Integer minor units (cents)
-                                 * @example 12345
-                                 */
-                                unit_price?: number;
-                                /**
-                                 * @description Bills: the line amount
-                                 * @example 12345
-                                 */
-                                amount?: number;
-                                /** @example 01J9Z3K5Q7W8X9Y0A1B2C3D4E5 */
-                                account_id: string;
-                            }[];
-                        };
-                    };
-                };
-            };
-            responses: {
-                /** @description OK */
-                200: {
-                    headers: {
-                        [name: string]: unknown;
-                    };
-                    content: {
-                        "application/json": components["schemas"]["RecurringInvoice"];
-                    };
-                };
-                /** @description Invalid request */
-                400: {
-                    headers: {
-                        [name: string]: unknown;
-                    };
-                    content: {
-                        "application/json": components["schemas"]["Error"];
-                    };
-                };
-                /** @description Not authenticated */
-                401: {
-                    headers: {
-                        [name: string]: unknown;
-                    };
-                    content: {
-                        "application/json": components["schemas"]["Error"];
-                    };
-                };
-                /** @description Forbidden */
-                403: {
-                    headers: {
-                        [name: string]: unknown;
-                    };
-                    content: {
-                        "application/json": components["schemas"]["Error"];
-                    };
-                };
-                /** @description Not found */
-                404: {
-                    headers: {
-                        [name: string]: unknown;
-                    };
-                    content: {
-                        "application/json": components["schemas"]["Error"];
-                    };
-                };
-                /** @description Conflict */
-                409: {
-                    headers: {
-                        [name: string]: unknown;
-                    };
-                    content: {
-                        "application/json": components["schemas"]["Error"];
-                    };
-                };
-                /** @description Rule or invariant violation */
-                422: {
-                    headers: {
-                        [name: string]: unknown;
-                    };
-                    content: {
-                        "application/json": components["schemas"]["Error"];
-                    };
-                };
-                /** @description Rate limited */
-                429: {
-                    headers: {
-                        [name: string]: unknown;
-                    };
-                    content: {
-                        "application/json": components["schemas"]["Error"];
-                    };
-                };
-            };
-        };
-        post?: never;
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
     "/api/v1/orgs/{orgId}/attachments": {
         parameters: {
             query?: never;
@@ -13932,6 +13548,1068 @@ export interface paths {
                 };
             };
         };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/orgs/{orgId}/recurring-templates": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List recurring templates
+         * @description Deleted (archived) templates are left out unless `status` asks for them.
+         */
+        get: {
+            parameters: {
+                query?: {
+                    kind?: "invoice" | "bill" | "entry";
+                    /** @description Comma-separated statuses */
+                    status?: string;
+                };
+                header?: never;
+                path: {
+                    orgId: string;
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            data: components["schemas"]["RecurringTemplate"][];
+                        };
+                    };
+                };
+                /** @description Invalid request */
+                400: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+                /** @description Not authenticated */
+                401: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+                /** @description Forbidden */
+                403: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+                /** @description Not found */
+                404: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+                /** @description Conflict */
+                409: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+                /** @description Rule or invariant violation */
+                422: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+                /** @description Rate limited */
+                429: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+            };
+        };
+        put?: never;
+        /**
+         * Create a recurring template
+         * @description Documents are created each morning when due. From an AI assistant or a propose-only token, the template waits in the review queue as `proposed` until a person approves it.
+         */
+        post: {
+            parameters: {
+                query?: never;
+                header?: {
+                    /** @description Makes a retry safe: the same key and body replay the first response. */
+                    "Idempotency-Key"?: string;
+                };
+                path: {
+                    orgId: string;
+                };
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": components["schemas"]["RecurringTemplateInput"];
+                };
+            };
+            responses: {
+                /** @description Created */
+                201: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["RecurringTemplate"];
+                    };
+                };
+                /** @description Invalid request */
+                400: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+                /** @description Not authenticated */
+                401: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+                /** @description Forbidden */
+                403: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+                /** @description Not found */
+                404: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+                /** @description Conflict */
+                409: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+                /** @description Rule or invariant violation */
+                422: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+                /** @description Rate limited */
+                429: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/orgs/{orgId}/recurring-templates/{templateId}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Get a recurring template and its run history */
+        get: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    orgId: string;
+                    templateId: string;
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            template: components["schemas"]["RecurringTemplate"];
+                            runs: components["schemas"]["RecurringRun"][];
+                        };
+                    };
+                };
+                /** @description Invalid request */
+                400: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+                /** @description Not authenticated */
+                401: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+                /** @description Forbidden */
+                403: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+                /** @description Not found */
+                404: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+                /** @description Conflict */
+                409: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+                /** @description Rule or invariant violation */
+                422: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+                /** @description Rate limited */
+                429: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+            };
+        };
+        /**
+         * Replace a recurring template
+         * @description Changes apply to future runs only. A schedule change continues from the day after the last run. From an AI assistant or a propose-only token, the change waits in the review queue.
+         */
+        put: {
+            parameters: {
+                query?: never;
+                header?: {
+                    /** @description Makes a retry safe: the same key and body replay the first response. */
+                    "Idempotency-Key"?: string;
+                };
+                path: {
+                    orgId: string;
+                    templateId: string;
+                };
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": components["schemas"]["RecurringTemplateInput"];
+                };
+            };
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["RecurringTemplate"];
+                    };
+                };
+                /** @description Invalid request */
+                400: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+                /** @description Not authenticated */
+                401: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+                /** @description Forbidden */
+                403: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+                /** @description Not found */
+                404: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+                /** @description Conflict */
+                409: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+                /** @description Rule or invariant violation */
+                422: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+                /** @description Rate limited */
+                429: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+            };
+        };
+        post?: never;
+        /**
+         * Delete a recurring template
+         * @description The template is archived: it stops running, and its run history and document links stay.
+         */
+        delete: {
+            parameters: {
+                query?: never;
+                header?: {
+                    /** @description Makes a retry safe: the same key and body replay the first response. */
+                    "Idempotency-Key"?: string;
+                };
+                path: {
+                    orgId: string;
+                    templateId: string;
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["RecurringTemplate"];
+                    };
+                };
+                /** @description Invalid request */
+                400: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+                /** @description Not authenticated */
+                401: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+                /** @description Forbidden */
+                403: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+                /** @description Not found */
+                404: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+                /** @description Conflict */
+                409: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+                /** @description Rule or invariant violation */
+                422: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+                /** @description Rate limited */
+                429: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+            };
+        };
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/orgs/{orgId}/recurring-templates/{templateId}/pause": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Pause a recurring template
+         * @description Nothing is created while paused.
+         */
+        post: {
+            parameters: {
+                query?: never;
+                header?: {
+                    /** @description Makes a retry safe: the same key and body replay the first response. */
+                    "Idempotency-Key"?: string;
+                };
+                path: {
+                    orgId: string;
+                    templateId: string;
+                };
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": {
+                        rationale?: string | null;
+                    };
+                };
+            };
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["RecurringTemplate"];
+                    };
+                };
+                /** @description Invalid request */
+                400: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+                /** @description Not authenticated */
+                401: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+                /** @description Forbidden */
+                403: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+                /** @description Not found */
+                404: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+                /** @description Conflict */
+                409: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+                /** @description Rule or invariant violation */
+                422: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+                /** @description Rate limited */
+                429: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/orgs/{orgId}/recurring-templates/{templateId}/resume": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Resume a paused recurring template
+         * @description Runs continue from today on; dates that passed while paused are not created.
+         */
+        post: {
+            parameters: {
+                query?: never;
+                header?: {
+                    /** @description Makes a retry safe: the same key and body replay the first response. */
+                    "Idempotency-Key"?: string;
+                };
+                path: {
+                    orgId: string;
+                    templateId: string;
+                };
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": {
+                        rationale?: string | null;
+                    };
+                };
+            };
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["RecurringTemplate"];
+                    };
+                };
+                /** @description Invalid request */
+                400: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+                /** @description Not authenticated */
+                401: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+                /** @description Forbidden */
+                403: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+                /** @description Not found */
+                404: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+                /** @description Conflict */
+                409: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+                /** @description Rule or invariant violation */
+                422: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+                /** @description Rate limited */
+                429: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/orgs/{orgId}/recurring-templates/{templateId}/skip": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Skip the next date
+         * @description Moves past the next date without creating anything, for example to give up on a failing run.
+         */
+        post: {
+            parameters: {
+                query?: never;
+                header?: {
+                    /** @description Makes a retry safe: the same key and body replay the first response. */
+                    "Idempotency-Key"?: string;
+                };
+                path: {
+                    orgId: string;
+                    templateId: string;
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["RecurringTemplate"];
+                    };
+                };
+                /** @description Invalid request */
+                400: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+                /** @description Not authenticated */
+                401: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+                /** @description Forbidden */
+                403: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+                /** @description Not found */
+                404: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+                /** @description Conflict */
+                409: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+                /** @description Rule or invariant violation */
+                422: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+                /** @description Rate limited */
+                429: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/orgs/{orgId}/recurring-templates/{templateId}/run": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Run a recurring template now
+         * @description Without `early`, creates what is due by today (retrying after an error). With `early`, creates the next occurrence now, dated its scheduled date. Posting still follows review rules, and auto-send invoices are emailed afterwards.
+         */
+        post: {
+            parameters: {
+                query?: never;
+                header?: {
+                    /** @description Makes a retry safe: the same key and body replay the first response. */
+                    "Idempotency-Key"?: string;
+                };
+                path: {
+                    orgId: string;
+                    templateId: string;
+                };
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": {
+                        early?: boolean;
+                    };
+                };
+            };
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            template: components["schemas"]["RecurringTemplate"];
+                            created: number;
+                            error: string | null;
+                            emailed: number;
+                        };
+                    };
+                };
+                /** @description Invalid request */
+                400: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+                /** @description Not authenticated */
+                401: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+                /** @description Forbidden */
+                403: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+                /** @description Not found */
+                404: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+                /** @description Conflict */
+                409: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+                /** @description Rule or invariant violation */
+                422: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+                /** @description Rate limited */
+                429: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/orgs/{orgId}/recurring-templates/{templateId}/occurrences": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Upcoming dates of a recurring template */
+        get: {
+            parameters: {
+                query?: {
+                    count?: number;
+                };
+                header?: never;
+                path: {
+                    orgId: string;
+                    templateId: string;
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            data: {
+                                index: number;
+                                date: string;
+                            }[];
+                        };
+                    };
+                };
+                /** @description Invalid request */
+                400: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+                /** @description Not authenticated */
+                401: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+                /** @description Forbidden */
+                403: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+                /** @description Not found */
+                404: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+                /** @description Conflict */
+                409: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+                /** @description Rule or invariant violation */
+                422: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+                /** @description Rate limited */
+                429: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+            };
+        };
+        put?: never;
+        post?: never;
         delete?: never;
         options?: never;
         head?: never;
@@ -18103,7 +18781,7 @@ export interface components {
         ReviewItem: {
             id: string;
             /** @enum {string} */
-            item_type: "journal_entry" | "bank_categorization" | "rule" | "invoice_draft" | "bill_draft" | "entry_replacement" | "payment_redate" | "import_batch";
+            item_type: "journal_entry" | "bank_categorization" | "rule" | "invoice_draft" | "bill_draft" | "entry_replacement" | "payment_redate" | "import_batch" | "recurring_template";
             item_id: string;
             proposed_by_actor: string;
             proposed_by_id: string | null;
@@ -18266,6 +18944,7 @@ export interface components {
             overdue: boolean;
             memo: string | null;
             entry_id: string | null;
+            recurring_id: string | null;
             created_at: string;
             voided_at: string | null;
             lines: {
@@ -18321,40 +19000,6 @@ export interface components {
             }[];
             created_at: string;
         };
-        RecurringInvoice: {
-            id: string;
-            customer_id: string;
-            name: string;
-            /** @enum {string} */
-            frequency: "weekly" | "monthly" | "quarterly" | "yearly";
-            next_date: string;
-            end_date: string | null;
-            due_days: number;
-            auto_send: boolean;
-            is_active: boolean;
-            template: {
-                memo?: string | null;
-                terms?: string | null;
-                lines: {
-                    description: string;
-                    /** @description Quantity × 1000 (1 = 1000) */
-                    quantity_milli?: number;
-                    /**
-                     * @description Integer minor units (cents)
-                     * @example 12345
-                     */
-                    unit_price?: number;
-                    /**
-                     * @description Bills: the line amount
-                     * @example 12345
-                     */
-                    amount?: number;
-                    /** @example 01J9Z3K5Q7W8X9Y0A1B2C3D4E5 */
-                    account_id: string;
-                }[];
-            };
-            created_at: string;
-        };
         Attachment: {
             id: string;
             filename: string;
@@ -18362,6 +19007,243 @@ export interface components {
             size_bytes: number;
             sha256: string;
             uploaded_by: string | null;
+            created_at: string;
+        };
+        RecurringTemplate: {
+            id: string;
+            /** @enum {string} */
+            kind: "invoice" | "bill" | "entry";
+            name: string;
+            contact_id: string | null;
+            contact_name: string | null;
+            /** @enum {string} */
+            run_mode: "draft" | "post" | "post_and_send";
+            /** @enum {string} */
+            status: "proposed" | "active" | "paused" | "ended" | "archived";
+            schedule: {
+                /** @enum {string} */
+                unit: "day" | "week" | "month" | "year";
+                interval: number;
+                anchor_day: number | null;
+                start_date: string;
+                end_date: string | null;
+                max_occurrences: number | null;
+            };
+            schedule_summary: string;
+            next_index: number;
+            next_date: string | null;
+            upcoming: string[];
+            /**
+             * @description Integer minor units (cents)
+             * @example 12345
+             */
+            total: number;
+            last_run_date: string | null;
+            last_error: string | null;
+            last_error_at: string | null;
+            generated_count: number;
+            pending_review: {
+                review_item_id: string;
+                action: string;
+            } | null;
+            template: {
+                memo: string | null;
+                terms: string | null;
+                due_days: number | null;
+                bill_number: string | null;
+                lines: {
+                    description?: string | null;
+                    quantity_milli?: number;
+                    /**
+                     * @description Integer minor units (cents)
+                     * @example 12345
+                     */
+                    unit_price?: number;
+                    /**
+                     * @description Integer minor units (cents)
+                     * @example 12345
+                     */
+                    amount?: number;
+                    account_id: string;
+                    contact_id?: string | null;
+                }[];
+            };
+            created_by_actor: string;
+            created_at: string;
+            updated_at: string;
+        };
+        RecurringTemplateInput: {
+            /** @enum {string} */
+            kind: "invoice";
+            /** @example 01J9Z3K5Q7W8X9Y0A1B2C3D4E5 */
+            contact_id: string;
+            /** @enum {string} */
+            run_mode: "draft" | "post" | "post_and_send";
+            template: {
+                /** @description May use {month}, {year}, {quarter}, {period}, {date}, and offsets like {month-1} */
+                memo?: string | null;
+                terms?: string | null;
+                /** @description Days after the issue date; defaults to the terms */
+                due_days?: number | null;
+                lines: {
+                    /** @description May use {month}, {year}, {quarter}, {period}, {date}, and offsets like {month-1} */
+                    description?: string | null;
+                    quantity_milli?: number;
+                    /**
+                     * @description Integer minor units (cents)
+                     * @example 12345
+                     */
+                    unit_price: number;
+                    /** @example 01J9Z3K5Q7W8X9Y0A1B2C3D4E5 */
+                    account_id: string;
+                }[];
+            };
+            name: string;
+            schedule: {
+                /** @enum {string} */
+                unit: "day" | "week" | "month" | "year";
+                /**
+                 * @description Every N units; quarterly is 3 months
+                 * @default 1
+                 */
+                interval: number;
+                /** @description Monthly and yearly only: the day of the month (1-31, clamped to short months) or -1 for the last day. Defaults to the start date's day. */
+                anchor_day?: number | null;
+                /**
+                 * Format: date
+                 * @example 2026-01-31
+                 */
+                start_date: string;
+                /**
+                 * Format: date
+                 * @description Inclusive. Give this or max_occurrences.
+                 * @example 2026-01-31
+                 */
+                end_date?: string | null;
+                /** @description Schedule slots in total, skipped ones included */
+                max_occurrences?: number | null;
+            };
+            /** @description Shown in the review queue when the change is a proposal */
+            rationale?: string | null;
+        } | {
+            /** @enum {string} */
+            kind: "bill";
+            /** @example 01J9Z3K5Q7W8X9Y0A1B2C3D4E5 */
+            contact_id: string;
+            /** @enum {string} */
+            run_mode: "draft" | "post";
+            template: {
+                /** @description May use {month}, {year}, {quarter}, {period}, {date}, and offsets like {month-1} */
+                bill_number?: string | null;
+                /** @description May use {month}, {year}, {quarter}, {period}, {date}, and offsets like {month-1} */
+                memo?: string | null;
+                /** @description Days after the issue date; defaults to 30 */
+                due_days?: number | null;
+                lines: {
+                    /** @description May use {month}, {year}, {quarter}, {period}, {date}, and offsets like {month-1} */
+                    description?: string | null;
+                    /**
+                     * @description Integer minor units (cents)
+                     * @example 12345
+                     */
+                    amount: number;
+                    /** @example 01J9Z3K5Q7W8X9Y0A1B2C3D4E5 */
+                    account_id: string;
+                }[];
+            };
+            name: string;
+            schedule: {
+                /** @enum {string} */
+                unit: "day" | "week" | "month" | "year";
+                /**
+                 * @description Every N units; quarterly is 3 months
+                 * @default 1
+                 */
+                interval: number;
+                /** @description Monthly and yearly only: the day of the month (1-31, clamped to short months) or -1 for the last day. Defaults to the start date's day. */
+                anchor_day?: number | null;
+                /**
+                 * Format: date
+                 * @example 2026-01-31
+                 */
+                start_date: string;
+                /**
+                 * Format: date
+                 * @description Inclusive. Give this or max_occurrences.
+                 * @example 2026-01-31
+                 */
+                end_date?: string | null;
+                /** @description Schedule slots in total, skipped ones included */
+                max_occurrences?: number | null;
+            };
+            /** @description Shown in the review queue when the change is a proposal */
+            rationale?: string | null;
+        } | {
+            /** @enum {string} */
+            kind: "entry";
+            /** @example 01J9Z3K5Q7W8X9Y0A1B2C3D4E5 */
+            contact_id?: string | null;
+            /** @enum {string} */
+            run_mode: "draft" | "post";
+            template: {
+                /** @description May use {month}, {year}, {quarter}, {period}, {date}, and offsets like {month-1} */
+                memo?: string | null;
+                lines: {
+                    /** @example 01J9Z3K5Q7W8X9Y0A1B2C3D4E5 */
+                    account_id: string;
+                    /**
+                     * @description Debit positive, credit negative
+                     * @example 12345
+                     */
+                    amount: number;
+                    /** @description May use {month}, {year}, {quarter}, {period}, {date}, and offsets like {month-1} */
+                    description?: string | null;
+                    /** @example 01J9Z3K5Q7W8X9Y0A1B2C3D4E5 */
+                    contact_id?: string | null;
+                }[];
+            };
+            name: string;
+            schedule: {
+                /** @enum {string} */
+                unit: "day" | "week" | "month" | "year";
+                /**
+                 * @description Every N units; quarterly is 3 months
+                 * @default 1
+                 */
+                interval: number;
+                /** @description Monthly and yearly only: the day of the month (1-31, clamped to short months) or -1 for the last day. Defaults to the start date's day. */
+                anchor_day?: number | null;
+                /**
+                 * Format: date
+                 * @example 2026-01-31
+                 */
+                start_date: string;
+                /**
+                 * Format: date
+                 * @description Inclusive. Give this or max_occurrences.
+                 * @example 2026-01-31
+                 */
+                end_date?: string | null;
+                /** @description Schedule slots in total, skipped ones included */
+                max_occurrences?: number | null;
+            };
+            /** @description Shown in the review queue when the change is a proposal */
+            rationale?: string | null;
+        };
+        RecurringRun: {
+            id: string;
+            occurrence_index: number;
+            scheduled_date: string;
+            /** @enum {string} */
+            status: "created" | "skipped";
+            /** @enum {string|null} */
+            doc_type: "invoice" | "bill" | "entry" | null;
+            doc_id: string | null;
+            doc_number: string | null;
+            doc_status: string | null;
+            /** @enum {string} */
+            send_status: "pending" | "sent" | "failed" | "not_needed";
+            error: string | null;
             created_at: string;
         };
         PlaidStatus: {

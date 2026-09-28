@@ -12,6 +12,7 @@ import { mountMcp } from "./http/routes/mcp.ts";
 import { mountOAuth, oauthRoutes } from "./http/routes/oauth.ts";
 import { operationsRoutes } from "./http/routes/operations.ts";
 import { plaidRoutes } from "./http/routes/plaid.ts";
+import { recurringRoutes } from "./http/routes/recurring.ts";
 import { registerBankingJobs } from "./jobs/banking-jobs.ts";
 import { registerDocumentJobs } from "./jobs/document-jobs.ts";
 import { registerOpsJobs } from "./jobs/ops-jobs.ts";
@@ -20,6 +21,7 @@ import { Mailer } from "./services/mailer.ts";
 import { OAuthService } from "./services/oauth.ts";
 import { createStore } from "./services/storage.ts";
 import "./services/rules.ts";
+import "./services/recurring.ts";
 import { registerLedgerJobs } from "./jobs/ledger-jobs.ts";
 import { Scheduler } from "./jobs/scheduler.ts";
 import { coaSeeder } from "./services/accounts.ts";
@@ -49,6 +51,7 @@ registerContextPlugin(() => {
   registerDocumentJobs();
 });
 registerApiModule(documentRoutes);
+registerApiModule(recurringRoutes);
 registerApiModule(exportRoutes);
 
 // Phase 5: Plaid bank feeds

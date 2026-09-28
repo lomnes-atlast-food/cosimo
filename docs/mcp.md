@@ -38,6 +38,7 @@ Read:
 | `list_contacts` | Customers and vendors; pass `include_archived` to see archived ones too |
 | `list_invoices`, `list_bills`, `list_bill_payments` | Invoices to customers, bills from vendors, and payments sent to vendors |
 | `list_pending_reviews`, `get_review_item` | The review queue |
+| `list_recurring_templates` | Recurring invoices, bills, and journal entries: schedule, next and upcoming dates, run mode, total, last error, and any change waiting for review |
 
 `list_uncategorized_transactions` leaves out transactions still pending at the bank: they aren't
 categorizable yet and don't count toward a closed month.
@@ -56,6 +57,7 @@ Propose (each takes a `rationale`, which you see in Review):
 | `create_bill_draft` | Posts the bill to Accounts Payable |
 | `propose_reversal` | Posts a reversal of a posted entry |
 | `propose_replacement` | Reverses a posted entry and posts the corrected one, together (one review item) |
+| `propose_recurring_template` | Creates, changes, pauses, or resumes a recurring invoice, bill, or journal entry. A template that emails invoices to the customer always waits for a person, whatever the review policies say |
 | `propose_payment_date_change` | Moves a payment to a new date: its entry is reversed on the old date and posted again on the new one; the documents it pays stay paid and a matched bank transaction stays matched (one review item) |
 
 Entries created by invoices, bills, and payments can't be reversed or replaced over MCP; void or

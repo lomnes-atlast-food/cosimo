@@ -23,7 +23,15 @@ import {
   td,
   th,
 } from "../components/ui";
-import { type Contact, INVOICE_STATUS, type Invoice, parseQty, qtyText, useContacts } from "../lib/documents";
+import {
+  type Contact,
+  INVOICE_STATUS,
+  type Invoice,
+  parseQty,
+  qtyText,
+  type Recurring,
+  useContacts,
+} from "../lib/documents";
 import { centsToDecimal, fmtDate, fmtDateTime, money, todayIso, tryParseCents } from "../lib/format";
 import { useAccounts } from "../lib/ledger";
 import { useOrg, useOrgId, useRole } from "../lib/org";
@@ -998,16 +1006,16 @@ export function PaymentModal({
 export function RecurringPage() {
   const orgId = useOrgId();
   const { canWrite } = useRole();
-  const contacts = useContacts(orgId, "customer");
   const list = useQuery({
     queryKey: ["recurring", orgId],
     queryFn: () =>
-      unwrap(api.GET("/api/v1/orgs/{orgId}/recurring-invoices", { params: { path: { orgId } } })).then(
-        (r) => r.data,
-      ),
+      unwrap(
+        api.GET("/api/v1/orgs/{orgId}/recurring-templates", {
+          params: { path: { orgId }, query: { kind: "invoice" } },
+        }),
+      ).then((r) => r.data),
   });
   const [adding, setAdding] = useState(false);
-  const name = (id: string) => contacts.data?.find((c) => c.id === id)?.name ?? "";
   return (
     <>
       <PageHeader
@@ -1034,21 +1042,26 @@ export function RecurringPage() {
             </thead>
             <tbody className="divide-y divide-zinc-100 dark:divide-zinc-800">
               {list.data.map((r) => (
-                <tr key={r.id} className={r.is_active ? "" : "opacity-60"}>
-                  <td className={td}>{r.name}</td>
-                  <td className={td}>{name(r.customer_id)}</td>
-                  <td className={td}>{r.frequency}</td>
-                  <td className={td}>{fmtDate(r.next_date)}</td>
-                  <td className={`${td} text-right num`}>
-                    {money(
-                      r.template.lines.reduce(
-                        (s, l) => s + Math.round(((l.quantity_milli ?? 1000) * (l.unit_price ?? 0)) / 1000),
-                        0,
-                      ),
+                <tr key={r.id} className={r.status === "active" ? "" : "opacity-60"}>
+                  <td className={td}>
+                    {r.name}
+                    {r.last_error && (
+                      <div className="text-xs text-red-600 dark:text-red-400">{r.last_error}</div>
                     )}
                   </td>
+                  <td className={td}>{r.contact_name}</td>
+                  <td className={td}>{r.schedule_summary}</td>
+                  <td className={td}>{r.next_date ? fmtDate(r.next_date) : "—"}</td>
+                  <td className={`${td} text-right num`}>{money(r.total)}</td>
                   <td className={td}>
-                    {r.auto_send ? <Badge tone="green">Auto-send</Badge> : <Badge>Draft only</Badge>}
+                    <div className="flex gap-1">
+                      <Badge tone={RUN_MODE[r.run_mode].tone}>{RUN_MODE[r.run_mode].label}</Badge>
+                      {r.status !== "active" && (
+                        <Badge tone={r.status === "proposed" ? "amber" : "zinc"}>
+                          {TEMPLATE_STATUS[r.status]}
+                        </Badge>
+                      )}
+                    </div>
                   </td>
                 </tr>
               ))}
@@ -1060,6 +1073,27 @@ export function RecurringPage() {
     </>
   );
 }
+
+const RUN_MODE: Record<Recurring["run_mode"], { label: string; tone: "zinc" | "blue" | "green" }> = {
+  draft: { label: "Draft only", tone: "zinc" },
+  post: { label: "Post", tone: "blue" },
+  post_and_send: { label: "Auto-send", tone: "green" },
+};
+
+const TEMPLATE_STATUS: Record<Recurring["status"], string> = {
+  proposed: "Waiting for review",
+  active: "Active",
+  paused: "Paused",
+  ended: "Ended",
+  archived: "Deleted",
+};
+
+const FREQUENCY = {
+  weekly: { unit: "week", interval: 1 },
+  monthly: { unit: "month", interval: 1 },
+  quarterly: { unit: "month", interval: 3 },
+  yearly: { unit: "year", interval: 1 },
+} as const;
 
 function RecurringForm({ onClose }: { onClose: () => void }) {
   const orgId = useOrgId();
@@ -1077,15 +1111,14 @@ function RecurringForm({ onClose }: { onClose: () => void }) {
   const save = useMutation({
     mutationFn: () =>
       unwrap(
-        api.POST("/api/v1/orgs/{orgId}/recurring-invoices", {
+        api.POST("/api/v1/orgs/{orgId}/recurring-templates", {
           params: { path: { orgId } },
           body: {
-            customer_id: customer,
+            kind: "invoice",
+            contact_id: customer,
             name,
-            frequency,
-            next_date: next,
-            end_date: end || null,
-            auto_send: autoSend,
+            run_mode: autoSend ? "post_and_send" : "draft",
+            schedule: { ...FREQUENCY[frequency], start_date: next, end_date: end || null },
             template: {
               lines: lines.map((l) => ({
                 description: l.description || "Item",

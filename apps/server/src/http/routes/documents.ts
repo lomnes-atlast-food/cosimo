@@ -1,7 +1,5 @@
-/** Receivables and payables API: contacts, invoices, bills, payments, recurring invoices, attachments. */
-import { org } from "@cosimo/db";
+/** Receivables and payables API: contacts, invoices, bills, payments, attachments. */
 import { createRoute } from "@hono/zod-openapi";
-import { desc } from "drizzle-orm";
 import {
   ATTACHMENT_TARGETS,
   attachmentView,
@@ -43,8 +41,6 @@ import {
   payFromBankTxnTx,
   paymentView,
   recordPaymentTx,
-  recurringView,
-  saveRecurringTx,
   unapplyPaymentTx,
   updateBillTx,
   updateInvoiceTx,
@@ -180,6 +176,7 @@ const BillSchema = z
     overdue: z.boolean(),
     memo: z.string().nullable(),
     entry_id: z.string().nullable(),
+    recurring_id: z.string().nullable(),
     created_at: z.string(),
     voided_at: z.string().nullable(),
     lines: z.array(
@@ -229,41 +226,6 @@ const PaymentSchema = z
   .openapi("Payment");
 const Application = z.object({ document_id: Id, amount: Cents.refine((n) => n > 0, "Must be positive") });
 
-const RecurringSchema = z
-  .object({
-    id: z.string(),
-    customer_id: z.string(),
-    name: z.string(),
-    frequency: z.enum(["weekly", "monthly", "quarterly", "yearly"]),
-    next_date: z.string(),
-    end_date: z.string().nullable(),
-    due_days: z.number().int(),
-    auto_send: z.boolean(),
-    is_active: z.boolean(),
-    template: z.object({
-      memo: z.string().nullable().optional(),
-      terms: z.string().nullable().optional(),
-      lines: z.array(DocLine),
-    }),
-    created_at: z.string(),
-  })
-  .openapi("RecurringInvoice");
-const RecurringInput = z.object({
-  customer_id: Id,
-  name: z.string().trim().min(1).max(200),
-  frequency: z.enum(["weekly", "monthly", "quarterly", "yearly"]),
-  next_date: IsoDate,
-  end_date: IsoDate.nullable().optional(),
-  due_days: z.number().int().min(0).max(365).optional(),
-  auto_send: z.boolean().optional(),
-  is_active: z.boolean().optional(),
-  template: z.object({
-    memo: z.string().max(2000).nullable().optional(),
-    terms: z.string().max(100).nullable().optional(),
-    lines: z.array(DocLine).min(1).max(200),
-  }),
-});
-
 const AttachmentSchema = z
   .object({
     id: z.string(),
@@ -286,7 +248,6 @@ const ContactParams = P("contactId");
 const InvoiceParams = P("invoiceId");
 const BillParams = P("billId");
 const PaymentParams = P("paymentId");
-const RecurringParams = P("recurringId");
 const AttachmentParams = P("attachmentId");
 
 function submitInfo(
@@ -953,67 +914,6 @@ export function documentRoutes() {
           entry: out.result.entry,
           ...submitInfo(out.result),
         },
-        200,
-      );
-    },
-  );
-
-  // ------------------------------------------------------------------ recurring invoices
-  r.openapi(
-    createRoute({
-      method: "get",
-      path: "/orgs/{orgId}/recurring-invoices",
-      tags: ["Invoices"],
-      summary: "List recurring invoice templates",
-      security: bearerSecurity,
-      request: { params: OrgParams },
-      responses: { 200: json(z.object({ data: z.array(RecurringSchema) })), ...errorResponses },
-    }),
-    async (c) => {
-      const rows = await c
-        .get("org")
-        .handle.db.select()
-        .from(org.recurringInvoices)
-        .orderBy(desc(org.recurringInvoices.createdAt))
-        .all();
-      return c.json({ data: rows.map(recurringView) }, 200);
-    },
-  );
-  r.openapi(
-    createRoute({
-      method: "post",
-      path: "/orgs/{orgId}/recurring-invoices",
-      tags: ["Invoices"],
-      summary: "Create a recurring invoice template (invoices are created daily when due)",
-      security: bearerSecurity,
-      request: { params: OrgParams, body: jsonBody(RecurringInput) },
-      responses: { 201: json(RecurringSchema, "Created"), ...errorResponses },
-    }),
-    async (c) => {
-      const o = requireWriter(c);
-      return c.json(
-        recurringView(await o.handle.write((tx) => saveRecurringTx(tx, o.id, o.actor, c.req.valid("json")))),
-        201,
-      );
-    },
-  );
-  r.openapi(
-    createRoute({
-      method: "put",
-      path: "/orgs/{orgId}/recurring-invoices/{recurringId}",
-      tags: ["Invoices"],
-      summary: "Replace a recurring invoice template",
-      security: bearerSecurity,
-      request: { params: RecurringParams, body: jsonBody(RecurringInput) },
-      responses: { 200: json(RecurringSchema), ...errorResponses },
-    }),
-    async (c) => {
-      const o = requireWriter(c);
-      const id = c.req.valid("param").recurringId as string;
-      return c.json(
-        recurringView(
-          await o.handle.write((tx) => saveRecurringTx(tx, o.id, o.actor, c.req.valid("json"), id)),
-        ),
         200,
       );
     },

@@ -209,22 +209,6 @@ export const invoiceLines = sqliteTable(
   (t) => [index("invoice_lines_invoice_idx").on(t.invoiceId)],
 );
 
-export const recurringInvoices = sqliteTable("recurring_invoices", {
-  id: text("id").primaryKey(),
-  customerId: text("customer_id")
-    .notNull()
-    .references(() => contacts.id),
-  name: text("name").notNull(),
-  frequency: text("frequency", { enum: ["weekly", "monthly", "quarterly", "yearly"] }).notNull(),
-  nextDate: text("next_date").notNull(),
-  endDate: text("end_date"),
-  dueDays: integer("due_days").notNull().default(30),
-  templateJson: text("template_json").notNull(),
-  autoSend: integer("auto_send", { mode: "boolean" }).notNull().default(false),
-  isActive: integer("is_active", { mode: "boolean" }).notNull().default(true),
-  createdAt: text("created_at").notNull().default(now),
-});
-
 export const bills = sqliteTable(
   "bills",
   {
@@ -243,6 +227,7 @@ export const bills = sqliteTable(
     amountPaid: integer("amount_paid").notNull().default(0),
     memo: text("memo"),
     entryId: text("entry_id"),
+    recurringId: text("recurring_id"),
     createdAt: text("created_at").notNull().default(now),
     voidedAt: text("voided_at"),
   },
@@ -304,6 +289,79 @@ export const paymentApplications = sqliteTable(
     primaryKey({ columns: [t.paymentId, t.documentType, t.documentId] }),
     index("payment_applications_doc_idx").on(t.documentType, t.documentId),
     check("payment_applications_amount_pos", sql`${t.amount} > 0`),
+  ],
+);
+
+// ---------------------------------------------------------------------------
+// Recurring templates
+// ---------------------------------------------------------------------------
+
+/**
+ * A template that creates an invoice, bill, or journal entry on a schedule. Occurrence n's date is
+ * computed from `start_date` and n (packages/core/src/recurrence.ts), never from the previous date,
+ * so a template anchored on the 31st doesn't drift to the 28th. `next_date` is a stored copy of
+ * occurrence `next_index`, null once the template has ended.
+ */
+export const recurringTemplates = sqliteTable(
+  "recurring_templates",
+  {
+    id: text("id").primaryKey(),
+    kind: text("kind", { enum: ["invoice", "bill", "entry"] }).notNull(),
+    name: text("name").notNull(),
+    contactId: text("contact_id").references(() => contacts.id),
+    runMode: text("run_mode", { enum: ["draft", "post", "post_and_send"] })
+      .notNull()
+      .default("draft"),
+    status: text("status", { enum: ["proposed", "active", "paused", "ended", "archived"] })
+      .notNull()
+      .default("active"),
+    unit: text("unit", { enum: ["day", "week", "month", "year"] }).notNull(),
+    interval: integer("interval").notNull().default(1),
+    /** Day of the month (1-31, clamped to short months) or -1 for the last day; month and year units only. */
+    anchorDay: integer("anchor_day"),
+    startDate: text("start_date").notNull(),
+    endDate: text("end_date"),
+    maxOccurrences: integer("max_occurrences"),
+    nextIndex: integer("next_index").notNull().default(0),
+    nextDate: text("next_date"),
+    lastRunDate: text("last_run_date"),
+    lastError: text("last_error"),
+    lastErrorAt: text("last_error_at"),
+    templateJson: text("template_json").notNull(),
+    createdByActor: text("created_by_actor").notNull().default("user"),
+    createdAt: text("created_at").notNull().default(now),
+    updatedAt: text("updated_at").notNull().default(now),
+  },
+  (t) => [index("recurring_templates_due_idx").on(t.status, t.nextDate)],
+);
+
+/**
+ * One row per schedule slot a template has used: the idempotency key (one run per template and
+ * date), the run history, the link from a generated document back to its template, and the email
+ * outbox for templates that send invoices.
+ */
+export const recurringRuns = sqliteTable(
+  "recurring_runs",
+  {
+    id: text("id").primaryKey(),
+    templateId: text("template_id")
+      .notNull()
+      .references(() => recurringTemplates.id),
+    occurrenceIndex: integer("occurrence_index").notNull(),
+    scheduledDate: text("scheduled_date").notNull(),
+    status: text("status", { enum: ["created", "skipped"] }).notNull(),
+    docType: text("doc_type", { enum: ["invoice", "bill", "entry"] }),
+    docId: text("doc_id"),
+    sendStatus: text("send_status", { enum: ["pending", "sent", "failed", "not_needed"] })
+      .notNull()
+      .default("not_needed"),
+    error: text("error"),
+    createdAt: text("created_at").notNull().default(now),
+  },
+  (t) => [
+    uniqueIndex("recurring_runs_template_date_uq").on(t.templateId, t.scheduledDate),
+    index("recurring_runs_doc_idx").on(t.docType, t.docId),
+    index("recurring_runs_send_idx").on(t.sendStatus),
   ],
 );
 
@@ -444,6 +502,7 @@ export const reviewItems = sqliteTable(
         "entry_replacement",
         "payment_redate",
         "import_batch",
+        "recurring_template",
       ],
     }).notNull(),
     itemId: text("item_id").notNull(),
