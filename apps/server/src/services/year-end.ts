@@ -8,16 +8,13 @@
  */
 import { org } from "@cosimo/db";
 import { addMonths, fiscalYearEnd, VERSION } from "@cosimo/shared";
-import { and, asc, eq, gte, lte } from "drizzle-orm";
+import { and, asc, gte, lte } from "drizzle-orm";
 import { strToU8, zipSync } from "fflate";
-import { renderReportPdf } from "../pdf/index.ts";
 import { checkpoint } from "./chain.ts";
 import { settingsRow } from "./ledger.ts";
-import { reconLines } from "./reconcile.ts";
-import { csvCell, type ReportKey, type ReportParams, reportCsv, reportPdf, runReport } from "./reports.ts";
+import { reconciliationFiles } from "./reconcile.ts";
+import { type ReportKey, type ReportParams, reportCsv, reportPdf, runReport } from "./reports.ts";
 import type { OrgHandle } from "./types.ts";
-
-type Reader = OrgHandle["db"];
 
 export interface YearEndPeriod {
   from: string;
@@ -53,65 +50,6 @@ export interface ChainJson {
   audit: { seq: number; hash: string };
   org_id: string;
   generated_at: string;
-}
-
-function csv(rows: (string | number | null)[][]) {
-  return `${rows.map((r) => r.map((v) => csvCell(v == null ? "" : String(v))).join(",")).join("\r\n")}\r\n`;
-}
-
-/** Reconciliation report files, in the same layout as the reconciliation export endpoint. */
-export async function reconciliationFiles(db: Reader, reconId: string, orgName: string, generatedAt: string) {
-  const { reconciliation: rec, lines } = await reconLines(db, reconId);
-  const acct = await db.select().from(org.accounts).where(eq(org.accounts.id, rec.account_id)).get();
-  const cleared = lines.filter((l) => l.cleared);
-  const open = lines.filter((l) => !l.cleared);
-  const name = `reconciliation-${(acct?.name ?? "account").replace(/\W+/g, "-")}-${rec.statement_end_date}`;
-  const csvText = csv([
-    ["Account", acct?.name ?? "", "Statement date", rec.statement_end_date, "Status", rec.status],
-    [
-      "Beginning",
-      rec.beginning_balance / 100,
-      "Cleared",
-      rec.cleared_balance / 100,
-      "Statement",
-      rec.statement_ending_balance / 100,
-    ],
-    [],
-    ["date", "memo", "amount", "cleared"],
-    ...lines.map((l) => [
-      l.date,
-      l.memo ?? l.description ?? "",
-      (l.amount / 100).toFixed(2),
-      l.cleared ? "yes" : "no",
-    ]),
-  ]);
-  const pdf = await renderReportPdf({
-    title: `Reconciliation: ${acct?.name ?? ""}`,
-    orgName,
-    subtitle: `Statement ending ${rec.statement_end_date} · ${rec.status.replace("_", " ")}`,
-    currency: "USD",
-    columns: [{ label: "Date" }, { label: "Memo" }, { label: "Amount", align: "right" }],
-    rows: [
-      { kind: "row", cells: ["", "Beginning balance", rec.beginning_balance] },
-      { kind: "header", cells: ["Cleared", null, null] },
-      ...cleared.map((l) => ({
-        kind: "row" as const,
-        depth: 1,
-        cells: [l.date, l.memo ?? l.description ?? "", l.amount],
-      })),
-      { kind: "subtotal", cells: ["", "Cleared balance", rec.cleared_balance] },
-      { kind: "row", cells: ["", "Statement ending balance", rec.statement_ending_balance] },
-      { kind: "total", cells: ["", "Difference", rec.difference] },
-      { kind: "header", cells: ["Uncleared", null, null] },
-      ...open.map((l) => ({
-        kind: "row" as const,
-        depth: 1,
-        cells: [l.date, l.memo ?? l.description ?? "", l.amount],
-      })),
-    ],
-    footer: [`Generated ${generatedAt}`],
-  });
-  return { name, csv: csvText, pdf };
 }
 
 const REPORTS: { key: ReportKey; file: string; label: string }[] = [

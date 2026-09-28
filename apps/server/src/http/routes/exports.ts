@@ -1,10 +1,10 @@
 /** File exports for non-financial reports (SPEC §9): audit log and reconciliation reports; SMTP test. */
 import { org, system } from "@cosimo/db";
 import { createRoute } from "@hono/zod-openapi";
-import { and, asc, eq, gte, inArray, lte } from "drizzle-orm";
+import { and, asc, gte, inArray, lte } from "drizzle-orm";
 import { renderReportPdf } from "../../pdf/index.ts";
 import type { Mailer } from "../../services/mailer.ts";
-import { reconLines } from "../../services/reconcile.ts";
+import { reconciliationFiles } from "../../services/reconcile.ts";
 import { csvCell } from "../../services/reports.ts";
 import { ApiError } from "../errors.ts";
 import { requireAdmin, requireRole } from "../middleware.ts";
@@ -152,73 +152,18 @@ export function exportRoutes() {
     }),
     async (c) => {
       const o = c.get("org");
-      const { reconciliation: rec, lines } = await reconLines(o.handle.db, c.req.valid("param").reconId);
-      const acct = await o.handle.db
-        .select()
-        .from(org.accounts)
-        .where(eq(org.accounts.id, rec.account_id))
-        .get();
-      const cleared = lines.filter((l) => l.cleared);
-      const open = lines.filter((l) => !l.cleared);
-      const name = `reconciliation-${(acct?.name ?? "account").replace(/\W+/g, "-")}-${rec.statement_end_date}`;
-      if (c.req.valid("query").format === "csv") {
-        return c.body(
-          csv([
-            ["Account", acct?.name ?? "", "Statement date", rec.statement_end_date, "Status", rec.status],
-            [
-              "Beginning",
-              rec.beginning_balance / 100,
-              "Cleared",
-              rec.cleared_balance / 100,
-              "Statement",
-              rec.statement_ending_balance / 100,
-            ],
-            [],
-            ["date", "memo", "amount", "cleared"],
-            ...lines.map((l) => [
-              l.date,
-              l.memo ?? l.description ?? "",
-              (l.amount / 100).toFixed(2),
-              l.cleared ? "yes" : "no",
-            ]),
-          ]),
-          200,
-          {
-            "content-type": "text/csv; charset=utf-8",
-            "content-disposition": `attachment; filename="${name}.csv"`,
-          },
-        );
-      }
+      const reconId = c.req.valid("param").reconId;
       const reg = await c.get("ctx").orgs.get(o.id);
-      const pdf = await renderReportPdf({
-        title: `Reconciliation: ${acct?.name ?? ""}`,
-        orgName: reg?.name ?? "",
-        subtitle: `Statement ending ${rec.statement_end_date} · ${rec.status.replace("_", " ")}`,
-        currency: "USD",
-        columns: [{ label: "Date" }, { label: "Memo" }, { label: "Amount", align: "right" }],
-        rows: [
-          { kind: "row", cells: ["", "Beginning balance", rec.beginning_balance] },
-          { kind: "header", cells: ["Cleared", null, null] },
-          ...cleared.map((l) => ({
-            kind: "row" as const,
-            depth: 1,
-            cells: [l.date, l.memo ?? l.description ?? "", l.amount],
-          })),
-          { kind: "subtotal", cells: ["", "Cleared balance", rec.cleared_balance] },
-          { kind: "row", cells: ["", "Statement ending balance", rec.statement_ending_balance] },
-          { kind: "total", cells: ["", "Difference", rec.difference] },
-          { kind: "header", cells: ["Uncleared", null, null] },
-          ...open.map((l) => ({
-            kind: "row" as const,
-            depth: 1,
-            cells: [l.date, l.memo ?? l.description ?? "", l.amount],
-          })),
-        ],
-        footer: [`Generated ${new Date().toISOString()}`],
-      });
-      return c.body(pdf as unknown as ArrayBuffer, 200, {
+      const f = await reconciliationFiles(o.handle.db, reconId, reg?.name ?? "", new Date().toISOString());
+      if (c.req.valid("query").format === "csv") {
+        return c.body(f.csv, 200, {
+          "content-type": "text/csv; charset=utf-8",
+          "content-disposition": `attachment; filename="${f.name}.csv"`,
+        });
+      }
+      return c.body(f.pdf as unknown as ArrayBuffer, 200, {
         "content-type": "application/pdf",
-        "content-disposition": `inline; filename="${name}.pdf"`,
+        "content-disposition": `inline; filename="${f.name}.pdf"`,
       });
     },
   );
