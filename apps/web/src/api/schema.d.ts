@@ -18473,6 +18473,8 @@ export interface components {
              * @example 12345
              */
             total: number;
+            /** @description Set only when fetching a single entry, not in list views */
+            recurring_template_id: string | null;
             lines: components["schemas"]["JournalLine"][];
         };
         JournalLine: {

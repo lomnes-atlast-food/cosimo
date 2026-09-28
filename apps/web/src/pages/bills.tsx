@@ -1,7 +1,8 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Link, useNavigate, useParams } from "@tanstack/react-router";
+import { Link, useNavigate, useParams, useRouterState } from "@tanstack/react-router";
 import { useState } from "react";
 import { api, rawFetch, unwrap } from "../api/client";
+import { RecurringList } from "../components/recurring";
 import {
   Alert,
   Amount,
@@ -29,6 +30,9 @@ type Filter = "all" | "open" | "paid" | "draft";
 export function BillsPage() {
   const orgId = useOrgId();
   const { canWrite } = useRole();
+  const navigate = useNavigate();
+  const pathname = useRouterState({ select: (s) => s.location.pathname });
+  const onRecurring = pathname.endsWith("/recurring");
   const [filter, setFilter] = useState<Filter>("open");
   const query =
     filter === "open"
@@ -44,80 +48,99 @@ export function BillsPage() {
       unwrap(api.GET("/api/v1/orgs/{orgId}/bills", { params: { path: { orgId }, query } })).then(
         (r) => r.data,
       ),
+    enabled: !onRecurring,
   });
   return (
     <>
       <PageHeader
         title="Bills"
         actions={
-          canWrite && (
+          canWrite &&
+          (onRecurring ? (
+            <Link to="/o/$orgId/expenses/bills/recurring/new" params={{ orgId }}>
+              <Button>New recurring bill</Button>
+            </Link>
+          ) : (
             <Link to="/o/$orgId/expenses/bills/new" params={{ orgId }}>
               <Button>Enter bill</Button>
             </Link>
-          )
+          ))
         }
       />
       <Tabs
-        value={filter}
-        onChange={setFilter}
+        value={onRecurring ? "recurring" : filter}
+        onChange={(v) => {
+          if (v === "recurring") navigate({ to: "/o/$orgId/expenses/bills/recurring", params: { orgId } });
+          else {
+            setFilter(v);
+            if (onRecurring) navigate({ to: "/o/$orgId/expenses/bills", params: { orgId } });
+          }
+        }}
         tabs={[
           { value: "open", label: "To pay" },
           { value: "draft", label: "Drafts" },
           { value: "paid", label: "Paid" },
           { value: "all", label: "All" },
+          { value: "recurring", label: "Recurring" },
         ]}
       />
-      <ErrorText error={list.error} />
-      <Card>
-        {list.isLoading ? (
-          <Loading />
-        ) : !list.data?.length ? (
-          <p className="text-sm text-zinc-500">No bills here.</p>
-        ) : (
-          <Table>
-            <thead>
-              <tr>
-                <th className={th}>Vendor</th>
-                <th className={th}>Bill #</th>
-                <th className={`${th} hidden sm:table-cell`}>Date</th>
-                <th className={th}>Due</th>
-                <th className={th}>Status</th>
-                <th className={`${th} text-right`}>Balance</th>
-              </tr>
-            </thead>
-            <tbody className="divide-y divide-zinc-100 dark:divide-zinc-800">
-              {list.data.map((b) => (
-                <tr key={b.id}>
-                  <td className={td}>
-                    <Link
-                      to="/o/$orgId/expenses/bills/$billId"
-                      params={{ orgId, billId: b.id }}
-                      className="font-medium hover:underline"
-                    >
-                      {b.vendor_name}
-                    </Link>
-                  </td>
-                  <td className={td}>{b.bill_number}</td>
-                  <td className={`${td} hidden sm:table-cell`}>{fmtDate(b.issue_date)}</td>
-                  <td className={`${td} ${b.overdue ? "text-red-700 dark:text-red-400" : ""}`}>
-                    {fmtDate(b.due_date)}
-                  </td>
-                  <td className={td}>
-                    <DocStatus
-                      status={BILL_STATUS[b.status]}
-                      pending={b.entry_status === "pending_review"}
-                      overdue={b.overdue}
-                    />
-                  </td>
-                  <td className={`${td} text-right`}>
-                    <Amount cents={b.balance_due} />
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </Table>
-        )}
-      </Card>
+      {onRecurring ? (
+        <RecurringList kind="bill" />
+      ) : (
+        <>
+          <ErrorText error={list.error} />
+          <Card>
+            {list.isLoading ? (
+              <Loading />
+            ) : !list.data?.length ? (
+              <p className="text-sm text-zinc-500">No bills here.</p>
+            ) : (
+              <Table>
+                <thead>
+                  <tr>
+                    <th className={th}>Vendor</th>
+                    <th className={th}>Bill #</th>
+                    <th className={`${th} hidden sm:table-cell`}>Date</th>
+                    <th className={th}>Due</th>
+                    <th className={th}>Status</th>
+                    <th className={`${th} text-right`}>Balance</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-zinc-100 dark:divide-zinc-800">
+                  {list.data.map((b) => (
+                    <tr key={b.id}>
+                      <td className={td}>
+                        <Link
+                          to="/o/$orgId/expenses/bills/$billId"
+                          params={{ orgId, billId: b.id }}
+                          className="font-medium hover:underline"
+                        >
+                          {b.vendor_name}
+                        </Link>
+                      </td>
+                      <td className={td}>{b.bill_number}</td>
+                      <td className={`${td} hidden sm:table-cell`}>{fmtDate(b.issue_date)}</td>
+                      <td className={`${td} ${b.overdue ? "text-red-700 dark:text-red-400" : ""}`}>
+                        {fmtDate(b.due_date)}
+                      </td>
+                      <td className={td}>
+                        <DocStatus
+                          status={BILL_STATUS[b.status]}
+                          pending={b.entry_status === "pending_review"}
+                          overdue={b.overdue}
+                        />
+                      </td>
+                      <td className={`${td} text-right`}>
+                        <Amount cents={b.balance_due} />
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </Table>
+            )}
+          </Card>
+        </>
+      )}
     </>
   );
 }
@@ -380,6 +403,9 @@ export function BillPage() {
               {(b.status === "open" || b.status === "partial") && (
                 <Button onClick={() => setPaying(true)}>Pay bill</Button>
               )}
+              <Link to="/o/$orgId/expenses/bills/recurring/new" params={{ orgId }} search={{ from: b.id }}>
+                <Button variant="secondary">Make recurring</Button>
+              </Link>
             </>
           )
         }
@@ -474,6 +500,15 @@ export function BillPage() {
             className="block text-sm underline"
           >
             View journal entry
+          </Link>
+        )}
+        {b.recurring_id && (
+          <Link
+            to="/o/$orgId/expenses/bills/recurring/$templateId"
+            params={{ orgId, templateId: b.recurring_id }}
+            className="block text-sm underline"
+          >
+            From recurring template ›
           </Link>
         )}
       </div>

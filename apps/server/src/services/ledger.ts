@@ -71,6 +71,8 @@ export interface EntryView {
   chain_seq: number | null;
   entry_hash: string | null;
   total: number;
+  /** Set only by the single-entry fetch; list views leave this null to avoid a query per row. */
+  recurring_template_id: string | null;
   lines: {
     id: string;
     account_id: string;
@@ -108,6 +110,7 @@ export function entryView(e: EntryRow, lines: LineRow[]): EntryView {
     chain_seq: e.chainSeq,
     entry_hash: e.entryHash,
     total: debitTotal(sorted),
+    recurring_template_id: null,
     lines: sorted.map((l) => ({
       id: l.id,
       account_id: l.accountId,
