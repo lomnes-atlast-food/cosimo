@@ -233,6 +233,14 @@ describe("parseOfx", () => {
       "A&B <x> \"q\" 's' AB &bogus;",
     );
   });
+
+  // TAG_RE previously backtracked catastrophically on an unclosed tag name followed by a long run
+  // of dots (both [A-Za-z0-9_.]* and [^>]*? can match ".").
+  test("an unclosed tag name doesn't cause catastrophic backtracking", () => {
+    const start = performance.now();
+    parseOfx(`<OFX><A${".".repeat(50_000)}`);
+    expect(performance.now() - start).toBeLessThan(200);
+  });
 });
 
 describe("detectFormat", () => {

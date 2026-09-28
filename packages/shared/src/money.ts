@@ -22,6 +22,9 @@ const AMOUNT_RE =
  * (more than two decimals) unless `roundHalfEven` is set.
  */
 export function parseCents(input: string, opts: { allowExtraDecimals?: boolean } = {}): Cents {
+  // AMOUNT_RE's `\s*` runs between optional groups are ambiguous on long runs of whitespace; reject
+  // implausibly long input before it ever reaches the regex.
+  if (input.length > 64) throw new RangeError(`Invalid amount: ${JSON.stringify(input)}`);
   const m = AMOUNT_RE.exec(input);
   if (!m) throw new RangeError(`Invalid amount: ${JSON.stringify(input)}`);
   const [, openParen, sign, , intPartRaw = "", fracRaw = "", closeParen, crdr] = m;

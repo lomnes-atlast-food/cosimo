@@ -27,7 +27,7 @@ export function decodeEntities(s: string): string {
   });
 }
 
-const TAG_RE = /<(\/?)([A-Za-z][A-Za-z0-9_.]*)[^>]*?(\/?)>([^<]*)/g;
+const TAG_RE = /<(\/?)([A-Za-z][A-Za-z0-9_.]*)(?![A-Za-z0-9_.])[^>]*?(\/?)>([^<]*)/g;
 
 /**
  * Tolerant OFX tokenizer for both SGML (1.x, unclosed leaf tags) and XML (2.x). An opening tag is an

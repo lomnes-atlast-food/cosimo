@@ -31,9 +31,22 @@ const ROLE_HELP: Record<string, string> = {
   viewer: "Viewer: read-only",
 };
 
-/** Only same-site paths may be used as a post-login destination. */
-export function safeNext(v: string | null | undefined) {
-  return v?.startsWith("/") && !v.startsWith("//") && !v.startsWith("/\\") ? v : "/";
+/**
+ * Only same-origin paths may be used as a post-login destination. `URL` parsing strips control
+ * characters like tabs and newlines, so a plain `startsWith("/")` check can be tricked into
+ * resolving to another origin (e.g. `/\t/evil.com` → `https://evil.com/`); resolve against the
+ * origin and compare instead. Resolving also removes dot segments (`/.//evil.com` has the path
+ * `//evil.com`), so collapse leading slashes to keep the result from reading as protocol-relative.
+ */
+export function safeNext(v: string | null | undefined, origin: string = window.location.origin) {
+  if (!v?.startsWith("/")) return "/";
+  try {
+    const u = new URL(v, origin);
+    if (u.origin !== origin) return "/";
+    return `${u.pathname.replace(/^\/+/, "/")}${u.search}${u.hash}`;
+  } catch {
+    return "/";
+  }
 }
 
 export function ConnectPage() {

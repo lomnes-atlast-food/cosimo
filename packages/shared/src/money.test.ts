@@ -25,6 +25,14 @@ describe("parseCents", () => {
     expect(() => parseCents("(1.00")).toThrow();
     expect(parseCents("1.235", { allowExtraDecimals: true })).toBe(124 as never);
   });
+  test("rejects long input before the regex can backtrack", () => {
+    const start = performance.now();
+    expect(() => parseCents(`1${" ".repeat(5000)}x`)).toThrow();
+    expect(performance.now() - start).toBeLessThan(200);
+  });
+  test("a padded valid amount within the length cap still parses", () => {
+    expect(parseCents("  (1,234,567.89)  CR ")).toBe(-123456789 as never);
+  });
   test("round trips with centsToDecimal", () => {
     fc.assert(
       fc.property(fc.integer({ min: -1e12, max: 1e12 }), (n) => {
