@@ -145,6 +145,17 @@ describe(`invoices (${DB_MODE})`, () => {
     expect((await owner.json("DELETE", `${base()}/invoices/${b.id}`)).status).toBe(200);
   });
 
+  test("quantity must be positive; fractional quantities are accepted", async () => {
+    const line = (quantity_milli: number) => ({
+      customer_id: customer,
+      issue_date: "2026-01-10",
+      lines: [{ description: "x", quantity_milli, unit_price: 1_000, account_id: acct["4000"] }],
+    });
+    expect((await owner.json("POST", `${base()}/invoices`, line(0))).status).toBe(400);
+    expect((await owner.json("POST", `${base()}/invoices`, line(-1000))).status).toBe(400);
+    expect((await owner.json("POST", `${base()}/invoices`, line(250))).status).toBe(201);
+  });
+
   test("PDF renders and send emails it with the PDF attached", async () => {
     const inv = await newInvoice([25_000]);
     const pdf = await owner.req("GET", `${base()}/invoices/${inv.id}/pdf`);

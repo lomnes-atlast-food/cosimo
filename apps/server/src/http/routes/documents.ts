@@ -102,10 +102,10 @@ const DocLine = z.object({
   quantity_milli: z
     .number()
     .int()
-    .min(-1_000_000_000)
+    .min(1)
     .max(1_000_000_000)
     .optional()
-    .openapi({ description: "Quantity × 1000 (1 = 1000)" }),
+    .openapi({ description: "Quantity × 1000 (1 = 1000); must be positive" }),
   unit_price: Cents.optional(),
   amount: Cents.optional().openapi({ description: "Bills: the line amount" }),
   account_id: Id,

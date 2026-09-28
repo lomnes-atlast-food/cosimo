@@ -10631,7 +10631,7 @@ export interface paths {
                         memo?: string | null;
                         lines: {
                             description: string;
-                            /** @description Quantity × 1000 (1 = 1000) */
+                            /** @description Quantity × 1000 (1 = 1000); must be positive */
                             quantity_milli?: number;
                             /**
                              * @description Integer minor units (cents)
@@ -10952,7 +10952,7 @@ export interface paths {
                         memo?: string | null;
                         lines?: {
                             description: string;
-                            /** @description Quantity × 1000 (1 = 1000) */
+                            /** @description Quantity × 1000 (1 = 1000); must be positive */
                             quantity_milli?: number;
                             /**
                              * @description Integer minor units (cents)
@@ -11643,7 +11643,7 @@ export interface paths {
                         memo?: string | null;
                         lines: {
                             description: string;
-                            /** @description Quantity × 1000 (1 = 1000) */
+                            /** @description Quantity × 1000 (1 = 1000); must be positive */
                             quantity_milli?: number;
                             /**
                              * @description Integer minor units (cents)
@@ -11972,7 +11972,7 @@ export interface paths {
                         memo?: string | null;
                         lines?: {
                             description: string;
-                            /** @description Quantity × 1000 (1 = 1000) */
+                            /** @description Quantity × 1000 (1 = 1000); must be positive */
                             quantity_milli?: number;
                             /**
                              * @description Integer minor units (cents)
