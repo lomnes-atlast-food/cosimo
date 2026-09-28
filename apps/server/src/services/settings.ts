@@ -64,8 +64,9 @@ export class InstanceSettings {
   ) {}
 
   private async raw<K extends keyof InstanceSettingsShape>(key: K): Promise<InstanceSettingsShape[K]> {
+    // Explicit columns: `last_backup` is written by the pre-migration backup, on an older schema.
     const row = await this.sys.db
-      .select()
+      .select({ valueJson: system.instanceSettings.valueJson })
       .from(system.instanceSettings)
       .where(eq(system.instanceSettings.key, key))
       .get();

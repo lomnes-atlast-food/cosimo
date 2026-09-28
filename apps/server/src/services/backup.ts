@@ -207,7 +207,8 @@ export async function createBackup(
 
     const orgs: BackupManifest["orgs"] = [];
     mkdirSync(join(work, "orgs"));
-    for (const o of await ctx.orgs.list({ includeArchived: true })) {
+    // `serve` backs up before migrating, so this must not read columns a pending migration adds.
+    for (const o of await ctx.orgs.listForMaintenance()) {
       const h = await ctx.orgs.mustOpen(o.id);
       const out = join(work, "orgs", `${o.id}.db`);
       await snapshotDb(h.client, o.dbUrl, out);

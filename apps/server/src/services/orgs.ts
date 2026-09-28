@@ -72,7 +72,12 @@ export class OrgService {
   async open(orgId: string): Promise<DbHandle<OrgSchema> | null> {
     const cached = this.#cache.get(orgId);
     if (cached) return cached;
-    const row = await this.get(orgId);
+    // Only columns from the first system migration: this runs before migrations (pre-migration backup).
+    const row = await this.system.db
+      .select({ dbUrl: system.organizations.dbUrl, dbTokenEnc: system.organizations.dbTokenEnc })
+      .from(system.organizations)
+      .where(eq(system.organizations.id, orgId))
+      .get();
     if (!row) return null;
     const h = connectOrg(row.dbUrl, this.secrets.reveal(row.dbTokenEnc) ?? undefined);
     this.#cache.set(orgId, h);
@@ -101,6 +106,23 @@ export class OrgService {
   async list(opts: { includeArchived?: boolean } = {}) {
     const rows = await this.system.db.select().from(system.organizations).all();
     return opts.includeArchived ? rows : rows.filter((r) => !r.archivedAt);
+  }
+
+  /**
+   * Every org, archived included, for maintenance that runs before migrations (the pre-migration
+   * backup, the pending-migrations check). The system schema may be older than the code, so this
+   * selects only columns created by `system/drizzle/0000_init.sql`; never add a newer one here.
+   */
+  async listForMaintenance() {
+    return this.system.db
+      .select({
+        id: system.organizations.id,
+        name: system.organizations.name,
+        dbUrl: system.organizations.dbUrl,
+        archivedAt: system.organizations.archivedAt,
+      })
+      .from(system.organizations)
+      .all();
   }
 
   async listForUser(userId: string) {
@@ -240,7 +262,7 @@ export class OrgService {
 
   async migrateAll(): Promise<{ orgId: string; applied: string[] }[]> {
     const out: { orgId: string; applied: string[] }[] = [];
-    for (const o of await this.list({ includeArchived: true })) {
+    for (const o of await this.listForMaintenance()) {
       const h = await this.mustOpen(o.id);
       try {
         out.push({ orgId: o.id, applied: await migrateOrg(h.client) });

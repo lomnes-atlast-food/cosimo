@@ -64,7 +64,7 @@ export async function hasPendingMigrations(ctx: AppContext) {
   const system = await pendingMigrations(ctx.system.client, systemMigrations);
   if (system.length === systemMigrations.length) return false;
   if (system.length) return true;
-  for (const o of await ctx.orgs.list({ includeArchived: true })) {
+  for (const o of await ctx.orgs.listForMaintenance()) {
     const h = await ctx.orgs.mustOpen(o.id);
     if ((await pendingMigrations(h.client, orgMigrations)).length) return true;
   }
