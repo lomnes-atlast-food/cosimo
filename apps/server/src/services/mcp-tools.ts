@@ -6,8 +6,9 @@
  * review, and OAuth grants are always propose-only. Every write tool that touches the books takes
  * a `rationale` and returns the review item ID and status. Corrections to posted entries (reverse,
  * replace, and a payment's date) are proposals like any other write. Notes and contacts don't touch
- * the books, so they apply directly and are recorded in the audit log. There is no tool to approve,
- * reject, void, delete, or move lock dates.
+ * the books, so they apply directly and are recorded in the audit log. Recurring templates are
+ * proposed too, and nothing runs until a person approves. There is no tool to approve, reject, void,
+ * delete, or move lock dates.
  */
 import type { LineInput } from "@cosimo/core";
 import { org } from "@cosimo/db";
@@ -43,6 +44,16 @@ import { holdInvoiceDraftTx } from "./invoice-review.ts";
 import { getEntry, listEntries, reverseEntryTx, submitEntryTx } from "./ledger.ts";
 import { appendNoteTx } from "./notes.ts";
 import { proposePaymentRedateTx } from "./payment-redate-review.ts";
+import {
+  inputOf,
+  listTemplates,
+  mustGetTemplate,
+  proposeTemplateTx,
+  type TemplateInput,
+  type TemplateKind,
+  type TemplateLine,
+  templateView,
+} from "./recurring.ts";
 import { REPORT_KEYS, runReport } from "./reports.ts";
 import { listReview, mustGetReview, reviewView } from "./review.ts";
 import { createRuleTx } from "./rules.ts";
@@ -458,6 +469,38 @@ tool({
       payments: payments
         .filter((p) => (!i.from || p.date >= i.from) && (!i.to || p.date <= i.to))
         .slice(0, i.limit),
+    };
+  },
+});
+
+tool({
+  name: "list_recurring_templates",
+  title: "List recurring templates",
+  description:
+    "Recurring invoices, bills, and journal entries: each template's contact, schedule summary (for example \"Monthly on the last day\"), next and upcoming dates, run mode, total in cents, last error, and any change waiting for review. Run modes: draft creates drafts for a person to finish; post posts them (still through the review threshold and policies); post_and_send also emails invoices to the customer. Lines carry account code and name. Deleted templates are left out. Check this before proposing a template so you don't duplicate one; to create or change one, use propose_recurring_template.",
+  input: z.object({
+    kind: z.enum(["invoice", "bill", "entry"]).optional(),
+    status: z.array(z.enum(["proposed", "active", "paused", "ended"])).optional(),
+    upcoming: z.number().int().min(1).max(24).default(3).describe("How many upcoming dates to list"),
+  }),
+  async run(t, i) {
+    const list = await listTemplates(t.scope.handle.db, {
+      kind: i.kind,
+      status: i.status,
+      upcoming: i.upcoming,
+    });
+    const [accounts, contacts] = await Promise.all([
+      accountLookup(t),
+      contactNames(
+        t,
+        list.flatMap((x) => x.template.lines.map((l) => l.contact_id)),
+      ),
+    ]);
+    return {
+      templates: list.map((x) => ({
+        ...x,
+        template: { ...x.template, lines: withNames(x.template.lines, accounts, contacts) },
+      })),
     };
   },
 });
@@ -929,6 +972,160 @@ tool({
       review_item_id: null,
       entry_id: r.entry?.id ?? null,
       message: `Applied: a review policy approved it automatically, so the payment is now dated ${i.date}.`,
+    };
+  },
+});
+
+const TemplateLineArg = z.object({
+  account: z.string().describe("Account ID or code"),
+  description: z.string().max(1000).optional().describe("May use period placeholders such as {month}"),
+  quantity: z.number().positive().optional().describe("Invoices: quantity, default 1"),
+  unit_price: Cents.optional().describe("Invoices: price per unit"),
+  amount: Cents.optional().describe("Bills: the line amount. Entries: debit positive, credit negative"),
+  contact_id: z.string().optional().describe("Entries: a contact for this line"),
+});
+
+/** Template lines from tool input, shaped for the kind, with account codes resolved to IDs. */
+async function templateLines(t: ToolCtx, kind: TemplateKind, lines: z.output<typeof TemplateLineArg>[]) {
+  const out: TemplateLine[] = [];
+  for (const l of lines) {
+    const account_id = await accountId(t, l.account);
+    if (kind === "invoice") {
+      const price = l.unit_price ?? l.amount;
+      if (price == null) throw unprocessable("Give each invoice line a unit_price.", "invalid_amount");
+      out.push({
+        description: l.description ?? null,
+        quantity_milli: Math.round((l.quantity ?? 1) * 1000),
+        unit_price: price,
+        account_id,
+      });
+    } else if (kind === "bill") {
+      const amount = l.amount ?? (l.unit_price != null ? Math.round(l.unit_price * (l.quantity ?? 1)) : null);
+      if (amount == null) throw unprocessable("Give each bill line an amount.", "invalid_amount");
+      out.push({ description: l.description ?? null, amount, account_id });
+    } else {
+      if (l.amount == null) throw unprocessable("Give each entry line an amount.", "invalid_amount");
+      out.push({
+        account_id,
+        amount: l.amount,
+        description: l.description ?? null,
+        contact_id: l.contact_id ?? null,
+      });
+    }
+  }
+  return out;
+}
+
+/** Keep only the keys that were given, so an update changes just those fields. */
+function given<T extends object>(o: T | undefined): Partial<T> {
+  return Object.fromEntries(Object.entries(o ?? {}).filter(([, v]) => v !== undefined)) as Partial<T>;
+}
+
+tool({
+  name: "propose_recurring_template",
+  title: "Propose a recurring invoice, bill, or journal entry",
+  description:
+    "Propose a template that creates an invoice, bill, or balanced journal entry on a schedule, or propose changing, pausing, or resuming one (template IDs come from list_recurring_templates). Use it for things that repeat on a fixed schedule: a monthly software subscription or reimbursement, rent, a retainer invoice, or monthly amortization of a prepaid expense. For a single, one-off entry use create_manual_entry instead. Nothing runs or changes until a person approves it in the review queue. Schedule: unit day|week|month|year with interval (quarterly is month with interval 3); anchor_day 1-31 or -1 for the last day of the month (month and year only, defaults to the start date's day); start_date; end_date or max_occurrences, not both. Run mode: draft (default) creates drafts; post posts each one, still through the review threshold and policies; post_and_send (invoices only) also emails the customer and is always reviewed. Memo, terms, bill_number, and line descriptions may use {month}, {year}, {quarter}, {period}, {date}, with offsets like {month-1}, filled from each run's date. For update, pass only the fields to change; lines replace all lines. Accounts may be IDs or codes.",
+  write: true,
+  input: z.object({
+    action: z.enum(["create", "update", "pause", "resume"]),
+    template_id: z.string().optional().describe("Required for update, pause, and resume"),
+    kind: z.enum(["invoice", "bill", "entry"]).optional().describe("Required for create"),
+    name: z.string().trim().min(1).max(200).optional().describe("Required for create"),
+    contact_id: z
+      .string()
+      .nullable()
+      .optional()
+      .describe("The customer (invoices) or vendor (bills); optional for entries"),
+    run_mode: z.enum(["draft", "post", "post_and_send"]).optional().describe("Defaults to draft on create"),
+    schedule: z
+      .object({
+        unit: z.enum(["day", "week", "month", "year"]).optional(),
+        interval: z.number().int().min(1).max(1000).optional(),
+        anchor_day: z.number().int().min(-1).max(31).nullable().optional(),
+        start_date: IsoDate.optional(),
+        end_date: IsoDate.nullable().optional(),
+        max_occurrences: z.number().int().min(1).max(10_000).nullable().optional(),
+      })
+      .optional()
+      .describe("Required for create (unit and start_date at least)"),
+    memo: z.string().max(2000).nullable().optional(),
+    terms: z.string().max(100).nullable().optional().describe("Invoices, e.g. Net 30"),
+    due_days: z
+      .number()
+      .int()
+      .min(0)
+      .max(365)
+      .nullable()
+      .optional()
+      .describe("Invoices and bills: days until due"),
+    bill_number: z.string().max(60).nullable().optional(),
+    lines: z.array(TemplateLineArg).min(1).max(200).optional().describe("Required for create"),
+    rationale: Rationale,
+  }),
+  async run(t, i) {
+    requireWriter(t);
+    let input: TemplateInput | undefined;
+    if (i.action === "create") {
+      if (!i.kind || !i.name || !i.lines || !i.schedule?.unit || !i.schedule.start_date)
+        throw unprocessable(
+          "To create a template give kind, name, schedule (unit and start_date at least), and lines.",
+          "invalid_template",
+        );
+      input = {
+        kind: i.kind,
+        name: i.name,
+        contact_id: i.contact_id ?? null,
+        run_mode: i.run_mode ?? "draft",
+        schedule: {
+          unit: i.schedule.unit,
+          interval: i.schedule.interval ?? 1,
+          anchor_day: i.schedule.anchor_day ?? null,
+          start_date: i.schedule.start_date,
+          end_date: i.schedule.end_date ?? null,
+          max_occurrences: i.schedule.max_occurrences ?? null,
+        },
+        template: {
+          memo: i.memo ?? null,
+          terms: i.terms ?? null,
+          due_days: i.due_days ?? null,
+          bill_number: i.bill_number ?? null,
+          lines: await templateLines(t, i.kind, i.lines),
+        },
+      };
+    } else if (!i.template_id) {
+      throw unprocessable("Give the template_id to change.", "invalid_template");
+    } else if (i.action === "update") {
+      const cur = inputOf(await mustGetTemplate(t.scope.handle.db, i.template_id));
+      input = {
+        ...cur,
+        ...given({ name: i.name, contact_id: i.contact_id, run_mode: i.run_mode }),
+        schedule: { ...cur.schedule, ...given(i.schedule) },
+        template: {
+          ...cur.template,
+          ...given({ memo: i.memo, terms: i.terms, due_days: i.due_days, bill_number: i.bill_number }),
+          lines: i.lines ? await templateLines(t, cur.kind, i.lines) : cur.template.lines,
+        },
+      };
+    }
+    const r = await t.scope.handle.write((tx) =>
+      proposeTemplateTx(tx, t.scope.id, t.scope.actor, {
+        action: i.action,
+        templateId: i.template_id,
+        input,
+        rationale: i.rationale,
+      }),
+    );
+    // For a proposal, show the template as it will be once approved.
+    const view = r.proposed ?? (await templateView(t.scope.handle.db, r.template));
+    return {
+      template_id: view.id,
+      status: r.reviewItemId ? "pending_review" : view.status,
+      review_item_id: r.reviewItemId,
+      template: view,
+      message: r.reviewItemId
+        ? "Proposed. It waits in the review queue; nothing runs or changes until a person approves it."
+        : "Applied: a review policy approved it automatically.",
     };
   },
 });

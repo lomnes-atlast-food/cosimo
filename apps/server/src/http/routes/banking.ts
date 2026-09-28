@@ -184,6 +184,7 @@ const ReviewSchema = z
       "entry_replacement",
       "payment_redate",
       "import_batch",
+      "recurring_template",
     ]),
     item_id: z.string(),
     proposed_by_actor: z.string(),
@@ -229,6 +230,7 @@ const PolicyInputSchema = z.object({
             "bill_draft",
             "entry_replacement",
             "payment_redate",
+            "recurring_template",
           ]),
         )
         .optional(),

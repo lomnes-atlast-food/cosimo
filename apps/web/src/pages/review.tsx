@@ -15,6 +15,7 @@ import {
   Textarea,
 } from "../components/ui";
 import { type ReviewItem, useBankAccounts } from "../lib/banking";
+import type { Recurring } from "../lib/documents";
 import { centsToDecimal, fmtDate, fmtDateTime, money, tryParseCents } from "../lib/format";
 import { type Entry, useAccounts } from "../lib/ledger";
 import { useOrgId, useRole } from "../lib/org";
@@ -28,6 +29,7 @@ const TYPE_LABEL: Record<string, string> = {
   entry_replacement: "Entry correction",
   payment_redate: "Payment date change",
   import_batch: "Import",
+  recurring_template: "Recurring template",
 };
 const ACTOR_LABEL: Record<string, string> = {
   mcp: "AI assistant",
@@ -230,6 +232,9 @@ function ReviewCard({
     };
     from_date?: string;
     to_date?: string;
+    action?: "create" | "update" | "pause" | "resume";
+    template?: Recurring;
+    before?: Recurring | null;
     import?: {
       source: string;
       files: string[];
@@ -433,6 +438,14 @@ function ReviewCard({
               </p>
             </div>
           )}
+          {item.item_type === "recurring_template" && payload.template && (
+            <RecurringProposal
+              action={payload.action ?? "create"}
+              template={payload.template}
+              before={payload.before ?? null}
+              accountName={(id) => byId.get(id)?.name ?? id}
+            />
+          )}
           {payload.import && (
             <p className="text-sm">
               {payload.import.entries} entries
@@ -603,6 +616,99 @@ function EntryEditorInline({ initial, onChange }: { initial: Entry; onChange: (e
         </div>
       ))}
       <p className="text-xs text-zinc-500">Debits positive, credits negative. Lines must sum to zero.</p>
+    </div>
+  );
+}
+
+const RECURRING_ACTION = {
+  create: "New",
+  update: "Change to",
+  pause: "Pause",
+  resume: "Resume",
+} as const;
+const RECURRING_KIND = { invoice: "invoice", bill: "bill", entry: "journal entry" } as const;
+const RECURRING_MODE = {
+  draft: "Creates drafts",
+  post: "Posts each one",
+  post_and_send: "Posts and emails each invoice",
+} as const;
+
+/** A proposed recurring template, or a change to one, with what it will create and when. */
+function RecurringProposal({
+  action,
+  template: t,
+  before,
+  accountName,
+}: {
+  action: keyof typeof RECURRING_ACTION;
+  template: Recurring;
+  before: Recurring | null;
+  accountName: (id: string) => string;
+}) {
+  const changes = before
+    ? [
+        ["Name", before.name, t.name],
+        ["Contact", before.contact_name ?? "None", t.contact_name ?? "None"],
+        ["Schedule", before.schedule_summary, t.schedule_summary],
+        ["Starts", fmtDate(before.schedule.start_date), fmtDate(t.schedule.start_date)],
+        ["Runs", RECURRING_MODE[before.run_mode], RECURRING_MODE[t.run_mode]],
+        ["Amount", money(before.total), money(t.total)],
+        ["Memo", before.template.memo ?? "", t.template.memo ?? ""],
+        ["Status", before.status, t.status],
+      ].filter(([, a, b]) => a !== b)
+    : [];
+  const linesChanged = before && JSON.stringify(before.template.lines) !== JSON.stringify(t.template.lines);
+  return (
+    <div className="space-y-1 text-sm">
+      <p>
+        {RECURRING_ACTION[action]} recurring {RECURRING_KIND[t.kind]} <strong>{t.name}</strong>
+        {t.contact_name && <> · {t.contact_name}</>}
+      </p>
+      <p className="text-xs text-zinc-600 dark:text-zinc-400">
+        {t.schedule_summary}, from {fmtDate(t.schedule.start_date)} · {RECURRING_MODE[t.run_mode]}
+        {t.upcoming.length > 0 && <> · next {t.upcoming.map((d) => fmtDate(d)).join(", ")}</>}
+      </p>
+      {changes.length > 0 && (
+        <ul className="text-xs text-zinc-600 dark:text-zinc-400">
+          {changes.map(([label, a, b]) => (
+            <li key={label}>
+              {label}: <span className="line-through">{a || "none"}</span> → <strong>{b || "none"}</strong>
+            </li>
+          ))}
+        </ul>
+      )}
+      {(action === "create" || linesChanged) && (
+        <table className="w-full text-xs">
+          <tbody>
+            {t.template.lines.map((l, i) => {
+              const amount =
+                l.amount ?? Math.round(((l.quantity_milli ?? 1000) * (l.unit_price ?? 0)) / 1000);
+              return (
+                <tr key={`${i}-${l.account_id}`}>
+                  <td className="py-0.5">{accountName(l.account_id)}</td>
+                  <td className="py-0.5 text-zinc-500">{l.description}</td>
+                  <td className="w-24 py-0.5 text-right num">
+                    {t.kind !== "entry" || amount > 0 ? money(Math.abs(amount)) : ""}
+                  </td>
+                  {t.kind === "entry" && (
+                    <td className="w-24 py-0.5 text-right num">{amount < 0 ? money(-amount) : ""}</td>
+                  )}
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      )}
+      {t.run_mode === "post_and_send" && action !== "pause" && (
+        <p className="text-xs text-amber-700 dark:text-amber-400">
+          This template emails the customer automatically each time it runs.
+        </p>
+      )}
+      <p className="text-xs text-zinc-500">
+        {action === "create"
+          ? "Approving starts the schedule. Rejecting discards the template."
+          : "Approving applies the change. Rejecting leaves the template as it is."}
+      </p>
     </div>
   );
 }

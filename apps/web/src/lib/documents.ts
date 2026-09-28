@@ -6,7 +6,7 @@ export type Contact = components["schemas"]["Contact"];
 export type Invoice = components["schemas"]["Invoice"];
 export type Bill = components["schemas"]["Bill"];
 export type Payment = components["schemas"]["Payment"];
-export type Recurring = components["schemas"]["RecurringInvoice"];
+export type Recurring = components["schemas"]["RecurringTemplate"];
 export type Attachment = components["schemas"]["Attachment"];
 
 export function useContacts(orgId: string, kind?: "customer" | "vendor") {

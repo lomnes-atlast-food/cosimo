@@ -88,6 +88,21 @@ Work one month at a time, oldest first.
    posts the bill to Accounts Payable. The vendor contact must be marked vendor, not customer-only.
 3. `list_bill_payments` shows what's already been paid, so you don't propose a bill twice.
 
+## Recurring
+
+- For something that repeats on a fixed schedule (a monthly subscription, rent, a retainer
+  invoice, monthly amortization of a prepaid expense), propose a template with
+  `propose_recurring_template` instead of booking each month by hand. Check
+  `list_recurring_templates` first so you don't duplicate one.
+- Quarterly is `unit: "month"` with `interval: 3`. For month-end, use `anchor_day: -1`.
+- Start with `run_mode: "draft"` unless the person asks for posting. `post_and_send` emails the
+  customer and always waits for a person's approval.
+- Memos and line descriptions can name the period: `{month}`, `{year}`, `{quarter}`, `{period}`,
+  with offsets like `{month-1}` for billing in arrears.
+- To change, pause, or resume a template, use the same tool with `action` and `template_id`.
+  Nothing runs or changes until a person approves it. For a one-off entry use
+  `create_manual_entry`.
+
 ## Contacts
 
 - Before `create_bill_draft` or `create_invoice_draft` for someone new, check `list_contacts` with

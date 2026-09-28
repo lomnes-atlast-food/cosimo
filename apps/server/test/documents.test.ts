@@ -1,6 +1,6 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import fc from "fast-check";
-import { runRecurring, runReminders } from "../src/jobs/document-jobs.ts";
+import { runReminders } from "../src/jobs/document-jobs.ts";
 import type { ActorInfo } from "../src/services/actor.ts";
 import { allocateSigned } from "../src/services/cash-basis.ts";
 import { lineAmount, voidInvoiceTx } from "../src/services/documents.ts";
@@ -426,31 +426,7 @@ describe(`cash basis and aging (${DB_MODE})`, () => {
   });
 });
 
-describe(`recurring invoices, reminders, bank payments (${DB_MODE})`, () => {
-  test("recurring templates create invoices when due and auto-send them", async () => {
-    const r = await owner.json("POST", `${base()}/recurring-invoices`, {
-      customer_id: customer,
-      name: "Monthly retainer",
-      frequency: "monthly",
-      next_date: "2026-05-01",
-      end_date: "2026-06-30",
-      auto_send: true,
-      template: { lines: [{ description: "Retainer", unit_price: 50_000, account_id: acct["4000"] }] },
-    });
-    expect(r.status).toBe(201);
-    const before = mail.length;
-    const out = await runRecurring(env.ctx, orgId, "2026-07-15");
-    expect(out.created).toBe(2);
-    expect(out.emailed).toBe(2);
-    expect(mail.length).toBe(before + 2);
-    const tpl = (await owner.json("GET", `${base()}/recurring-invoices`)).body.data.find(
-      (x: any) => x.id === r.body.id,
-    );
-    expect(tpl.next_date).toBe("2026-07-01");
-    expect(tpl.is_active).toBe(false);
-    expect((await runRecurring(env.ctx, orgId, "2026-08-15")).created).toBe(0);
-  });
-
+describe(`reminders, bank payments (${DB_MODE})`, () => {
   test("overdue reminders are off by default, then sent at most weekly", async () => {
     expect((await runReminders(env.ctx, orgId, "2026-12-01")).sent).toBe(0);
     await owner.json("PATCH", `${base()}`, { reminders_enabled: true });

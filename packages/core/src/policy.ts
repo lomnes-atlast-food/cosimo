@@ -38,7 +38,8 @@ export interface Proposal {
     | "bill_draft"
     | "entry_replacement"
     | "payment_redate"
-    | "import_batch";
+    | "import_batch"
+    | "recurring_template";
   /** Largest absolute line amount / transaction amount in cents. */
   amount: number;
   proposeOnly?: boolean;

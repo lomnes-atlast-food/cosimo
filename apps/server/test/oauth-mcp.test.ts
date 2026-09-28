@@ -2,7 +2,8 @@
  * OAuth 2.1 (SPEC §10.4) and MCP (SPEC §10.2). OAuth: dynamic registration, PKCE code flow,
  * refresh rotation, revocation, role capping, org scoping, redirect validation. MCP: writes land in
  * the review queue and don't affect reports, an MCP client cannot approve, notes and resources,
- * contacts, and corrections (reversal, replacement, payment date change) through review.
+ * contacts, corrections (reversal, replacement, payment date change), and recurring templates
+ * through review.
  */
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { createHash, randomBytes } from "node:crypto";
@@ -530,6 +531,8 @@ describe("MCP", () => {
       "propose_reversal",
       "propose_replacement",
       "propose_payment_date_change",
+      "list_recurring_templates",
+      "propose_recurring_template",
     ])
       expect(names).toContain(n);
     for (const forbidden of ["approve", "reject", "void", "reverse", "delete", "lock"])
@@ -1219,6 +1222,150 @@ describe("MCP", () => {
     });
     expect(reconciled.isError).toBe(true);
     expect(reconciled.content[0]!.text).toContain("reconciled");
+  });
+
+  test("propose_recurring_template: create, update, and pause go to review; approval activates", async () => {
+    const vendor = await owner.json("POST", `/api/v1/orgs/${orgId}/contacts`, {
+      kind: "vendor",
+      name: "Landlord LLC",
+    });
+    const missing = await call(token, "propose_recurring_template", {
+      action: "create",
+      kind: "bill",
+      name: "Rent",
+      rationale: "Monthly rent",
+    });
+    expect(missing.isError).toBe(true);
+
+    const c = await call(token, "propose_recurring_template", {
+      action: "create",
+      kind: "bill",
+      name: "Office rent",
+      contact_id: vendor.body.id,
+      run_mode: "post",
+      schedule: { unit: "month", start_date: "2030-01-31", anchor_day: -1 },
+      memo: "Rent for {month} {year}",
+      lines: [{ account: "6130", amount: 200_000, description: "Rent {period}" }],
+      rationale: "The lease is $2,000 a month, due at month end",
+    });
+    expect(c.isError).toBe(false);
+    expect(c.structuredContent.status).toBe("pending_review");
+    const id = c.structuredContent.template_id;
+    expect(c.structuredContent.template).toMatchObject({
+      status: "proposed",
+      schedule_summary: "Monthly on the last day",
+      upcoming: ["2030-01-31", "2030-02-28", "2030-03-31"],
+      total: 200_000,
+    });
+
+    // The template doesn't run until approved, and a second change waits for the first.
+    const early = await call(token, "propose_recurring_template", {
+      action: "pause",
+      template_id: id,
+      rationale: "x",
+    });
+    expect(early.isError).toBe(true);
+    const listed = await call(token, "list_recurring_templates", { kind: "bill" });
+    const row = listed.structuredContent.templates.find((t: any) => t.id === id);
+    expect(row.pending_review.action).toBe("create");
+    expect(row.template.lines[0].account_code).toBe("6130");
+
+    const ok = await owner.json(
+      "POST",
+      `/api/v1/orgs/${orgId}/review/${c.structuredContent.review_item_id}/approve`,
+      {},
+    );
+    expect(ok.status).toBe(200);
+    const active = await owner.json("GET", `/api/v1/orgs/${orgId}/recurring-templates/${id}`);
+    expect(active.body.template.status).toBe("active");
+    expect(active.body.template.next_date).toBe("2030-01-31");
+
+    // An update changes only the fields given, after approval.
+    const u = await call(token, "propose_recurring_template", {
+      action: "update",
+      template_id: id,
+      lines: [{ account: "6130", amount: 210_000, description: "Rent {period}" }],
+      rationale: "Rent went up",
+    });
+    expect(u.structuredContent.status).toBe("pending_review");
+    expect(u.structuredContent.template.total).toBe(210_000);
+    const still = await owner.json("GET", `/api/v1/orgs/${orgId}/recurring-templates/${id}`);
+    expect(still.body.template.total).toBe(200_000);
+    await owner.json(
+      "POST",
+      `/api/v1/orgs/${orgId}/review/${u.structuredContent.review_item_id}/approve`,
+      {},
+    );
+    const updated = (await owner.json("GET", `/api/v1/orgs/${orgId}/recurring-templates/${id}`)).body
+      .template;
+    expect(updated).toMatchObject({ total: 210_000, name: "Office rent", run_mode: "post" });
+    expect(updated.template.memo).toBe("Rent for {month} {year}");
+
+    // A rejected pause changes nothing.
+    const p = await call(token, "propose_recurring_template", {
+      action: "pause",
+      template_id: id,
+      rationale: "Moving out",
+    });
+    await owner.json("POST", `/api/v1/orgs/${orgId}/review/${p.structuredContent.review_item_id}/reject`, {});
+    expect(
+      (await owner.json("GET", `/api/v1/orgs/${orgId}/recurring-templates/${id}`)).body.template.status,
+    ).toBe("active");
+
+    // Over the REST API the assistant can't delete, skip, or run a template.
+    const del = await raw("DELETE", `/api/v1/orgs/${orgId}/recurring-templates/${id}`, undefined, {
+      authorization: `Bearer ${token}`,
+    });
+    expect(del.status).toBe(403);
+  });
+
+  test("a rejected recurring proposal is discarded; policies never auto-approve post_and_send", async () => {
+    const cust = await owner.json("POST", `/api/v1/orgs/${orgId}/contacts`, {
+      kind: "customer",
+      name: "Retainer Client",
+      email: "ap@retainer.test",
+    });
+    const base = {
+      action: "create",
+      kind: "invoice",
+      contact_id: cust.body.id,
+      schedule: { unit: "month", start_date: "2030-02-01" },
+      lines: [{ account: "4000", unit_price: 500, description: "Retainer {month}" }],
+      rationale: "Monthly retainer",
+    };
+    const r = await call(token, "propose_recurring_template", { ...base, name: "Rejected retainer" });
+    await owner.json("POST", `/api/v1/orgs/${orgId}/review/${r.structuredContent.review_item_id}/reject`, {});
+    expect(
+      (
+        await owner.json(
+          "GET",
+          `/api/v1/orgs/${orgId}/recurring-templates/${r.structuredContent.template_id}`,
+        )
+      ).status,
+    ).toBe(404);
+
+    const pol = await owner.json("POST", `/api/v1/orgs/${orgId}/review-policies`, {
+      name: "Small MCP templates",
+      actor: "mcp",
+      condition: { amount_lt: 1000, item_types: ["recurring_template"] },
+      action: "auto_approve",
+    });
+    expect(pol.status).toBe(201);
+    const auto = await call(token, "propose_recurring_template", { ...base, name: "Draft retainer" });
+    expect(auto.structuredContent.review_item_id).toBeNull();
+    expect(auto.structuredContent.status).toBe("active");
+    const send = await call(token, "propose_recurring_template", {
+      ...base,
+      name: "Emailed retainer",
+      run_mode: "post_and_send",
+    });
+    expect(send.structuredContent.status).toBe("pending_review");
+    const item = await owner.json(
+      "GET",
+      `/api/v1/orgs/${orgId}/review/${send.structuredContent.review_item_id}`,
+    );
+    expect(item.body.reason).toContain("emails invoices");
+    await owner.json("DELETE", `/api/v1/orgs/${orgId}/review-policies/${pol.body.id}`);
   });
 
   test("append_note and the profile/notes resources", async () => {

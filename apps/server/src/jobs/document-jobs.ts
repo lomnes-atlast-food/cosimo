@@ -1,34 +1,32 @@
-/** Daily receivables jobs (SPEC §8.1): recurring invoices and overdue reminders (off by default). */
+/** Daily receivables jobs (SPEC §8.1): recurring templates and overdue reminders (off by default). */
 import { org } from "@cosimo/db";
 import { addDays, today } from "@cosimo/shared";
 import { and, eq, inArray, isNull, lt, or } from "drizzle-orm";
 import type { AppContext } from "../context.ts";
-import { markInvoiceSentTx, mustGetInvoice, runRecurringTx } from "../services/documents.ts";
 import { emailInvoice } from "../services/invoice-delivery.ts";
 import { settingsRow } from "../services/ledger.ts";
 import type { Mailer } from "../services/mailer.ts";
+import { drainOutbox, dueTemplates, runTemplate } from "../services/recurring.ts";
 import { daily, registerJob } from "./scheduler.ts";
 
-const SYSTEM = { actor: "system" as const, role: "owner" as const, userId: null };
 export const REMINDER_EVERY_DAYS = 7;
 
-export async function runRecurring(ctx: AppContext, orgId: string, asOf = today()) {
+/**
+ * Run every due recurring template (invoices, bills, entries), each occurrence in its own
+ * transaction, then email what auto-send templates are waiting to send. A failing template records
+ * its error and the others still run.
+ */
+export async function runRecurringTemplates(ctx: AppContext, orgId: string, asOf = today()) {
   const h = await ctx.orgs.mustOpen(orgId);
-  const created = await h.write((tx) => runRecurringTx(tx, orgId, asOf));
-  const mailer = ctx.services.mailer as Mailer | undefined;
-  let emailed = 0;
-  for (const c of created.filter((x) => x.autoSend)) {
-    const inv = await mustGetInvoice(h.db, c.invoiceId);
-    if (inv.status === "draft" || !mailer || !(await mailer.isConfigured())) continue;
-    try {
-      const { to } = await emailInvoice(ctx, h.db, orgId, c.invoiceId);
-      await h.write((tx) => markInvoiceSentTx(tx, orgId, SYSTEM, c.invoiceId, to));
-      emailed++;
-    } catch (err) {
-      ctx.logger.warn("recurring invoice email failed", { org_id: orgId, invoice_id: c.invoiceId, err });
-    }
+  let created = 0;
+  let failed = 0;
+  for (const t of await dueTemplates(h.db, asOf)) {
+    const r = await runTemplate(h, orgId, t.id, asOf);
+    created += r.created;
+    if (r.error) failed++;
   }
-  return { created: created.length, emailed };
+  const mail = await drainOutbox(ctx, h, orgId, asOf);
+  return { created, failed, emailed: mail.sent };
 }
 
 export async function runReminders(ctx: AppContext, orgId: string, asOf = today()) {
@@ -68,12 +66,12 @@ export async function runReminders(ctx: AppContext, orgId: string, asOf = today(
 
 export function registerDocumentJobs() {
   registerJob({
-    name: "invoices.recurring",
+    name: "recurring.templates",
     scope: "org",
     due: daily(6),
     async run(ctx, orgId) {
-      const r = await runRecurring(ctx, orgId!);
-      return `${r.created} created, ${r.emailed} emailed`;
+      const r = await runRecurringTemplates(ctx, orgId!);
+      return `${r.created} created, ${r.failed} failed, ${r.emailed} emailed`;
     },
   });
   registerJob({
