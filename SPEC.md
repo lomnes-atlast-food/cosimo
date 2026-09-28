@@ -64,7 +64,7 @@ Cosimo is an open-source, self-hosted bookkeeping application for freelancers, c
 
 | Role | Permissions |
 |---|---|
-| Owner | Everything, including deleting the org, managing members, managing bank connections, and changing lock dates. At least one owner MUST always exist. |
+| Owner | Everything, including archiving the org, managing members, managing bank connections, and changing lock dates. At least one owner MUST always exist. The web UI's Danger zone lets an owner archive a real org (data kept; CLI-restorable) or permanently delete a demo org (`is_sample`); permanent deletion of real books stays CLI-only. |
 | Bookkeeper | Create and edit transactions, invoices, bills, rules, and reconciliations. Approve or reject items in the review queue. Cannot manage members, delete the org, or move lock dates. |
 | Accountant | Read everything, run and export all reports, add comments. Cannot change data. Intended for a CPA. |
 | Viewer | Read dashboards and reports only. |
@@ -581,6 +581,12 @@ Each question has an ID, a default, and conditions. The interactive prompt asks 
 | `backups` | Automatic daily backups | choice: `local`, `s3`, `off` | `local` | always |
 | `service` | Start automatically at login or boot? | boolean | true | target is `local` |
 | `sample_data` | Load a demo organization with sample data? | boolean | false | always |
+
+The demo org (named "Demo Studio (sample data)") is marked `is_sample` in the organizations table so it
+sorts last in the org switcher and can be found without relying on its name. Any signed-in user can load
+their own copy later from the `/orgs` page (`POST /sample-org`), and an owner can permanently delete it
+from its Settings > Members > Danger zone (`DELETE /orgs/{orgId}?permanent=true`). Real organizations are
+archive-only from the web UI; permanent deletion of real books stays CLI-only (`cosimo org delete`).
 
 Secrets (`type: secret`) are never echoed, never written to logs, and never included in `--json` output.
 

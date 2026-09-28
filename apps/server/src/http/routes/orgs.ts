@@ -6,7 +6,8 @@ import { hashToken, randomToken } from "../../crypto.ts";
 import { appendAudit } from "../../services/audit.ts";
 import { instanceAudit } from "../../services/instance-audit.ts";
 import { verifyPlaidKeys } from "../../services/plaid.ts";
-import { ApiError, badRequest, forbidden, notFound } from "../errors.ts";
+import { loadSampleData } from "../../services/sample-data.ts";
+import { ApiError, badRequest, conflict, forbidden, notFound } from "../errors.ts";
 import { rateLimit, requireAuth, requireOwner, requireSession } from "../middleware.ts";
 import {
   bearerSecurity,
@@ -51,7 +52,13 @@ export const OrgSettingsSchema = z
   .openapi("OrgSettings");
 
 const OrgSchema = z
-  .object({ id: z.string(), name: z.string(), role: RoleSchema, settings: OrgSettingsSchema })
+  .object({
+    id: z.string(),
+    name: z.string(),
+    role: RoleSchema,
+    is_sample: z.boolean(),
+    settings: OrgSettingsSchema,
+  })
   .openapi("Org");
 
 export function settingsView(s: typeof org.orgSettings.$inferSelect) {
@@ -138,7 +145,11 @@ export function orgRoutes() {
       security: bearerSecurity,
       responses: {
         200: json(
-          z.object({ data: z.array(z.object({ id: z.string(), name: z.string(), role: RoleSchema })) }),
+          z.object({
+            data: z.array(
+              z.object({ id: z.string(), name: z.string(), role: RoleSchema, is_sample: z.boolean() }),
+            ),
+          }),
         ),
         ...errorResponses,
       },
@@ -147,7 +158,10 @@ export function orgRoutes() {
       const p = requireAuth(c);
       let orgs = await c.get("ctx").orgs.listForUser(p.userId);
       if (p.orgId) orgs = orgs.filter((o) => o.id === p.orgId);
-      return c.json({ data: orgs.map((o) => ({ id: o.id, name: o.name, role: o.role })) }, 200);
+      return c.json(
+        { data: orgs.map((o) => ({ id: o.id, name: o.name, role: o.role, is_sample: o.isSample })) },
+        200,
+      );
     },
   );
 
@@ -204,7 +218,10 @@ export function orgRoutes() {
       const s = await o.handle.db.select().from(org.orgSettings).get();
       const reg = await c.get("ctx").orgs.get(o.id);
       if (!s || !reg) throw notFound("Organization");
-      return c.json({ id: o.id, name: reg.name, role: o.role, settings: settingsView(s) }, 200);
+      return c.json(
+        { id: o.id, name: reg.name, role: o.role, is_sample: reg.isSample, settings: settingsView(s) },
+        200,
+      );
     },
   );
 
@@ -312,16 +329,40 @@ export function orgRoutes() {
       method: "delete",
       path: "/orgs/{orgId}",
       tags: ["Organizations"],
-      summary: "Archive an organization (owner). Data is kept; use the CLI to delete permanently.",
+      summary:
+        "Archive an organization (owner). Data is kept; use the CLI to delete permanently. " +
+        "`?permanent=true` permanently deletes a demo organization instead.",
       security: bearerSecurity,
-      request: { params: OrgParams },
+      request: { params: OrgParams, query: z.object({ permanent: z.enum(["true", "false"]).optional() }) },
       responses: { 200: json(OkSchema), ...errorResponses },
     }),
     async (c) => {
       const o = requireOwner(c);
       if (c.get("principal")?.kind !== "session") throw forbidden("Archiving requires a signed-in session.");
-      await c.get("ctx").orgs.archive(o.id, o.actor);
+      const { permanent } = c.req.valid("query");
+      if (permanent === "true") await c.get("ctx").orgs.deleteSample(o.id, o.actor);
+      else await c.get("ctx").orgs.archive(o.id, o.actor);
       return c.json({ ok: true as const }, 200);
+    },
+  );
+
+  r.openapi(
+    createRoute({
+      method: "post",
+      path: "/sample-org",
+      tags: ["Organizations"],
+      summary: "Load a demo organization with sample books for the signed-in user",
+      security: bearerSecurity,
+      responses: { 201: json(z.object({ id: z.string() })), ...errorResponses },
+    }),
+    async (c) => {
+      const p = requireSession(c);
+      const existing = await c.get("ctx").orgs.listForUser(p.userId);
+      const already = existing.find((o) => o.isSample);
+      if (already)
+        throw conflict("You already have a demo organization.", "sample_exists", { id: already.id });
+      const { id } = await loadSampleData(c.get("ctx"), p.userId);
+      return c.json({ id }, 201);
     },
   );
 

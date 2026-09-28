@@ -1193,6 +1193,7 @@ export interface paths {
                                 id: string;
                                 name: string;
                                 role: components["schemas"]["Role"];
+                                is_sample: boolean;
                             }[];
                         };
                     };
@@ -1478,10 +1479,12 @@ export interface paths {
         };
         put?: never;
         post?: never;
-        /** Archive an organization (owner). Data is kept; use the CLI to delete permanently. */
+        /** Archive an organization (owner). Data is kept; use the CLI to delete permanently. `?permanent=true` permanently deletes a demo organization instead. */
         delete: {
             parameters: {
-                query?: never;
+                query?: {
+                    permanent?: "true" | "false";
+                };
                 header?: {
                     /** @description Makes a retry safe: the same key and body replay the first response. */
                     "Idempotency-Key"?: string;
@@ -1695,6 +1698,110 @@ export interface paths {
                 };
             };
         };
+        trace?: never;
+    };
+    "/api/v1/sample-org": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Load a demo organization with sample books for the signed-in user */
+        post: {
+            parameters: {
+                query?: never;
+                header?: {
+                    /** @description Makes a retry safe: the same key and body replay the first response. */
+                    "Idempotency-Key"?: string;
+                };
+                path?: never;
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description OK */
+                201: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            id: string;
+                        };
+                    };
+                };
+                /** @description Invalid request */
+                400: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+                /** @description Not authenticated */
+                401: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+                /** @description Forbidden */
+                403: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+                /** @description Not found */
+                404: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+                /** @description Conflict */
+                409: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+                /** @description Rule or invariant violation */
+                422: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+                /** @description Rate limited */
+                429: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
         trace?: never;
     };
     "/api/v1/orgs/{orgId}/members": {
@@ -18287,6 +18394,7 @@ export interface components {
                 id: string;
                 name: string;
                 role: components["schemas"]["Role"];
+                is_sample: boolean;
             }[];
             csrf_token: string | null;
             /** @enum {string|null} */
@@ -18323,6 +18431,7 @@ export interface components {
             id: string;
             name: string;
             role: components["schemas"]["Role"];
+            is_sample: boolean;
             settings: components["schemas"]["OrgSettings"];
         };
         OrgSettings: {

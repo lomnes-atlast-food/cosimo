@@ -2,6 +2,7 @@ import { useQueryClient } from "@tanstack/react-query";
 import { Link, useNavigate, useRouterState } from "@tanstack/react-router";
 import { type ReactNode, useEffect, useState } from "react";
 import { api } from "../api/client";
+import { groupOrgs } from "../lib/org";
 import { useSession } from "../lib/session";
 import { getTheme, setTheme, type Theme } from "../lib/theme";
 import { useUpdateStatus } from "../lib/updates";
@@ -81,10 +82,7 @@ export function OrgSwitcher({ orgId }: { orgId: string }) {
   const { data } = useSession();
   const navigate = useNavigate();
   const orgs = data?.orgs ?? [];
-  const current = orgs.find((o) => o.id === orgId);
-  if (orgs.length <= 1) {
-    return <span className="truncate text-sm font-semibold">{current?.name ?? "Cosimo"}</span>;
-  }
+  const { real, sample } = groupOrgs(orgs);
   return (
     <select
       aria-label="Switch organization"
@@ -95,11 +93,18 @@ export function OrgSwitcher({ orgId }: { orgId: string }) {
       }}
       className="max-w-[14rem] truncate rounded-md border-0 bg-transparent py-1 pl-1 pr-7 text-sm font-semibold ring-1 ring-zinc-200 dark:ring-zinc-700"
     >
-      {orgs.map((o) => (
+      {real.map((o) => (
         <option key={o.id} value={o.id}>
           {o.name}
         </option>
       ))}
+      {real.length > 0 && sample.length > 0 && <option disabled>──────────</option>}
+      {sample.map((o) => (
+        <option key={o.id} value={o.id}>
+          {o.name}
+        </option>
+      ))}
+      <option disabled>──────────</option>
       <option value="__new">+ New organization…</option>
     </select>
   );

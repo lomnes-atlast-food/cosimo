@@ -345,3 +345,11 @@ Choices made during the build. SPEC.md is the source of truth for requirements; 
   (`updates.check`, `updates.github_token`) asks GitHub Releases directly, cached in memory per
   request context rather than through the scheduler, since it only needs to run when an admin is
   looking and doesn't need to survive a restart.
+- **Demo org deletion is permanent; real orgs are archive-only in the web UI** (#40): the demo org
+  ("Demo Studio (sample data)") is marked `is_sample` in the system DB, so it can be found and
+  ordered without relying on its name. An owner gets a permanent Delete button for it in Settings'
+  Danger zone, since there's nothing worth keeping. A real org only gets Archive there (data kept,
+  restorable only via the CLI); permanent deletion of real books stays a CLI-only operation
+  (`cosimo org delete`). Any signed-in user can load their own copy of the demo from `/orgs`
+  (`POST /sample-org`), which is why `loadSampleData` is idempotent per user rather than a
+  once-per-instance seed.

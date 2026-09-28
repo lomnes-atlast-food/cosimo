@@ -1,6 +1,7 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useNavigate } from "@tanstack/react-router";
 import { type ReactNode, useEffect, useState } from "react";
-import { api, rawFetch, unwrap } from "../api/client";
+import { ApiError, api, rawFetch, unwrap } from "../api/client";
 import type { components } from "../api/schema";
 import {
   Alert,
@@ -11,6 +12,7 @@ import {
   Field,
   Input,
   Loading,
+  Modal,
   PageHeader,
   Select,
   Table,
@@ -320,6 +322,7 @@ function Members() {
   const qc = useQueryClient();
   const { isOwner } = useRole();
   const { data: session } = useSession();
+  const org = useOrg();
   const members = useQuery({
     queryKey: ["members", orgId],
     queryFn: () => unwrap(api.GET("/api/v1/orgs/{orgId}/members", { params: { path: { orgId } } })),
@@ -358,10 +361,16 @@ function Members() {
       unwrap(api.DELETE("/api/v1/orgs/{orgId}/members/{userId}", { params: { path: { orgId, userId } } })),
     onSuccess: () => qc.invalidateQueries({ queryKey: ["members", orgId] }),
   });
+  const lastOwnerError = [change.error, remove.error].find(
+    (e): e is ApiError => e instanceof ApiError && e.code === "last_owner",
+  );
   return (
     <div className="space-y-6">
       <Card title="Members">
         <ErrorText error={change.error || remove.error} />
+        {lastOwnerError && org.data?.is_sample && (
+          <Alert kind="info">Delete the demo organization instead (Danger zone below).</Alert>
+        )}
         <Table>
           <thead>
             <tr>
@@ -464,7 +473,104 @@ function Members() {
           )}
         </Card>
       )}
+      {isOwner && <DangerZone />}
     </div>
+  );
+}
+
+/** Owner-only: permanently delete a demo org, or archive a real one. */
+function DangerZone() {
+  const orgId = useOrgId();
+  const org = useOrg();
+  const refresh = useRefreshSession();
+  const navigate = useNavigate();
+  const [confirming, setConfirming] = useState(false);
+  const [confirmName, setConfirmName] = useState("");
+  const close = () => {
+    setConfirming(false);
+    setConfirmName("");
+  };
+  const deleteSample = useMutation({
+    mutationFn: () =>
+      unwrap(
+        api.DELETE("/api/v1/orgs/{orgId}", { params: { path: { orgId }, query: { permanent: "true" } } }),
+      ),
+    onSuccess: async () => {
+      await refresh();
+      navigate({ to: "/" });
+    },
+  });
+  const archive = useMutation({
+    mutationFn: () => unwrap(api.DELETE("/api/v1/orgs/{orgId}", { params: { path: { orgId } } })),
+    onSuccess: async () => {
+      await refresh();
+      navigate({ to: "/" });
+    },
+  });
+  if (!org.data) return null;
+  const isSample = org.data.is_sample;
+  const mutation = isSample ? deleteSample : archive;
+  const canConfirm = isSample || confirmName === org.data.name;
+  return (
+    <Card title="Danger zone">
+      {isSample ? (
+        <div className="space-y-3">
+          <p className="text-sm text-zinc-600 dark:text-zinc-400">
+            This is a demo organization. Deleting it permanently removes its books; it isn't archived.
+          </p>
+          <Button variant="danger" onClick={() => setConfirming(true)}>
+            Delete demo organization
+          </Button>
+        </div>
+      ) : (
+        <div className="space-y-3">
+          <p className="text-sm text-zinc-600 dark:text-zinc-400">
+            Archiving removes this organization from your list. The data is kept; an instance admin can
+            restore it from the CLI.
+          </p>
+          <Button variant="danger" onClick={() => setConfirming(true)}>
+            Archive organization
+          </Button>
+        </div>
+      )}
+      <Modal
+        open={confirming}
+        onClose={close}
+        title={isSample ? "Delete demo organization" : "Archive organization"}
+        footer={
+          <>
+            <Button variant="secondary" onClick={close}>
+              Cancel
+            </Button>
+            <Button
+              variant="danger"
+              disabled={!canConfirm}
+              loading={mutation.isPending}
+              onClick={() => mutation.mutate()}
+            >
+              {isSample ? "Delete permanently" : "Archive"}
+            </Button>
+          </>
+        }
+      >
+        {isSample ? (
+          <p className="text-sm">
+            This permanently deletes "{org.data.name}" and all of its demo books. This can't be undone.
+          </p>
+        ) : (
+          <div className="space-y-3 text-sm">
+            <p>
+              Archiving "{org.data.name}" keeps its data but removes it from every member's list. An instance
+              admin can restore it later with the CLI.
+            </p>
+            <Field label={`Type "${org.data.name}" to confirm`}>
+              {(id) => <Input id={id} value={confirmName} onChange={(e) => setConfirmName(e.target.value)} />}
+            </Field>
+          </div>
+        )}
+        <ErrorText error={mutation.error} />
+      </Modal>
+    </Card>
   );
 }
 

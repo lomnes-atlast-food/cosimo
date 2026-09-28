@@ -53,7 +53,7 @@ export interface InitOptions {
     result: InitResult;
   }) => Promise<void>;
   /** Hook to seed demo data. */
-  sampleData?: (ctx: AppContext, adminUserId: string) => Promise<void>;
+  sampleData?: (ctx: AppContext, adminUserId: string) => Promise<{ id: string }>;
   /** Environment checks (Docker, flyctl) that run before anything is written. */
   preflight?: (answers: Answers) => Promise<void>;
   /**

@@ -55,7 +55,7 @@ async function sourceInstance() {
   const config = finalize(cfg);
   const ctx = await createContext(config, { logger: silentLogger, env: {} });
   const user = await ctx.users.create({ email: "owner@example.com", name: "owner", password: PASSWORD });
-  const demo = (await loadSampleData(ctx, user.id))!;
+  const { id: demo } = await loadSampleData(ctx, user.id);
   const old = await ctx.orgs.create({ name: "Old Co", createdBy: user.id });
   await ctx.orgs.archive(old.id, systemActor());
   await ctx.settings.set("plaid", { enabled: true, client_id: "client-1", secret: "plaid-secret" });

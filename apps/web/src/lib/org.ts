@@ -27,3 +27,24 @@ export function useRole() {
     isOwner: role === "owner",
   };
 }
+
+interface NamedOrg {
+  name: string;
+  is_sample: boolean;
+}
+
+/** Sort by name, case-insensitively, without mutating the input. */
+function byName<T extends NamedOrg>(orgs: T[]): T[] {
+  return [...orgs].sort((a, b) => a.name.localeCompare(b.name, undefined, { sensitivity: "base" }));
+}
+
+/**
+ * Split and sort orgs for the switcher: real orgs first, then sample orgs, each by name
+ * case-insensitively. The server's own order isn't relied on.
+ */
+export function groupOrgs<T extends NamedOrg>(orgs: T[]): { real: T[]; sample: T[] } {
+  return {
+    real: byName(orgs.filter((o) => !o.is_sample)),
+    sample: byName(orgs.filter((o) => o.is_sample)),
+  };
+}

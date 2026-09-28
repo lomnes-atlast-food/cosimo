@@ -43,9 +43,11 @@ function csv(rows: readonly (readonly [string, string, number])[]) {
   return ["Date,Description,Amount", ...body].join("\n");
 }
 
-export async function loadSampleData(ctx: AppContext, adminUserId: string) {
+/** Idempotent: returns the existing demo org's id if the user already has one. */
+export async function loadSampleData(ctx: AppContext, adminUserId: string): Promise<{ id: string }> {
   const existing = await ctx.orgs.listForUser(adminUserId);
-  if (existing.some((o) => o.name === SAMPLE_ORG_NAME)) return;
+  const already = existing.find((o) => o.isSample);
+  if (already) return { id: already.id };
   const start = addMonths(today().slice(0, 8).concat("01"), -3);
   const { id: orgId } = await ctx.orgs.create({
     name: SAMPLE_ORG_NAME,
@@ -54,6 +56,7 @@ export async function loadSampleData(ctx: AppContext, adminUserId: string) {
     coaTemplate: "schedule_c",
     basis: "accrual",
     booksStartDate: start,
+    isSample: true,
   });
   const handle = await ctx.orgs.mustOpen(orgId);
   const a = userActor(adminUserId, "owner");
@@ -157,5 +160,5 @@ export async function loadSampleData(ctx: AppContext, adminUserId: string) {
     });
     await finalizeInvoiceTx(tx, orgId, a, invoice.id, { forcePost: true });
   });
-  return orgId;
+  return { id: orgId };
 }
