@@ -20,7 +20,7 @@ concurrency:
   cancel-in-progress: false
 
 env:
-  IMAGE: ghcr.io/lomnes-atlast-food/cosimo
+  IMAGE: ghcr.io/steve-lomnes/cosimo
 
 jobs:
   # Computes the version and whether to publish (scripts/next-version.sh has the auto-compute

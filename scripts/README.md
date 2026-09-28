@@ -4,13 +4,13 @@ These are the scripts published as release assets on every GitHub Release (SPEC 
 
 | Script | Platforms | Usage |
 | --- | --- | --- |
-| `install.sh` | macOS, Linux (x64, arm64), POSIX `sh` | `curl -fsSL https://github.com/lomnes-atlast-food/cosimo/releases/latest/download/install.sh \| sh` |
-| `install.ps1` | Windows x64 | `irm https://github.com/lomnes-atlast-food/cosimo/releases/latest/download/install.ps1 \| iex` |
+| `install.sh` | macOS, Linux (x64, arm64), POSIX `sh` | `curl -fsSL https://github.com/steve-lomnes/cosimo/releases/latest/download/install.sh \| sh` |
+| `install.ps1` | Windows x64 | `irm https://github.com/steve-lomnes/cosimo/releases/latest/download/install.ps1 \| iex` |
 
 Both scripts:
 
 1. Detect the platform and pick the release asset (`cosimo-darwin-arm64`, `cosimo-darwin-x64`, `cosimo-linux-x64`, `cosimo-linux-arm64`, `cosimo-windows-x64.exe`).
-2. Download it and `checksums.txt` from GitHub Releases (`lomnes-atlast-food/cosimo`).
+2. Download it and `checksums.txt` from GitHub Releases (`steve-lomnes/cosimo`).
 3. Verify the SHA-256 and abort on a mismatch or a missing checksum line.
 4. Install the binary and print advice about `PATH` if needed. `install.ps1` adds its folder to your user `PATH` itself.
 5. Run `cosimo init` with the remaining arguments.
@@ -20,7 +20,7 @@ Every action is logged: to stderr with `install.sh`, which keeps stdout for `cos
 ## install.sh
 
 ```sh
-curl -fsSL https://github.com/lomnes-atlast-food/cosimo/releases/latest/download/install.sh | sh -s -- --answers ./cosimo-answers.json --yes --json
+curl -fsSL https://github.com/steve-lomnes/cosimo/releases/latest/download/install.sh | sh -s -- --answers ./cosimo-answers.json --yes --json
 ```
 
 Installer flags (all other arguments go to `cosimo init`):
@@ -36,7 +36,7 @@ Install location: `~/.local/bin/cosimo`, or `/usr/local/bin/cosimo` when run as 
 Installs to `%LOCALAPPDATA%\Programs\cosimo\cosimo.exe`. `irm | iex` cannot pass arguments. For automation, either run it as a script block:
 
 ```powershell
-& ([scriptblock]::Create((irm https://github.com/lomnes-atlast-food/cosimo/releases/latest/download/install.ps1))) --answers .\answers.json --yes --json
+& ([scriptblock]::Create((irm https://github.com/steve-lomnes/cosimo/releases/latest/download/install.ps1))) --answers .\answers.json --yes --json
 ```
 
 or use the environment variables below. `COSIMO_INIT_ARGS` and `COSIMO_NO_INIT` work only in `install.ps1`.
@@ -55,12 +55,12 @@ or use the environment variables below. `COSIMO_INIT_ARGS` and `COSIMO_NO_INIT` 
 ## How verification works
 
 - **Checksum (always):** the binary's SHA-256 must match its line in `checksums.txt` (`sha256sum` format). The files are fetched over HTTPS.
-- **Signature (when `cosign` is installed):** the release workflow signs `checksums.txt` with cosign keyless `sign-blob --bundle`, which publishes a Sigstore bundle, `checksums.txt.sigstore.json`. If `cosign` is on `PATH`, `install.sh` checks the bundle against this repository's `release.yml` workflow identity before it trusts any checksum. If `cosign` is not installed, the script says the signature was not checked. Releases v0.1.0 and v0.1.1 have no bundle, only `checksums.txt.sig` and `checksums.txt.pem`; for those, `install.sh` checks that signature and certificate instead. `install.ps1` does not check signatures. To check one by hand:
+- **Signature (when `cosign` is installed):** the release workflow signs `checksums.txt` with cosign keyless `sign-blob --bundle`, which publishes a Sigstore bundle, `checksums.txt.sigstore.json`. If `cosign` is on `PATH`, `install.sh` checks the bundle against this repository's `release.yml` workflow identity before it trusts any checksum. If `cosign` is not installed, the script says the signature was not checked. Releases v0.1.0 and v0.1.1 have no bundle, only `checksums.txt.sig` and `checksums.txt.pem`; for those, `install.sh` checks that signature and certificate instead. `install.ps1` does not check signatures. Releases up to 0.6.5 were signed under the previous GitHub account name, so the identity regexp below accepts both. To check one by hand:
 
 ```sh
 cosign verify-blob \
   --bundle checksums.txt.sigstore.json \
-  --certificate-identity-regexp '^https://github.com/lomnes-atlast-food/cosimo/.github/workflows/release.yml@' \
+  --certificate-identity-regexp '^https://github.com/(steve-lomnes|lomnes-atlast-food)/cosimo/.github/workflows/release.yml@' \
   --certificate-oidc-issuer https://token.actions.githubusercontent.com \
   checksums.txt
 ```

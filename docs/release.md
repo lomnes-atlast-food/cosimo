@@ -50,15 +50,18 @@ auto-compute logic as a push to `main`.
 - **Checksums.** `checksums.txt` contains `sha256sum` output for every binary. The checksums file is signed with cosign keyless signing (GitHub OIDC), which produces one Sigstore bundle, `checksums.txt.sigstore.json` (signature, certificate and transparency-log entry). Releases v0.1.0 and v0.1.1 carry `checksums.txt.sig` and `checksums.txt.pem` instead.
 - **Build provenance.** GitHub artifact attestations cover the binaries and `checksums.txt`.
 - **GitHub Release.** It contains the files above plus `scripts/install.sh` and `scripts/install.ps1`.
-- **Container image.** The image is published at `ghcr.io/lomnes-atlast-food/cosimo` for `linux/amd64` and `linux/arm64`, tagged `X.Y.Z`, `X.Y` and `latest`. It includes SBOM and provenance attestations, and its digest is signed with cosign keyless signing.
+- **Container image.** The image is published at `ghcr.io/steve-lomnes/cosimo` for `linux/amd64` and `linux/arm64`, tagged `X.Y.Z`, `X.Y` and `latest`. It includes SBOM and provenance attestations, and its digest is signed with cosign keyless signing.
 
 ## Verifying a download
+
+Releases up to 0.6.5 were signed under the previous GitHub account name, so the
+identity regexp below accepts both.
 
 ```sh
 # 1. The checksums file was signed by this repo's release workflow.
 cosign verify-blob \
   --bundle checksums.txt.sigstore.json \
-  --certificate-identity-regexp '^https://github.com/lomnes-atlast-food/cosimo/.github/workflows/release.yml@' \
+  --certificate-identity-regexp '^https://github.com/(steve-lomnes|lomnes-atlast-food)/cosimo/.github/workflows/release.yml@' \
   --certificate-oidc-issuer https://token.actions.githubusercontent.com \
   checksums.txt
 
@@ -66,7 +69,7 @@ cosign verify-blob \
 sha256sum --check --ignore-missing checksums.txt     # macOS: shasum -a 256 -c --ignore-missing checksums.txt
 
 # Alternative: GitHub build provenance
-gh attestation verify cosimo-linux-x64 --repo lomnes-atlast-food/cosimo
+gh attestation verify cosimo-linux-x64 --repo steve-lomnes/cosimo
 ```
 
 `install.sh` does both checks automatically. It skips the signature check if cosign is not installed, and falls back to `checksums.txt.sig` and `checksums.txt.pem` for an older release with no bundle.
@@ -74,8 +77,8 @@ gh attestation verify cosimo-linux-x64 --repo lomnes-atlast-food/cosimo
 ## Verifying the image
 
 ```sh
-cosign verify ghcr.io/lomnes-atlast-food/cosimo:0.2.0 \
-  --certificate-identity-regexp '^https://github.com/lomnes-atlast-food/cosimo/.github/workflows/release.yml@' \
+cosign verify ghcr.io/steve-lomnes/cosimo:0.2.0 \
+  --certificate-identity-regexp '^https://github.com/(steve-lomnes|lomnes-atlast-food)/cosimo/.github/workflows/release.yml@' \
   --certificate-oidc-issuer https://token.actions.githubusercontent.com
 ```
 
@@ -106,7 +109,7 @@ A workflow that adds an action from any other owner fails until the list is upda
 docker run -d --name cosimo -p 8787:8787 \
   -v cosimo-data:/data \
   -e COSIMO_MASTER_KEY="$(openssl rand -base64 32)" \
-  ghcr.io/lomnes-atlast-food/cosimo:latest
+  ghcr.io/steve-lomnes/cosimo:latest
 ```
 
 Keep the master key somewhere safe. Without it, stored secrets cannot be decrypted. The container runs as uid 10001 and keeps all its state in `/data`. It reads an optional config file from `/etc/cosimo/config.toml`, and any `COSIMO_<SECTION>_<KEY>` environment variable overrides a config value.

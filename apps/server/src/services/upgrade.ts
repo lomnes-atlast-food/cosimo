@@ -9,7 +9,7 @@ import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { sha256Hex } from "@cosimo/core";
 import { migrateSystem, orgMigrations, migrate as runMigrations } from "@cosimo/db";
-import { RELEASES_API_URL, RELEASES_BASE_URL, VERSION } from "@cosimo/shared";
+import { DOCKER_IMAGE, RELEASES_API_URL, RELEASES_BASE_URL, VERSION } from "@cosimo/shared";
 import type { AppContext } from "../context.ts";
 import { createBackup } from "./backup.ts";
 
@@ -141,10 +141,7 @@ export function upgradeInstructions(target: "local" | "docker" | "fly", version:
         "The container backs up and migrates on start.",
       ];
     case "fly":
-      return [
-        `fly deploy --image ghcr.io/lomnes-atlast-food/cosimo:${version}`,
-        "The machine backs up and migrates on start.",
-      ];
+      return [`fly deploy --image ${DOCKER_IMAGE}:${version}`, "The machine backs up and migrates on start."];
     case "local":
       return ["Run `cosimo upgrade`.", "It backs up, downloads, verifies, swaps the binary, and migrates."];
   }

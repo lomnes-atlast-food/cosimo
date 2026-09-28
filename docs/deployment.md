@@ -15,7 +15,7 @@ They use the same container image and environment variables.
 | One instance | The scheduler (bank sync, backups, reminders) runs in-process. Run exactly one replica and don't scale to zero. |
 
 Any config key can be set as `COSIMO_<SECTION>_<KEY>` (see `cosimo config list`). The image is
-`ghcr.io/lomnes-atlast-food/cosimo:<version>`. It listens on port 8787 and runs as uid 10001.
+`ghcr.io/steve-lomnes/cosimo:<version>`. It listens on port 8787 and runs as uid 10001.
 
 After the first start, create the admin and first organization inside the container:
 
@@ -94,7 +94,7 @@ move. Once the new one is running, keep the old one stopped: two schedulers woul
 
 ## Railway
 
-1. New project → **Deploy a Docker image** → `ghcr.io/lomnes-atlast-food/cosimo:<version>`.
+1. New project → **Deploy a Docker image** → `ghcr.io/steve-lomnes/cosimo:<version>`.
 2. Add a **volume** mounted at `/data`.
 3. Variables: `COSIMO_MASTER_KEY`, `COSIMO_SERVER_PUBLIC_URL=https://<your-domain>`,
    `COSIMO_SERVER_TRUST_PROXY=true`. Set the service port to **8787** (Cosimo does not read `PORT`).
@@ -103,7 +103,7 @@ move. Once the new one is running, keep the old one stopped: two schedulers woul
 
 ## Render
 
-1. New **Web Service** → **Existing image** → `ghcr.io/lomnes-atlast-food/cosimo:<version>`.
+1. New **Web Service** → **Existing image** → `ghcr.io/steve-lomnes/cosimo:<version>`.
 2. Add a **persistent disk** mounted at `/data`. Disks need a paid instance type; free instances
    sleep, which stops the scheduler.
 3. Environment: `COSIMO_MASTER_KEY`, `COSIMO_SERVER_PUBLIC_URL`, `COSIMO_SERVER_TRUST_PROXY=true`.
@@ -112,7 +112,7 @@ move. Once the new one is running, keep the old one stopped: two schedulers woul
 
 ## Coolify
 
-1. New resource → **Docker Image** → `ghcr.io/lomnes-atlast-food/cosimo:<version>`, port 8787.
+1. New resource → **Docker Image** → `ghcr.io/steve-lomnes/cosimo:<version>`, port 8787.
 2. Add a persistent storage volume at `/data` and set the domain; Coolify's proxy handles HTTPS.
 3. Environment: `COSIMO_MASTER_KEY`, `COSIMO_SERVER_PUBLIC_URL`, `COSIMO_SERVER_TRUST_PROXY=true`.
 4. Run the `init --in-container` command in the container terminal.
@@ -120,7 +120,7 @@ move. Once the new one is running, keep the old one stopped: two schedulers woul
 ## Bare Linux server with systemd (no Docker)
 
 ```sh
-curl -fsSL https://github.com/lomnes-atlast-food/cosimo/releases/latest/download/install.sh | sh -s -- --system --no-init     # installs /usr/local/bin/cosimo
+curl -fsSL https://github.com/steve-lomnes/cosimo/releases/latest/download/install.sh | sh -s -- --system --no-init     # installs /usr/local/bin/cosimo
 sudo useradd --system --home /var/lib/cosimo --create-home cosimo
 sudo -u cosimo cosimo init --answers answers.json --yes --json       # target: local, service: false,
                                                                      # public_url: https://books.example.com

@@ -89,7 +89,7 @@ describe("versions", () => {
   test("upgradeInstructions match each deployment target", () => {
     expect(upgradeInstructions("docker", "1.2.3").join("\n")).toContain("docker compose pull");
     expect(upgradeInstructions("fly", "1.2.3").join("\n")).toContain(
-      "fly deploy --image ghcr.io/lomnes-atlast-food/cosimo:1.2.3",
+      "fly deploy --image ghcr.io/steve-lomnes/cosimo:1.2.3",
     );
     expect(upgradeInstructions("local", "1.2.3").join("\n")).toContain("cosimo upgrade");
   });

@@ -181,7 +181,7 @@ describe.skipIf(isWindows)("scripts/install.sh", () => {
     });
 
     const IDENTITY =
-      "--certificate-identity-regexp ^https://github.com/lomnes-atlast-food/cosimo/.github/workflows/release.yml@";
+      "--certificate-identity-regexp ^https://github.com/(steve-lomnes|lomnes-atlast-food)/cosimo/.github/workflows/release.yml@";
     const ISSUER = "--certificate-oidc-issuer https://token.actions.githubusercontent.com";
 
     test("verifies the checksums signature bundle", async () => {
