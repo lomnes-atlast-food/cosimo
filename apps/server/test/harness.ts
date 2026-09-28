@@ -75,7 +75,10 @@ export interface TestEnv {
 
 let counter = 0;
 
-export async function createTestEnv(opts: { configure?: (c: Config) => void } = {}): Promise<TestEnv> {
+/** `migrate: false` leaves the system database empty, for tests that build an older schema. */
+export async function createTestEnv(
+  opts: { configure?: (c: Config) => void; migrate?: boolean } = {},
+): Promise<TestEnv> {
   const dir = mkdtempSync(join(tmpdir(), "cosimo-test-"));
   const cfg = defaultConfig(dir);
   cfg.security.master_key = generateMasterKey();
@@ -95,7 +98,12 @@ export async function createTestEnv(opts: { configure?: (c: Config) => void } = 
   }
   opts.configure?.(cfg);
   const config = finalize(cfg);
-  const ctx = await createContext(config, { logger: silentLogger, provisioner, env: {} });
+  const ctx = await createContext(config, {
+    logger: silentLogger,
+    provisioner,
+    env: {},
+    migrate: opts.migrate,
+  });
   const app = createApp(ctx);
   return {
     ctx,
