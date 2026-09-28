@@ -2,9 +2,13 @@
  * Test preload. With COSIMO_TEST_DB=sqld, starts a local `sqld` with namespaces (unless
  * COSIMO_TEST_SQLD_URL / COSIMO_TEST_SQLD_ADMIN point at one already, as in CI).
  */
+import { setDefaultTimeout } from "bun:test";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+
+// Bun ignores `timeout` under [test] in bunfig.toml, so the default is set here.
+setDefaultTimeout(30_000);
 
 if (process.env.COSIMO_TEST_DB === "sqld" && !process.env.COSIMO_TEST_SQLD_URL) {
   const port = 20000 + Math.floor(Math.random() * 20000);
