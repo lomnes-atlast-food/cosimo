@@ -1,4 +1,4 @@
 [[IgnoredVulns]]
 id = "GHSA-67mh-4wv8-2f99"
 ignoreUntil = 2027-03-31
-reason = "esbuild 0.18 dev server only; reached through drizzle-kit (dev tool) via @esbuild-kit. See issue #30."
+reason = "Not affected: the advisory covers only esbuild's dev server (esbuild.serve()), which nothing in Cosimo runs. The flagged esbuild@0.18.20 comes from drizzle-kit 0.31 declaring @esbuild-kit/esm-loader, which its code never loads; drizzle-kit itself runs esbuild 0.25. Remove when drizzle-kit 1.0 (which drops @esbuild-kit) is stable. Closed as not planned: #4."
