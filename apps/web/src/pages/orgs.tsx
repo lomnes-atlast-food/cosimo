@@ -107,10 +107,35 @@ export function CreateOrgForm({ onCreated }: { onCreated: (id: string) => void }
   );
 }
 
+function LoadSampleCard() {
+  const navigate = useNavigate();
+  const refresh = useRefreshSession();
+  const load = useMutation({
+    mutationFn: () => unwrap(api.POST("/api/v1/sample-org")),
+    onSuccess: async (r) => {
+      await refresh();
+      navigate({ to: "/o/$orgId", params: { orgId: r.id } });
+    },
+  });
+  return (
+    <Card title="Load a demo organization" className="mb-6">
+      <p className="mb-3 text-sm text-zinc-500">
+        Get a copy of Demo Studio, a sample business with three months of bank activity, an invoice, and work
+        waiting in Categorize, so you can try Cosimo before setting up your own books.
+      </p>
+      <ErrorText error={load.error} />
+      <Button loading={load.isPending} onClick={() => load.mutate()}>
+        Load demo organization
+      </Button>
+    </Card>
+  );
+}
+
 export function OrgsPage() {
   const { data } = useSession();
   const navigate = useNavigate();
   const orgs = data?.orgs ?? [];
+  const hasSample = orgs.some((o) => o.is_sample);
   return (
     <PlainShell>
       <PageHeader title="Your organizations" subtitle="Each organization is a separate set of books." />
@@ -122,12 +147,16 @@ export function OrgsPage() {
                 <Link to="/o/$orgId" params={{ orgId: o.id }} className="font-medium hover:underline">
                   {o.name}
                 </Link>
-                <Badge>{o.role}</Badge>
+                <div className="flex items-center gap-2">
+                  {o.is_sample && <Badge tone="blue">Demo</Badge>}
+                  <Badge>{o.role}</Badge>
+                </div>
               </li>
             ))}
           </ul>
         </Card>
       )}
+      {!hasSample && <LoadSampleCard />}
       <Card title="New organization">
         <CreateOrgForm onCreated={(id) => navigate({ to: "/o/$orgId", params: { orgId: id } })} />
       </Card>

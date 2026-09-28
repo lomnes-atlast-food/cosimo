@@ -417,7 +417,7 @@ const DEFS: QuestionDef[] = [
   {
     id: "sample_data",
     prompt: "Load a demo organization with sample data?",
-    help: "Adds a separate 'Demo Consulting LLC' organization you can delete later.",
+    help: "Adds a separate 'Demo Studio (sample data)' organization you can delete later from its Settings page.",
     type: "boolean",
     default: false,
     required: true,

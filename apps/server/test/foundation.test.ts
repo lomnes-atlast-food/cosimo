@@ -99,7 +99,12 @@ describe(`foundation (${DB_MODE})`, () => {
     const c = await login(env, "owner1@example.com");
     const orgId = await createOrg(env, c, "Owner One LLC");
     const list = await c.json("GET", "/api/v1/orgs");
-    expect(list.body.data).toContainEqual({ id: orgId, name: "Owner One LLC", role: "owner" });
+    expect(list.body.data).toContainEqual({
+      id: orgId,
+      name: "Owner One LLC",
+      role: "owner",
+      is_sample: false,
+    });
     const got = await c.json("GET", `/api/v1/orgs/${orgId}`);
     expect(got.body.settings.legal_name).toBe("Owner One LLC");
     const audit = await c.json("GET", `/api/v1/orgs/${orgId}/audit`);
@@ -168,7 +173,7 @@ describe(`foundation (${DB_MODE})`, () => {
     expect(acc.status).toBe(200);
     const cpa = await login(env, "cpa@example.com");
     const list = await cpa.json("GET", "/api/v1/orgs");
-    expect(list.body.data).toEqual([{ id: orgId, name: "Invite Co", role: "accountant" }]);
+    expect(list.body.data).toEqual([{ id: orgId, name: "Invite Co", role: "accountant", is_sample: false }]);
     // accountants are read-only
     expect((await cpa.json("PATCH", `/api/v1/orgs/${orgId}`, { dba: "Nope" })).status).toBe(403);
     // reused invitation fails

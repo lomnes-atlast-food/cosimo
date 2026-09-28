@@ -3,7 +3,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { type Client, createClient } from "@libsql/client";
-import { migrate, orgMigrations } from "./migrate.ts";
+import { migrate, orgMigrations, systemMigrations } from "./migrate.ts";
 
 const dir = mkdtempSync(join(tmpdir(), "cosimo-migrate-"));
 let client: Client;
@@ -179,4 +179,32 @@ test("0003 moves recurring invoices to recurring templates, back-fills runs, and
   expect(Number(old.rows[0]!.n)).toBe(0);
   const billCols = await client.execute("SELECT name FROM pragma_table_info('bills')");
   expect(billCols.rows.map((r) => r.name)).toContain("recurring_id");
+});
+
+test("0001_known_randall (system) backfills is_sample for the existing demo org by name", async () => {
+  const sysDir = mkdtempSync(join(tmpdir(), "cosimo-migrate-sys-"));
+  const sysClient = createClient({ url: `file:${join(sysDir, "system.db")}` });
+  try {
+    const upTo = systemMigrations.findIndex((m) => m.tag === "0001_known_randall");
+    expect(upTo).toBeGreaterThan(0);
+    await migrate(sysClient, systemMigrations.slice(0, upTo));
+    await sysClient.execute({
+      sql: "INSERT INTO organizations (id, name, db_url) VALUES (?, ?, ?)",
+      args: ["o1", "Demo Studio (sample data)", "file:demo.db"],
+    });
+    await sysClient.execute({
+      sql: "INSERT INTO organizations (id, name, db_url) VALUES (?, ?, ?)",
+      args: ["o2", "Real Co", "file:real.db"],
+    });
+
+    expect(await migrate(sysClient, systemMigrations.slice(0, upTo + 1))).toEqual(["0001_known_randall"]);
+    const rs = await sysClient.execute("SELECT id, is_sample FROM organizations ORDER BY id");
+    expect(rs.rows.map((r) => [r.id, r.is_sample])).toEqual([
+      ["o1", 1],
+      ["o2", 0],
+    ]);
+  } finally {
+    sysClient.close();
+    rmSync(sysDir, { recursive: true, force: true });
+  }
 });

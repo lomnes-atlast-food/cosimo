@@ -12,12 +12,13 @@ beforeAll(async () => {
 afterAll(() => env.close());
 
 test("sample data builds a demo org with posted books and work to review", async () => {
-  const orgId = await loadSampleData(env.ctx, owner.userId);
+  const { id: orgId } = await loadSampleData(env.ctx, owner.userId);
   expect(orgId).toBeString();
   const base = `/api/v1/orgs/${orgId}`;
 
   const orgs = await owner.json("GET", "/api/v1/orgs");
   expect(orgs.body.data.map((o: { name: string }) => o.name)).toContain(SAMPLE_ORG_NAME);
+  expect(orgs.body.data.find((o: { id: string }) => o.id === orgId).is_sample).toBe(true);
 
   const tb = await owner.json("GET", `${base}/reports/trial_balance`);
   expect(tb.status).toBe(200);
@@ -35,5 +36,5 @@ test("sample data builds a demo org with posted books and work to review", async
   expect(verify.body.ledger.checked).toBeGreaterThan(5);
 
   // Running it again does not add a second demo org.
-  expect(await loadSampleData(env.ctx, owner.userId)).toBeUndefined();
+  expect(await loadSampleData(env.ctx, owner.userId)).toEqual({ id: orgId });
 });

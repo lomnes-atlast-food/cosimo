@@ -10,10 +10,12 @@ import {
   system,
 } from "@cosimo/db";
 import type { Basis, CoaTemplate, EntityType, Role } from "@cosimo/shared";
-import { and, eq, isNull } from "drizzle-orm";
+import { and, eq, isNull, sql } from "drizzle-orm";
 import type { SecretBox } from "../crypto.ts";
+import { unprocessable } from "../http/errors.ts";
 import type { ActorInfo } from "./actor.ts";
 import { appendAudit } from "./audit.ts";
+import { instanceAudit } from "./instance-audit.ts";
 import type { OrgProvisioner } from "./provisioning.ts";
 import type { SystemHandle } from "./types.ts";
 
@@ -29,6 +31,7 @@ export interface CreateOrgInput {
   /** The first owner. */
   ownerUserId?: string | null;
   ip?: string | null;
+  isSample?: boolean;
 }
 
 export type OrgSeeder = (tx: OrgTx, orgId: string, input: CreateOrgInput) => Promise<void>;
@@ -108,10 +111,12 @@ export class OrgService {
         role: system.memberships.role,
         archivedAt: system.organizations.archivedAt,
         createdAt: system.organizations.createdAt,
+        isSample: system.organizations.isSample,
       })
       .from(system.memberships)
       .innerJoin(system.organizations, eq(system.organizations.id, system.memberships.orgId))
       .where(and(eq(system.memberships.userId, userId), isNull(system.organizations.archivedAt)))
+      .orderBy(system.organizations.isSample, sql`lower(${system.organizations.name})`)
       .all();
   }
 
@@ -180,6 +185,7 @@ export class OrgService {
         dbUrl: prov.url,
         dbTokenEnc: prov.authToken ? this.secrets.encrypt(prov.authToken) : null,
         createdBy: input.createdBy,
+        isSample: input.isSample ?? false,
       });
       const owner = input.ownerUserId ?? input.createdBy;
       if (owner) await tx.insert(system.memberships).values({ userId: owner, orgId: id, role: "owner" });
@@ -199,6 +205,21 @@ export class OrgService {
         .set({ archivedAt: new Date().toISOString() })
         .where(eq(system.organizations.id, orgId)),
     );
+  }
+
+  /** Permanently delete a sample org's database and registry rows. Refuses real orgs. */
+  async deleteSample(orgId: string, actor: ActorInfo) {
+    const row = await this.get(orgId);
+    if (!row?.isSample)
+      throw unprocessable("Only demo organizations can be permanently deleted.", "not_sample");
+    await this.destroy(orgId);
+    await instanceAudit(this.system, {
+      userId: actor.userId,
+      action: "org.delete_sample",
+      targetType: "org",
+      targetId: orgId,
+      ip: actor.ip,
+    });
   }
 
   /** Permanently delete an org's database and registry rows. */

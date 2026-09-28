@@ -30,7 +30,7 @@ const UserSchema = z
 const SessionSchema = z
   .object({
     user: UserSchema.nullable(),
-    orgs: z.array(z.object({ id: z.string(), name: z.string(), role: RoleSchema })),
+    orgs: z.array(z.object({ id: z.string(), name: z.string(), role: RoleSchema, is_sample: z.boolean() })),
     csrf_token: z.string().nullable(),
     auth_kind: z.enum(["session", "api_token", "oauth"]).nullable(),
     instance: z.object({ version: z.string(), signup_mode: z.string(), setup_required: z.boolean() }),
@@ -92,7 +92,7 @@ async function sessionView(c: Context<AppEnv>, csrfOverride?: string, userIdOver
           totp_enabled: user.totpEnabled,
         }
       : null,
-    orgs: scoped.map((o) => ({ id: o.id, name: o.name, role: o.role })),
+    orgs: scoped.map((o) => ({ id: o.id, name: o.name, role: o.role, is_sample: o.isSample })),
     csrf_token:
       csrfOverride ?? (p?.kind === "session" && p.sessionTokenHash ? csrfFor(c, p.sessionTokenHash) : null),
     auth_kind: userIdOverride ? ("session" as const) : (p?.kind ?? null),

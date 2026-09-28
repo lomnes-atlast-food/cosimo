@@ -47,7 +47,7 @@ const index = createRoute({
     const { data, isLoading } = useSession();
     if (isLoading) return <Loading />;
     if (!data?.user) return <Navigate to="/login" />;
-    const first = data.orgs[0];
+    const first = data.orgs.find((o) => !o.is_sample) ?? data.orgs[0];
     return first ? <Navigate to="/o/$orgId" params={{ orgId: first.id }} /> : <Navigate to="/orgs" />;
   },
 });

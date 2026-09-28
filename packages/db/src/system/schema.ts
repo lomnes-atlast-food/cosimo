@@ -64,6 +64,7 @@ export const organizations = sqliteTable("organizations", {
   createdBy: text("created_by"),
   createdAt: text("created_at").notNull().default(now),
   archivedAt: text("archived_at"),
+  isSample: integer("is_sample", { mode: "boolean" }).notNull().default(false),
 });
 
 export const memberships = sqliteTable(
