@@ -1,8 +1,9 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Link, useNavigate, useParams } from "@tanstack/react-router";
+import { Link, useNavigate, useParams, useRouterState } from "@tanstack/react-router";
 import { useEffect, useMemo, useState } from "react";
 import { api, download, unwrap } from "../api/client";
 import { AccountSelect } from "../components/AccountSelect";
+import { RecurringList } from "../components/recurring";
 import { SearchSelect } from "../components/SearchSelect";
 import {
   Alert,
@@ -16,22 +17,13 @@ import {
   Loading,
   Modal,
   PageHeader,
-  Select,
   Table,
   Tabs,
   Textarea,
   td,
   th,
 } from "../components/ui";
-import {
-  type Contact,
-  INVOICE_STATUS,
-  type Invoice,
-  parseQty,
-  qtyText,
-  type Recurring,
-  useContacts,
-} from "../lib/documents";
+import { type Contact, INVOICE_STATUS, type Invoice, parseQty, qtyText, useContacts } from "../lib/documents";
 import { centsToDecimal, fmtDate, fmtDateTime, money, todayIso, tryParseCents } from "../lib/format";
 import { useAccounts } from "../lib/ledger";
 import { useOrg, useOrgId, useRole } from "../lib/org";
@@ -43,6 +35,9 @@ type Filter = "all" | "draft" | "open" | "overdue" | "paid";
 export function InvoicesPage() {
   const orgId = useOrgId();
   const { canWrite } = useRole();
+  const navigate = useNavigate();
+  const pathname = useRouterState({ select: (s) => s.location.pathname });
+  const onRecurring = pathname.endsWith("/recurring");
   const [filter, setFilter] = useState<Filter>("all");
   const query =
     filter === "draft"
@@ -60,6 +55,7 @@ export function InvoicesPage() {
       unwrap(api.GET("/api/v1/orgs/{orgId}/invoices", { params: { path: { orgId }, query } })).then(
         (r) => r.data,
       ),
+    enabled: !onRecurring,
   });
   const totals = useMemo(() => {
     const open = (list.data ?? []).filter((i) => i.status === "sent" || i.status === "partial");
@@ -73,94 +69,109 @@ export function InvoicesPage() {
       <PageHeader
         title="Invoices"
         actions={
-          canWrite && (
-            <>
-              <Link to="/o/$orgId/sales/recurring" params={{ orgId }}>
-                <Button variant="secondary">Recurring</Button>
-              </Link>
-              <Link to="/o/$orgId/sales/invoices/new" params={{ orgId }}>
-                <Button>New invoice</Button>
-              </Link>
-            </>
-          )
+          canWrite &&
+          (onRecurring ? (
+            <Link to="/o/$orgId/sales/invoices/recurring/new" params={{ orgId }}>
+              <Button>New recurring invoice</Button>
+            </Link>
+          ) : (
+            <Link to="/o/$orgId/sales/invoices/new" params={{ orgId }}>
+              <Button>New invoice</Button>
+            </Link>
+          ))
         }
       />
       <Tabs
-        value={filter}
-        onChange={setFilter}
+        value={onRecurring ? "recurring" : filter}
+        onChange={(v) => {
+          if (v === "recurring") navigate({ to: "/o/$orgId/sales/invoices/recurring", params: { orgId } });
+          else {
+            setFilter(v);
+            if (onRecurring) navigate({ to: "/o/$orgId/sales/invoices", params: { orgId } });
+          }
+        }}
         tabs={[
           { value: "all", label: "All" },
           { value: "draft", label: "Drafts" },
           { value: "open", label: "Open" },
           { value: "overdue", label: "Overdue" },
           { value: "paid", label: "Paid" },
+          { value: "recurring", label: "Recurring" },
         ]}
       />
-      {filter === "all" && list.data && (
-        <p className="mb-3 text-sm text-zinc-600 dark:text-zinc-400">
-          Outstanding {money(totals.open)} · overdue{" "}
-          <span className={totals.overdue ? "text-red-700 dark:text-red-400" : ""}>
-            {money(totals.overdue)}
-          </span>
-        </p>
+      {onRecurring ? (
+        <RecurringList kind="invoice" />
+      ) : (
+        <>
+          {filter === "all" && list.data && (
+            <p className="mb-3 text-sm text-zinc-600 dark:text-zinc-400">
+              Outstanding {money(totals.open)} · overdue{" "}
+              <span className={totals.overdue ? "text-red-700 dark:text-red-400" : ""}>
+                {money(totals.overdue)}
+              </span>
+            </p>
+          )}
+          <ErrorText error={list.error} />
+          <Card>
+            {list.isLoading ? (
+              <Loading />
+            ) : !list.data?.length ? (
+              <p className="text-sm text-zinc-500">No invoices here.</p>
+            ) : (
+              <Table>
+                <thead>
+                  <tr>
+                    <th className={th}>Number</th>
+                    <th className={th}>Customer</th>
+                    <th className={`${th} hidden sm:table-cell`}>Date</th>
+                    <th className={th}>Due</th>
+                    <th className={th}>Status</th>
+                    <th className={`${th} text-right`}>Total</th>
+                    <th className={`${th} text-right`}>Balance</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-zinc-100 dark:divide-zinc-800">
+                  {list.data.map((i) => (
+                    <tr key={i.id}>
+                      <td className={td}>
+                        <Link
+                          to="/o/$orgId/sales/invoices/$invoiceId"
+                          params={{ orgId, invoiceId: i.id }}
+                          className="font-medium hover:underline"
+                        >
+                          {i.number}
+                        </Link>
+                      </td>
+                      <td className={td}>{i.customer_name}</td>
+                      <td className={`${td} hidden whitespace-nowrap sm:table-cell`}>
+                        {fmtDate(i.issue_date)}
+                      </td>
+                      <td
+                        className={`${td} whitespace-nowrap ${i.overdue ? "text-red-700 dark:text-red-400" : ""}`}
+                      >
+                        {fmtDate(i.due_date)}
+                      </td>
+                      <td className={td}>
+                        <DocStatus
+                          status={INVOICE_STATUS[i.status]}
+                          pending={i.entry_status === "pending_review"}
+                          overdue={i.overdue}
+                        />
+                      </td>
+                      <td className={`${td} text-right`}>
+                        <Amount cents={i.total} />
+                      </td>
+                      <td className={`${td} text-right`}>
+                        <Amount cents={i.balance_due} />
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </Table>
+            )}
+          </Card>
+        </>
       )}
-      <ErrorText error={list.error} />
-      <Card>
-        {list.isLoading ? (
-          <Loading />
-        ) : !list.data?.length ? (
-          <p className="text-sm text-zinc-500">No invoices here.</p>
-        ) : (
-          <Table>
-            <thead>
-              <tr>
-                <th className={th}>Number</th>
-                <th className={th}>Customer</th>
-                <th className={`${th} hidden sm:table-cell`}>Date</th>
-                <th className={th}>Due</th>
-                <th className={th}>Status</th>
-                <th className={`${th} text-right`}>Total</th>
-                <th className={`${th} text-right`}>Balance</th>
-              </tr>
-            </thead>
-            <tbody className="divide-y divide-zinc-100 dark:divide-zinc-800">
-              {list.data.map((i) => (
-                <tr key={i.id}>
-                  <td className={td}>
-                    <Link
-                      to="/o/$orgId/sales/invoices/$invoiceId"
-                      params={{ orgId, invoiceId: i.id }}
-                      className="font-medium hover:underline"
-                    >
-                      {i.number}
-                    </Link>
-                  </td>
-                  <td className={td}>{i.customer_name}</td>
-                  <td className={`${td} hidden whitespace-nowrap sm:table-cell`}>{fmtDate(i.issue_date)}</td>
-                  <td
-                    className={`${td} whitespace-nowrap ${i.overdue ? "text-red-700 dark:text-red-400" : ""}`}
-                  >
-                    {fmtDate(i.due_date)}
-                  </td>
-                  <td className={td}>
-                    <DocStatus
-                      status={INVOICE_STATUS[i.status]}
-                      pending={i.entry_status === "pending_review"}
-                      overdue={i.overdue}
-                    />
-                  </td>
-                  <td className={`${td} text-right`}>
-                    <Amount cents={i.total} />
-                  </td>
-                  <td className={`${td} text-right`}>
-                    <Amount cents={i.balance_due} />
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </Table>
-        )}
-      </Card>
     </>
   );
 }
@@ -609,6 +620,11 @@ export function InvoicePage() {
             {canWrite && (inv.status === "sent" || inv.status === "partial") && (
               <Button onClick={() => setPaying(true)}>Record payment</Button>
             )}
+            {canWrite && (
+              <Link to="/o/$orgId/sales/invoices/recurring/new" params={{ orgId }} search={{ from: inv.id }}>
+                <Button variant="secondary">Make recurring</Button>
+              </Link>
+            )}
           </>
         }
       />
@@ -688,6 +704,20 @@ export function InvoicePage() {
                     className="underline"
                   >
                     View entry
+                  </Link>
+                </dd>
+              </div>
+            )}
+            {inv.recurring_id && (
+              <div>
+                <dt className="text-xs uppercase text-zinc-500">Recurring</dt>
+                <dd>
+                  <Link
+                    to="/o/$orgId/sales/invoices/recurring/$templateId"
+                    params={{ orgId, templateId: inv.recurring_id }}
+                    className="underline"
+                  >
+                    From recurring template ›
                   </Link>
                 </dd>
               </div>
@@ -995,210 +1025,6 @@ export function PaymentModal({
             <Alert kind="error">You applied more than the payment amount.</Alert>
           )}
         </div>
-        <ErrorText error={save.error} />
-      </div>
-    </Modal>
-  );
-}
-
-// ----------------------------------------------------------------------------- recurring
-
-export function RecurringPage() {
-  const orgId = useOrgId();
-  const { canWrite } = useRole();
-  const list = useQuery({
-    queryKey: ["recurring", orgId],
-    queryFn: () =>
-      unwrap(
-        api.GET("/api/v1/orgs/{orgId}/recurring-templates", {
-          params: { path: { orgId }, query: { kind: "invoice" } },
-        }),
-      ).then((r) => r.data),
-  });
-  const [adding, setAdding] = useState(false);
-  return (
-    <>
-      <PageHeader
-        title="Recurring invoices"
-        subtitle="Invoices are created each morning when a template is due."
-        actions={canWrite && <Button onClick={() => setAdding(true)}>New template</Button>}
-      />
-      <Card>
-        {list.isLoading ? (
-          <Loading />
-        ) : !list.data?.length ? (
-          <p className="text-sm text-zinc-500">No recurring invoices.</p>
-        ) : (
-          <Table>
-            <thead>
-              <tr>
-                <th className={th}>Name</th>
-                <th className={th}>Customer</th>
-                <th className={th}>Every</th>
-                <th className={th}>Next</th>
-                <th className={`${th} text-right`}>Amount</th>
-                <th className={th} />
-              </tr>
-            </thead>
-            <tbody className="divide-y divide-zinc-100 dark:divide-zinc-800">
-              {list.data.map((r) => (
-                <tr key={r.id} className={r.status === "active" ? "" : "opacity-60"}>
-                  <td className={td}>
-                    {r.name}
-                    {r.last_error && (
-                      <div className="text-xs text-red-600 dark:text-red-400">{r.last_error}</div>
-                    )}
-                  </td>
-                  <td className={td}>{r.contact_name}</td>
-                  <td className={td}>{r.schedule_summary}</td>
-                  <td className={td}>{r.next_date ? fmtDate(r.next_date) : "—"}</td>
-                  <td className={`${td} text-right num`}>{money(r.total)}</td>
-                  <td className={td}>
-                    <div className="flex gap-1">
-                      <Badge tone={RUN_MODE[r.run_mode].tone}>{RUN_MODE[r.run_mode].label}</Badge>
-                      {r.status !== "active" && (
-                        <Badge tone={r.status === "proposed" ? "amber" : "zinc"}>
-                          {TEMPLATE_STATUS[r.status]}
-                        </Badge>
-                      )}
-                    </div>
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </Table>
-        )}
-      </Card>
-      {adding && <RecurringForm onClose={() => setAdding(false)} />}
-    </>
-  );
-}
-
-const RUN_MODE: Record<Recurring["run_mode"], { label: string; tone: "zinc" | "blue" | "green" }> = {
-  draft: { label: "Draft only", tone: "zinc" },
-  post: { label: "Post", tone: "blue" },
-  post_and_send: { label: "Auto-send", tone: "green" },
-};
-
-const TEMPLATE_STATUS: Record<Recurring["status"], string> = {
-  proposed: "Waiting for review",
-  active: "Active",
-  paused: "Paused",
-  ended: "Ended",
-  archived: "Deleted",
-};
-
-const FREQUENCY = {
-  weekly: { unit: "week", interval: 1 },
-  monthly: { unit: "month", interval: 1 },
-  quarterly: { unit: "month", interval: 3 },
-  yearly: { unit: "year", interval: 1 },
-} as const;
-
-function RecurringForm({ onClose }: { onClose: () => void }) {
-  const orgId = useOrgId();
-  const qc = useQueryClient();
-  const accounts = useAccounts(orgId);
-  const [customer, setCustomer] = useState("");
-  const [name, setName] = useState("");
-  const [frequency, setFrequency] = useState<"weekly" | "monthly" | "quarterly" | "yearly">("monthly");
-  const [next, setNext] = useState(todayIso());
-  const [end, setEnd] = useState("");
-  const [autoSend, setAutoSend] = useState(false);
-  const [lines, setLines] = useState<EditLine[]>([blankLine()]);
-  const defaultIncome =
-    accounts.data?.find((a) => a.type === "income" && a.is_active && !a.is_system)?.id ?? "";
-  const save = useMutation({
-    mutationFn: () =>
-      unwrap(
-        api.POST("/api/v1/orgs/{orgId}/recurring-templates", {
-          params: { path: { orgId } },
-          body: {
-            kind: "invoice",
-            contact_id: customer,
-            name,
-            run_mode: autoSend ? "post_and_send" : "draft",
-            schedule: { ...FREQUENCY[frequency], start_date: next, end_date: end || null },
-            template: {
-              lines: lines.map((l) => ({
-                description: l.description || "Item",
-                quantity_milli: parseQty(l.qty || "1") ?? 1000,
-                unit_price: tryParseCents(l.price || "0") ?? 0,
-                account_id: l.account_id || defaultIncome,
-              })),
-            },
-          },
-        }),
-      ),
-    onSuccess: async () => {
-      await qc.invalidateQueries({ queryKey: ["recurring", orgId] });
-      onClose();
-    },
-  });
-  return (
-    <Modal
-      open
-      wide
-      onClose={onClose}
-      title="New recurring invoice"
-      footer={
-        <>
-          <Button variant="secondary" onClick={onClose}>
-            Cancel
-          </Button>
-          <Button loading={save.isPending} disabled={!customer || !name} onClick={() => save.mutate()}>
-            Save
-          </Button>
-        </>
-      }
-    >
-      <div className="space-y-4">
-        <div className="grid gap-3 sm:grid-cols-2">
-          <Field label="Name">
-            {(id) => (
-              <Input
-                id={id}
-                value={name}
-                onChange={(e) => setName(e.target.value)}
-                placeholder="Monthly retainer"
-              />
-            )}
-          </Field>
-          <Field label="Customer">
-            {() => <ContactPicker kind="customer" value={customer} onChange={setCustomer} />}
-          </Field>
-          <Field label="Every">
-            {(id) => (
-              <Select
-                id={id}
-                value={frequency}
-                onChange={(e) => setFrequency(e.target.value as typeof frequency)}
-              >
-                <option value="weekly">Week</option>
-                <option value="monthly">Month</option>
-                <option value="quarterly">Quarter</option>
-                <option value="yearly">Year</option>
-              </Select>
-            )}
-          </Field>
-          <Field label="First invoice date">
-            {(id) => <Input id={id} type="date" value={next} onChange={(e) => setNext(e.target.value)} />}
-          </Field>
-          <Field label="End date (optional)">
-            {(id) => <Input id={id} type="date" value={end} onChange={(e) => setEnd(e.target.value)} />}
-          </Field>
-          <label className="flex items-center gap-2 self-end pb-2 text-sm">
-            <input type="checkbox" checked={autoSend} onChange={(e) => setAutoSend(e.target.checked)} /> Post
-            and email automatically
-          </label>
-        </div>
-        <LinesEditor
-          lines={lines}
-          setLines={setLines}
-          withQty
-          accountTypes={["income"]}
-          defaultAccount={defaultIncome}
-        />
         <ErrorText error={save.error} />
       </div>
     </Modal>

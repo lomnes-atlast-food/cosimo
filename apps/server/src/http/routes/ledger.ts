@@ -27,6 +27,7 @@ import {
   submitEntryTx,
   updateDraftTx,
 } from "../../services/ledger.ts";
+import { runForDoc } from "../../services/recurring.ts";
 import { REPORT_KEYS, reportCsv, reportPdf, runReport } from "../../services/reports.ts";
 import { requireOwner, requireWriter } from "../middleware.ts";
 import {
@@ -103,6 +104,10 @@ export const EntrySchema = z
     chain_seq: z.number().int().nullable(),
     entry_hash: z.string().nullable(),
     total: Cents.openapi({ description: "Sum of debits" }),
+    recurring_template_id: z
+      .string()
+      .nullable()
+      .openapi({ description: "Set only when fetching a single entry, not in list views" }),
     lines: z.array(LineSchema),
   })
   .openapi("JournalEntry");
@@ -457,7 +462,9 @@ export function ledgerRoutes() {
     }),
     async (c) => {
       const o = c.get("org");
-      return c.json(await mustGetEntry(o.handle.db, c.req.valid("param").entryId), 200);
+      const entry = await mustGetEntry(o.handle.db, c.req.valid("param").entryId);
+      const run = await runForDoc(o.handle.db, "entry", entry.id);
+      return c.json({ ...entry, recurring_template_id: run?.templateId ?? null }, 200);
     },
   );
 

@@ -1,8 +1,9 @@
 import { useInfiniteQuery, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Link, useNavigate, useParams, useSearch } from "@tanstack/react-router";
+import { Link, useNavigate, useParams, useRouterState, useSearch } from "@tanstack/react-router";
 import { useEffect, useMemo, useState } from "react";
 import { api, unwrap } from "../api/client";
 import { AccountSelect } from "../components/AccountSelect";
+import { RecurringList } from "../components/recurring";
 import {
   Alert,
   Amount,
@@ -17,6 +18,7 @@ import {
   PageHeader,
   Select,
   Table,
+  Tabs,
   Textarea,
   td,
   th,
@@ -48,6 +50,8 @@ export function EntriesPage() {
   const { canWrite } = useRole();
   const search = useSearch({ strict: false }) as EntrySearch;
   const navigate = useNavigate();
+  const pathname = useRouterState({ select: (s) => s.location.pathname });
+  const onRecurring = pathname.endsWith("/recurring");
   const accounts = useAccounts(orgId);
   const byId = useMemo(() => new Map((accounts.data ?? []).map((a) => [a.id, a])), [accounts.data]);
   const [q, setQ] = useState(search.q ?? "");
@@ -75,6 +79,7 @@ export function EntriesPage() {
         }),
       ),
     getNextPageParam: (last) => last.next_cursor,
+    enabled: !onRecurring,
   });
   const rows = list.data?.pages.flatMap((p) => p.data) ?? [];
   const acct = search.account ? byId.get(search.account) : undefined;
@@ -84,147 +89,177 @@ export function EntriesPage() {
       <PageHeader
         title="Journal entries"
         subtitle={
-          acct ? `Entries touching ${acct.code} ${acct.name}` : "Every change to the books, newest first."
+          onRecurring
+            ? "Entries are created each morning when a template is due."
+            : acct
+              ? `Entries touching ${acct.code} ${acct.name}`
+              : "Every change to the books, newest first."
         }
         actions={
-          canWrite && (
+          canWrite &&
+          (onRecurring ? (
+            <Link to="/o/$orgId/accounting/entries/recurring/new" params={{ orgId }}>
+              <Button>New recurring entry</Button>
+            </Link>
+          ) : (
             <Link to="/o/$orgId/accounting/entries/new" params={{ orgId }}>
               <Button>New entry</Button>
             </Link>
-          )
+          ))
         }
       />
-      <form
-        className="mb-3 flex flex-wrap items-end gap-2"
-        onSubmit={(e) => {
-          e.preventDefault();
-          setSearch({ q: q || undefined });
-        }}
-      >
-        <Input
-          aria-label="Search memo"
-          placeholder="Search memo"
-          value={q}
-          onChange={(e) => setQ(e.target.value)}
-          className="max-w-xs"
-        />
-        <Select
-          aria-label="Status"
-          value={search.status ?? ""}
-          onChange={(e) => setSearch({ status: e.target.value || undefined })}
-          className="w-auto"
-        >
-          <option value="">All statuses</option>
-          {Object.entries(STATUS_LABEL).map(([k, v]) => (
-            <option key={k} value={k}>
-              {v}
-            </option>
-          ))}
-        </Select>
-        <div className="w-64">
-          <AccountSelect
-            aria-label="Account"
-            accounts={accounts.data ?? []}
-            value={search.account ?? ""}
-            onChange={(id) => setSearch({ account: id || undefined })}
-            placeholder="All accounts"
-          />
-        </div>
-        <Input
-          aria-label="From"
-          type="date"
-          value={search.from ?? ""}
-          onChange={(e) => setSearch({ from: e.target.value || undefined })}
-          className="w-auto"
-        />
-        <Input
-          aria-label="To"
-          type="date"
-          value={search.to ?? ""}
-          onChange={(e) => setSearch({ to: e.target.value || undefined })}
-          className="w-auto"
-        />
-      </form>
-      <ErrorText error={list.error} />
-      <Card>
-        {list.isLoading ? (
-          <Loading />
-        ) : rows.length === 0 ? (
-          <p className="p-4 text-sm text-zinc-500">No entries match.</p>
-        ) : (
-          <Table>
-            <thead>
-              <tr>
-                <th className={th}>Date</th>
-                <th className={th}>#</th>
-                <th className={th}>Memo</th>
-                <th className={`${th} hidden md:table-cell`}>Accounts</th>
-                <th className={`${th} hidden sm:table-cell`}>Source</th>
-                <th className={th}>Status</th>
-                <th className={`${th} text-right`}>Amount</th>
-              </tr>
-            </thead>
-            <tbody className="divide-y divide-zinc-100 dark:divide-zinc-800">
-              {rows.map((e) => (
-                <tr key={e.id} className="hover:bg-zinc-50 dark:hover:bg-zinc-800/50">
-                  <td className={`${td} whitespace-nowrap`}>{fmtDate(e.date)}</td>
-                  <td className={`${td} num text-zinc-500`}>{e.chain_seq ?? ""}</td>
-                  <td className={td}>
-                    <Link
-                      to="/o/$orgId/accounting/entries/$entryId"
-                      params={{ orgId, entryId: e.id }}
-                      className="hover:underline"
-                    >
-                      {e.memo || <span className="text-zinc-400">(no memo)</span>}
-                    </Link>
-                    {e.reversed_by_entry_id && <Badge tone="zinc">Reversed</Badge>}
-                  </td>
-                  <td className={`${td} hidden text-zinc-500 md:table-cell`}>
-                    {[...new Set(e.lines.map((l) => byId.get(l.account_id)?.name ?? "?"))]
-                      .slice(0, 3)
-                      .join(", ")}
-                  </td>
-                  <td className={`${td} hidden text-zinc-500 sm:table-cell`}>
-                    {SOURCE_LABEL[e.source_type] ?? e.source_type}
-                  </td>
-                  <td className={td}>
-                    <Badge tone={STATUS_TONE[e.status]}>{STATUS_LABEL[e.status]}</Badge>
-                  </td>
-                  <td className={`${td} text-right`}>
-                    {acct ? (
-                      <Amount
-                        cents={e.lines
-                          .filter((l) => l.account_id === acct.id)
-                          .reduce((s, l) => s + l.amount, 0)}
-                      />
-                    ) : (
-                      <Amount cents={e.total} />
-                    )}
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </Table>
-        )}
-        {list.hasNextPage && (
-          <div className="p-3 text-center">
-            <Button
-              variant="secondary"
-              loading={list.isFetchingNextPage}
-              onClick={() => list.fetchNextPage()}
+      <Tabs
+        value={onRecurring ? "recurring" : "entries"}
+        onChange={(v) =>
+          navigate({
+            to:
+              v === "recurring"
+                ? `/o/${orgId}/accounting/entries/recurring`
+                : `/o/${orgId}/accounting/entries`,
+          })
+        }
+        tabs={[
+          { value: "entries", label: "Entries" },
+          { value: "recurring", label: "Recurring" },
+        ]}
+      />
+      {onRecurring ? (
+        <RecurringList kind="entry" />
+      ) : (
+        <>
+          <form
+            className="mb-3 flex flex-wrap items-end gap-2"
+            onSubmit={(e) => {
+              e.preventDefault();
+              setSearch({ q: q || undefined });
+            }}
+          >
+            <Input
+              aria-label="Search memo"
+              placeholder="Search memo"
+              value={q}
+              onChange={(e) => setQ(e.target.value)}
+              className="max-w-xs"
+            />
+            <Select
+              aria-label="Status"
+              value={search.status ?? ""}
+              onChange={(e) => setSearch({ status: e.target.value || undefined })}
+              className="w-auto"
             >
-              Load more
-            </Button>
-          </div>
-        )}
-      </Card>
+              <option value="">All statuses</option>
+              {Object.entries(STATUS_LABEL).map(([k, v]) => (
+                <option key={k} value={k}>
+                  {v}
+                </option>
+              ))}
+            </Select>
+            <div className="w-64">
+              <AccountSelect
+                aria-label="Account"
+                accounts={accounts.data ?? []}
+                value={search.account ?? ""}
+                onChange={(id) => setSearch({ account: id || undefined })}
+                placeholder="All accounts"
+              />
+            </div>
+            <Input
+              aria-label="From"
+              type="date"
+              value={search.from ?? ""}
+              onChange={(e) => setSearch({ from: e.target.value || undefined })}
+              className="w-auto"
+            />
+            <Input
+              aria-label="To"
+              type="date"
+              value={search.to ?? ""}
+              onChange={(e) => setSearch({ to: e.target.value || undefined })}
+              className="w-auto"
+            />
+          </form>
+          <ErrorText error={list.error} />
+          <Card>
+            {list.isLoading ? (
+              <Loading />
+            ) : rows.length === 0 ? (
+              <p className="p-4 text-sm text-zinc-500">No entries match.</p>
+            ) : (
+              <Table>
+                <thead>
+                  <tr>
+                    <th className={th}>Date</th>
+                    <th className={th}>#</th>
+                    <th className={th}>Memo</th>
+                    <th className={`${th} hidden md:table-cell`}>Accounts</th>
+                    <th className={`${th} hidden sm:table-cell`}>Source</th>
+                    <th className={th}>Status</th>
+                    <th className={`${th} text-right`}>Amount</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-zinc-100 dark:divide-zinc-800">
+                  {rows.map((e) => (
+                    <tr key={e.id} className="hover:bg-zinc-50 dark:hover:bg-zinc-800/50">
+                      <td className={`${td} whitespace-nowrap`}>{fmtDate(e.date)}</td>
+                      <td className={`${td} num text-zinc-500`}>{e.chain_seq ?? ""}</td>
+                      <td className={td}>
+                        <Link
+                          to="/o/$orgId/accounting/entries/$entryId"
+                          params={{ orgId, entryId: e.id }}
+                          className="hover:underline"
+                        >
+                          {e.memo || <span className="text-zinc-400">(no memo)</span>}
+                        </Link>
+                        {e.reversed_by_entry_id && <Badge tone="zinc">Reversed</Badge>}
+                      </td>
+                      <td className={`${td} hidden text-zinc-500 md:table-cell`}>
+                        {[...new Set(e.lines.map((l) => byId.get(l.account_id)?.name ?? "?"))]
+                          .slice(0, 3)
+                          .join(", ")}
+                      </td>
+                      <td className={`${td} hidden text-zinc-500 sm:table-cell`}>
+                        {SOURCE_LABEL[e.source_type] ?? e.source_type}
+                      </td>
+                      <td className={td}>
+                        <Badge tone={STATUS_TONE[e.status]}>{STATUS_LABEL[e.status]}</Badge>
+                      </td>
+                      <td className={`${td} text-right`}>
+                        {acct ? (
+                          <Amount
+                            cents={e.lines
+                              .filter((l) => l.account_id === acct.id)
+                              .reduce((s, l) => s + l.amount, 0)}
+                          />
+                        ) : (
+                          <Amount cents={e.total} />
+                        )}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </Table>
+            )}
+            {list.hasNextPage && (
+              <div className="p-3 text-center">
+                <Button
+                  variant="secondary"
+                  loading={list.isFetchingNextPage}
+                  onClick={() => list.fetchNextPage()}
+                >
+                  Load more
+                </Button>
+              </div>
+            )}
+          </Card>
+        </>
+      )}
     </>
   );
 }
 
 // ----------------------------------------------------------------------------- editor
 
-interface DraftLine {
+export interface DraftLine {
   key: number;
   account_id: string;
   debit: string;
@@ -233,9 +268,15 @@ interface DraftLine {
 }
 
 let lineKey = 0;
-const blank = (): DraftLine => ({ key: ++lineKey, account_id: "", debit: "", credit: "", description: "" });
+export const blank = (): DraftLine => ({
+  key: ++lineKey,
+  account_id: "",
+  debit: "",
+  credit: "",
+  description: "",
+});
 
-function toDraftLines(e: Entry | null, negate = false): DraftLine[] {
+export function toDraftLines(e: Entry | null, negate = false): DraftLine[] {
   if (!e) return [blank(), blank()];
   return e.lines.map((l) => {
     const amt = negate ? -l.amount : l.amount;
@@ -249,11 +290,155 @@ function toDraftLines(e: Entry | null, negate = false): DraftLine[] {
   });
 }
 
-function lineAmount(l: DraftLine): number | null {
+export function lineAmount(l: DraftLine): number | null {
   const d = l.debit.trim() ? tryParseCents(l.debit) : 0;
   const c = l.credit.trim() ? tryParseCents(l.credit) : 0;
   if (d === null || c === null) return null;
   return d - c;
+}
+
+/**
+ * Balanced debit/credit line table, shared by the journal entry editor and recurring entry
+ * templates. Shows its own totals row; the caller derives `invalid`/`diff` again from `lines` (via
+ * `lineAmount`) for anything else it needs to show, the same way `LinesEditor` and `lineCents` split
+ * the work for invoices and bills.
+ */
+export function JournalLinesEditor({
+  lines,
+  setLines,
+}: {
+  lines: DraftLine[];
+  setLines: (f: (ls: DraftLine[]) => DraftLine[]) => void;
+}) {
+  const orgId = useOrgId();
+  const accounts = useAccounts(orgId);
+  const parsed = lines.map(lineAmount);
+  const debits = parsed.reduce<number>((s, p) => s + (p && p > 0 ? p : 0), 0);
+  const credits = parsed.reduce<number>((s, p) => s + (p && p < 0 ? -p : 0), 0);
+  const diff = debits - credits;
+
+  const update = (key: number, p: Partial<DraftLine>) =>
+    setLines((ls) => ls.map((l) => (l.key === key ? { ...l, ...p } : l)));
+
+  const balanceLast = () => {
+    if (!diff) return;
+    setLines((ls) => {
+      const idx = ls.findIndex((l) => !l.account_id && !l.debit && !l.credit);
+      const target = idx >= 0 ? idx : ls.length;
+      const next = idx >= 0 ? [...ls] : [...ls, blank()];
+      const t = next[target]!;
+      next[target] = {
+        ...t,
+        debit: diff < 0 ? centsToDecimal(-diff) : "",
+        credit: diff > 0 ? centsToDecimal(diff) : "",
+      };
+      return next;
+    });
+  };
+
+  return (
+    <div className="overflow-x-auto">
+      <table className="w-full min-w-[40rem] text-sm">
+        <thead>
+          <tr>
+            <th className={`${th} w-[40%]`}>Account</th>
+            <th className={`${th} w-32 text-right`}>Debit</th>
+            <th className={`${th} w-32 text-right`}>Credit</th>
+            <th className={th}>Description</th>
+            <th className={`${th} w-8`}>
+              <span className="sr-only">Remove</span>
+            </th>
+          </tr>
+        </thead>
+        <tbody>
+          {lines.map((l, i) => (
+            <tr key={l.key}>
+              <td className="py-1 pr-2">
+                <AccountSelect
+                  aria-label={`Line ${i + 1} account`}
+                  accounts={accounts.data ?? []}
+                  value={l.account_id}
+                  onChange={(id) => update(l.key, { account_id: id })}
+                />
+              </td>
+              <td className="px-1 py-1">
+                <Input
+                  aria-label={`Line ${i + 1} debit`}
+                  inputMode="decimal"
+                  className="text-right num"
+                  value={l.debit}
+                  onChange={(e) =>
+                    update(l.key, { debit: e.target.value, credit: e.target.value ? "" : l.credit })
+                  }
+                />
+              </td>
+              <td className="px-1 py-1">
+                <Input
+                  aria-label={`Line ${i + 1} credit`}
+                  inputMode="decimal"
+                  className="text-right num"
+                  value={l.credit}
+                  onChange={(e) =>
+                    update(l.key, { credit: e.target.value, debit: e.target.value ? "" : l.debit })
+                  }
+                />
+              </td>
+              <td className="px-1 py-1">
+                <Input
+                  aria-label={`Line ${i + 1} description`}
+                  value={l.description}
+                  onChange={(e) => update(l.key, { description: e.target.value })}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter" && i === lines.length - 1) {
+                      e.preventDefault();
+                      setLines((ls) => [...ls, blank()]);
+                    }
+                  }}
+                />
+              </td>
+              <td className="py-1 text-center">
+                {lines.length > 2 && (
+                  <button
+                    type="button"
+                    aria-label={`Remove line ${i + 1}`}
+                    className="rounded p-1 text-zinc-400 hover:text-red-600"
+                    onClick={() => setLines((ls) => ls.filter((x) => x.key !== l.key))}
+                  >
+                    ✕
+                  </button>
+                )}
+              </td>
+            </tr>
+          ))}
+        </tbody>
+        <tfoot>
+          <tr className="border-t border-zinc-200 font-medium dark:border-zinc-800">
+            <td className="py-2">
+              <Button size="sm" variant="ghost" onClick={() => setLines((ls) => [...ls, blank()])}>
+                + Add line
+              </Button>
+              {diff !== 0 && (
+                <Button size="sm" variant="ghost" onClick={balanceLast}>
+                  Balance
+                </Button>
+              )}
+            </td>
+            <td className="px-3 py-2 text-right num">{money(debits)}</td>
+            <td className="px-3 py-2 text-right num">{money(credits)}</td>
+            <td className="px-3 py-2" colSpan={2}>
+              {diff === 0 ? (
+                debits > 0 && <span className="text-emerald-700 dark:text-emerald-400">Balanced</span>
+              ) : (
+                <span className="text-red-700 dark:text-red-400">
+                  Out of balance by {money(Math.abs(diff))}
+                </span>
+              )}
+            </td>
+          </tr>
+        </tfoot>
+      </table>
+    </div>
+  );
 }
 
 /**
@@ -350,25 +535,6 @@ export function EntryEditor({
     },
   });
 
-  const update = (key: number, p: Partial<DraftLine>) =>
-    setLines((ls) => ls.map((l) => (l.key === key ? { ...l, ...p } : l)));
-
-  const balanceLast = () => {
-    if (!diff) return;
-    setLines((ls) => {
-      const idx = ls.findIndex((l) => !l.account_id && !l.debit && !l.credit);
-      const target = idx >= 0 ? idx : ls.length;
-      const next = idx >= 0 ? [...ls] : [...ls, blank()];
-      const t = next[target]!;
-      next[target] = {
-        ...t,
-        debit: diff < 0 ? centsToDecimal(-diff) : "",
-        credit: diff > 0 ? centsToDecimal(diff) : "",
-      };
-      return next;
-    });
-  };
-
   if (accounts.isLoading) return <Loading />;
   const canPost =
     filled.length >= 2 && diff === 0 && !invalid && !hardLocked && (!softLocked || (isOwner && note.trim()));
@@ -399,107 +565,7 @@ export function EntryEditor({
         </Field>
       </div>
 
-      <div className="overflow-x-auto">
-        <table className="w-full min-w-[40rem] text-sm">
-          <thead>
-            <tr>
-              <th className={`${th} w-[40%]`}>Account</th>
-              <th className={`${th} w-32 text-right`}>Debit</th>
-              <th className={`${th} w-32 text-right`}>Credit</th>
-              <th className={th}>Description</th>
-              <th className={`${th} w-8`}>
-                <span className="sr-only">Remove</span>
-              </th>
-            </tr>
-          </thead>
-          <tbody>
-            {lines.map((l, i) => (
-              <tr key={l.key}>
-                <td className="py-1 pr-2">
-                  <AccountSelect
-                    aria-label={`Line ${i + 1} account`}
-                    accounts={accounts.data ?? []}
-                    value={l.account_id}
-                    onChange={(id) => update(l.key, { account_id: id })}
-                  />
-                </td>
-                <td className="px-1 py-1">
-                  <Input
-                    aria-label={`Line ${i + 1} debit`}
-                    inputMode="decimal"
-                    className="text-right num"
-                    value={l.debit}
-                    onChange={(e) =>
-                      update(l.key, { debit: e.target.value, credit: e.target.value ? "" : l.credit })
-                    }
-                  />
-                </td>
-                <td className="px-1 py-1">
-                  <Input
-                    aria-label={`Line ${i + 1} credit`}
-                    inputMode="decimal"
-                    className="text-right num"
-                    value={l.credit}
-                    onChange={(e) =>
-                      update(l.key, { credit: e.target.value, debit: e.target.value ? "" : l.debit })
-                    }
-                  />
-                </td>
-                <td className="px-1 py-1">
-                  <Input
-                    aria-label={`Line ${i + 1} description`}
-                    value={l.description}
-                    onChange={(e) => update(l.key, { description: e.target.value })}
-                    onKeyDown={(e) => {
-                      if (e.key === "Enter" && i === lines.length - 1) {
-                        e.preventDefault();
-                        setLines((ls) => [...ls, blank()]);
-                      }
-                    }}
-                  />
-                </td>
-                <td className="py-1 text-center">
-                  {lines.length > 2 && (
-                    <button
-                      type="button"
-                      aria-label={`Remove line ${i + 1}`}
-                      className="rounded p-1 text-zinc-400 hover:text-red-600"
-                      onClick={() => setLines((ls) => ls.filter((x) => x.key !== l.key))}
-                    >
-                      ✕
-                    </button>
-                  )}
-                </td>
-              </tr>
-            ))}
-          </tbody>
-          <tfoot>
-            <tr className="border-t border-zinc-200 font-medium dark:border-zinc-800">
-              <td className="py-2">
-                <Button size="sm" variant="ghost" onClick={() => setLines((ls) => [...ls, blank()])}>
-                  + Add line
-                </Button>
-                {diff !== 0 && (
-                  <Button size="sm" variant="ghost" onClick={balanceLast}>
-                    Balance
-                  </Button>
-                )}
-              </td>
-              <td className="px-3 py-2 text-right num">{money(debits)}</td>
-              <td className="px-3 py-2 text-right num">{money(credits)}</td>
-              <td className="px-3 py-2" colSpan={2}>
-                {diff === 0 ? (
-                  debits > 0 && <span className="text-emerald-700 dark:text-emerald-400">Balanced</span>
-                ) : (
-                  <span className="text-red-700 dark:text-red-400">
-                    Out of balance by {money(Math.abs(diff))}
-                  </span>
-                )}
-              </td>
-            </tr>
-          </tfoot>
-        </table>
-      </div>
+      <JournalLinesEditor lines={lines} setLines={setLines} />
       {invalid && <Alert kind="error">Amounts must be numbers with at most two decimal places.</Alert>}
       {hardLocked && (
         <Alert kind="error">
@@ -669,6 +735,15 @@ export function EntryPage() {
                   </Button>
                 </>
               )}
+              {!isDocument && (
+                <Link
+                  to="/o/$orgId/accounting/entries/recurring/new"
+                  params={{ orgId }}
+                  search={{ from: e.id }}
+                >
+                  <Button variant="secondary">Make recurring</Button>
+                </Link>
+              )}
             </>
           )
         }
@@ -753,6 +828,16 @@ export function EntryPage() {
             {e.entry_hash && (
               <Detail k="Chain hash">
                 <code className="break-all text-xs">{e.entry_hash}</code>
+              </Detail>
+            )}
+            {e.recurring_template_id && (
+              <Detail k="Recurring template">
+                <Link
+                  to={`/o/${orgId}/accounting/entries/recurring/${e.recurring_template_id}`}
+                  className="underline"
+                >
+                  From recurring template ›
+                </Link>
               </Detail>
             )}
           </dl>
