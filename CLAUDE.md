@@ -9,7 +9,15 @@ Maintainer-only notes live in `CLAUDE.local.md` (gitignored).
 
 Browser tests: `bun run build:web`, then `bun run e2e`. A fresh worktree has no web build, and without one every e2e test times out on "The web UI has not been built". Set `COSIMO_E2E_PORT` to run beside another e2e run. CI retries a serial file (such as `books.e2e.ts`) as a whole against the same database, so failures on the retry can be fallout; read the first attempt's error.
 
-## Scanner findings
+## Issues
+An issue asks someone to do something. Don't open one that can't be acted on.
+
+- **Bug reports carry evidence.** Include the failing run's link or the exact command, the error or log excerpt, the commit, and the steps to reproduce. For an intermittent failure, also say how often it happens (for example, 2 of the last 30 CI runs). A claim with no evidence, such as "occasionally flaky," isn't an issue yet.
+- **Investigate before filing.** For a flaky test or crash, search the CI history for the same failure and rerun it locally to measure how often it happens. File the issue with what you found and a next step. If you can't reproduce it, don't file it.
+- **Don't file "wait and see" issues.** "Re-check on the next release" or "upgrade once upstream fixes it" is not a next step. Fix it, work around it, or record why no action is needed (see Scanner findings).
+- **Close what can't be verified.** If an open issue's bug can't be reproduced, comment with the investigation (what you checked and the results) and what evidence a new issue would need, then close it as not planned with the `invalid` label. Use `wontfix` only for a confirmed problem you've decided not to fix.
+
+### Scanner findings
 When `bun audit` or OSV flags an advisory that doesn't affect Cosimo (the vulnerable code never runs here), don't open a tracking issue that waits on an upstream fix. Add an ignore to `osv-scanner.toml` with an `ignoreUntil` date and a `reason` that stands alone: why Cosimo isn't affected and what would let the ignore go. If an issue already exists, comment with that reasoning and close it as not planned. When the date passes, CI fails: check again, then fix, extend, or remove the ignore.
 
 ## Worktrees
