@@ -130,6 +130,7 @@ async function startUp(e: TestEnv, orgIds: string[]) {
   }
 }
 
+// Each test builds and migrates whole instances; on a busy CI runner with sqld that can pass 5s.
 describe(`pre-migration backup (${DB_MODE})`, () => {
   test("there are older schema levels to cover", () => {
     expect(levels(systemMigrations.length).length).toBeGreaterThan(0);
@@ -144,7 +145,7 @@ describe(`pre-migration backup (${DB_MODE})`, () => {
         await addOrg(e, "Closed Co", orgMigrations.length, { archived: true }),
       ];
       await startUp(e, ids);
-    });
+    }, 60_000);
   }
 
   for (const n of levels(orgMigrations.length)) {
@@ -152,6 +153,6 @@ describe(`pre-migration backup (${DB_MODE})`, () => {
       const e = await instance(systemMigrations.length);
       const ids = [await addOrg(e, "Old Co", n), await addOrg(e, "Closed Co", n, { archived: true })];
       await startUp(e, ids);
-    });
+    }, 60_000);
   }
 });
