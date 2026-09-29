@@ -143,13 +143,20 @@ export const InvoiceSchema = z
       .string()
       .nullable()
       .describe(
-        "The customer's pay link (online payments through the org's Stripe account); null when there is none.",
+        "The customer's pay link (online payments through the org's Stripe account); null when there is none, including while the balance due is under Stripe's $0.50 minimum.",
       ),
     online_pay_status: z
       .enum(["processing"])
       .nullable()
       .describe("`processing` while a bank payment is on its way; null otherwise."),
     pay_link_opened_at: z.string().nullable().describe("When the customer first opened the pay link."),
+    pay_error: z
+      .string()
+      .nullable()
+      .describe(
+        "Why the pay link last failed to open checkout (Stripe's reason), or a method Stripe rejected; null once it works.",
+      ),
+    pay_error_at: z.string().nullable(),
     manual_pay_url: z.string().nullable().describe("A payment page URL entered by hand (payment link mode)."),
     lines: z.array(
       z.object({

@@ -536,6 +536,9 @@ export function NewInvoicePage() {
 
 // ----------------------------------------------------------------------------- online payment
 
+/** Stripe Checkout's USD minimum; a smaller balance due gets no pay link (the server decides). */
+const MIN_ONLINE_PAYMENT_CENTS = 50;
+
 /** The pay link on a finalized invoice: copy it, see whether the customer opened it, rotate it. */
 function OnlinePayCard({
   inv,
@@ -595,10 +598,22 @@ function OnlinePayCard({
           </>
         ) : (
           <p className="text-zinc-600 dark:text-zinc-400">
-            {inv.online_payment_enabled
-              ? "The pay link appears once the invoice is posted."
-              : "This invoice doesn't offer online payment."}
+            {!inv.online_payment_enabled
+              ? "This invoice doesn't offer online payment."
+              : inv.status !== "draft" && inv.balance_due > 0 && inv.balance_due < MIN_ONLINE_PAYMENT_CENTS
+                ? "The balance due is under $0.50, Stripe's minimum for online payment, so the PDF and email leave out the pay link. Ask the customer to pay another way."
+                : "The pay link appears once the invoice is posted."}
           </p>
+        )}
+        {inv.pay_error && (
+          <Alert kind="warn">
+            Online payment problem{inv.pay_error_at ? ` ${fmtDateTime(inv.pay_error_at)}` : ""}:{" "}
+            {inv.pay_error}{" "}
+            <span className="text-xs">
+              Fix the cause in Stripe or under Settings → Online payments; the customer can then use the same
+              link again.
+            </span>
+          </Alert>
         )}
         {canWrite && (
           <div className="flex flex-wrap gap-2">

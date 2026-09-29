@@ -1,11 +1,13 @@
 /**
  * Live Stripe test-mode run (#55). Gated behind COSIMO_TEST_STRIPE=1 with STRIPE_TEST_SECRET_KEY
  * (an sk_test_ or rk_test_ key) from the gitignored .env.local; CI runs only the mocked tests.
+ * STRIPE_TEST_LIMITED_KEY, optional, is a restricted test key without Customers: Write, to confirm
+ * how Stripe answers the setup check's write probes (#58).
  */
 import { describe, expect, test } from "bun:test";
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
-import { HttpStripe } from "../src/services/payment-providers/stripe.ts";
+import { HttpStripe, WEBHOOK_EVENTS } from "../src/services/payment-providers/stripe.ts";
 
 // Bun does not read .env.local under `bun test`; load it here (values never override the shell).
 const envFile = join(import.meta.dir, "../../../.env.local");
@@ -18,6 +20,7 @@ if (existsSync(envFile)) {
 
 const enabled = process.env.COSIMO_TEST_STRIPE === "1";
 const key = process.env.STRIPE_TEST_SECRET_KEY ?? "";
+const limitedKey = process.env.STRIPE_TEST_LIMITED_KEY ?? "";
 
 describe.skipIf(!enabled)("Stripe test mode (live)", () => {
   const stripe = new HttpStripe({ secretKey: key });
@@ -61,5 +64,38 @@ describe.skipIf(!enabled)("Stripe test mode (live)", () => {
     expect(w.id).toStartWith("we_");
     expect(w.secret).toStartWith("whsec_");
     await stripe.deleteWebhook(w.id);
+  });
+
+  test("setup check: a write probe with the permission is a 400, so it reads as present", async () => {
+    const r = await stripe.checkSetup(["card"]);
+    for (const p of r.permissions) expect({ name: p.name, ok: p.ok }).toEqual({ name: p.name, ok: true });
+  });
+
+  test.skipIf(!limitedKey)(
+    "setup check: without Customers: Write the probe is a 403 and reads as missing",
+    async () => {
+      const r = await new HttpStripe({ secretKey: limitedKey }).checkSetup(["card"]);
+      expect(r.permissions.find((p) => p.name === "Customers: Write")).toMatchObject({ ok: false });
+    },
+  );
+
+  test("setup check: the account's capabilities give each method's status", async () => {
+    const r = await stripe.checkSetup(["card", "us_bank_account", "customer_balance"]);
+    for (const m of r.methods) expect(["active", "inactive", "pending", "unknown"]).toContain(m.status);
+    // A full secret key can read the account, so card (always on in test mode) is known.
+    if (/^sk_/.test(key)) expect(r.methods[0]).toMatchObject({ type: "card", status: "active" });
+  });
+
+  test("updates a registered endpoint's events, and the setup check sees them", async () => {
+    const url = `https://books.example.com/api/v1/webhooks/payments/stripe/sandbox-${Date.now()}`;
+    const w = await stripe.registerWebhook(url);
+    try {
+      await stripe.updateWebhook(w.id, WEBHOOK_EVENTS.slice(0, 2));
+      expect((await stripe.checkSetup(["card"], url)).missingEvents).toContain("charge.updated");
+      await stripe.updateWebhook(w.id, WEBHOOK_EVENTS);
+      expect((await stripe.checkSetup(["card"], url)).missingEvents).toEqual([]);
+    } finally {
+      await stripe.deleteWebhook(w.id);
+    }
   });
 });

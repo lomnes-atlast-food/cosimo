@@ -15,9 +15,10 @@ import { type BackupBucket, type BucketObject, backupBucket } from "./backup.ts"
 import { verifyOrg } from "./chain.ts";
 import { settingsRow } from "./ledger.ts";
 import type { Mailer } from "./mailer.ts";
-import { stripeSecrets } from "./payment-providers/index.ts";
-import { stripeClient } from "./payment-providers/stripe.ts";
-import { ProviderError } from "./payment-providers/types.ts";
+import { lastPayError, paymentWebhookUrl, setupWarning, summarizeSetup } from "./online-payments.ts";
+import { type StripeOptions, stripeOptions, stripeSecrets } from "./payment-providers/index.ts";
+import { stripeClient, WEBHOOK_EVENTS_VERSION } from "./payment-providers/stripe.ts";
+import { ProviderError, type SetupCheck } from "./payment-providers/types.ts";
 import { plaidCredentials } from "./plaid.ts";
 import { type PlaidCredentials, PlaidError, plaidClient } from "./plaid-client.ts";
 import { createStore } from "./storage.ts";
@@ -330,8 +331,15 @@ async function serviceChecks(
     }
   }
   // ---------------------------------------------------------------- online payments (Stripe)
-  const stripeOrgs: { name: string; secrets: ReturnType<typeof stripeSecrets>; lastEvent: string | null }[] =
-    [];
+  const stripeOrgs: {
+    id: string;
+    name: string;
+    secrets: ReturnType<typeof stripeSecrets>;
+    opts: StripeOptions;
+    lastEvent: string | null;
+    payError: Awaited<ReturnType<typeof lastPayError>>;
+  }[] = [];
+  const payErrorSince = new Date(Date.now() - 30 * 86_400_000).toISOString();
   for (const o of await ctx.orgs.list()) {
     try {
       const h = await ctx.orgs.mustOpen(o.id);
@@ -343,7 +351,15 @@ async function serviceChecks(
         .orderBy(desc(orgSchema.providerEvents.receivedAt))
         .limit(1)
         .get();
-      stripeOrgs.push({ name: o.name, secrets: stripeSecrets(ctx.secrets, st), lastEvent: last?.at ?? null });
+      const failed = await lastPayError(h.db);
+      stripeOrgs.push({
+        id: o.id,
+        name: o.name,
+        secrets: stripeSecrets(ctx.secrets, st),
+        opts: stripeOptions(st),
+        lastEvent: last?.at ?? null,
+        payError: failed?.payErrorAt && failed.payErrorAt >= payErrorSince ? failed : null,
+      });
     } catch {
       // reported by the database checks
     }
@@ -376,6 +392,29 @@ async function serviceChecks(
       });
       continue;
     }
+    // What the key can't do, methods Stripe won't take, events the endpoint lacks, recent failures.
+    const url = paymentWebhookUrl(ctx, o.id);
+    let check: SetupCheck | null = null;
+    try {
+      check = await stripeClient({ secretKey: o.secrets.secret_key }, f).checkSetup(o.opts.methods, url);
+    } catch {
+      // each probe reports its own failure; nothing more to say here
+    }
+    const problems: string[] = [];
+    const setup = check ? setupWarning(summarizeSetup(check, o.secrets, url)) : null;
+    if (setup) problems.push(setup);
+    if (
+      o.secrets.webhook_endpoint_id &&
+      o.opts.webhook_events_version < WEBHOOK_EVENTS_VERSION &&
+      !check?.missingEvents?.length
+    )
+      problems.push(
+        "The webhook endpoint Cosimo registered hasn't been updated with the newer events (charge.updated) yet; the payment check retries it, which needs Webhook Endpoints: Write.",
+      );
+    if (o.payError)
+      problems.push(
+        `A pay link failed ${o.payError.payErrorAt} (invoice ${o.payError.number}): ${o.payError.payError}`,
+      );
     const mode = live ? "live mode" : "test mode";
     const hook = o.secrets.webhook_endpoint_id
       ? "webhook registered"
@@ -391,6 +430,15 @@ async function serviceChecks(
         message: `Key valid (${mode}, ${hook}) but the public URL is not HTTPS: ${publicUrl}`,
         remediation:
           "Customers pay through pay links on the public URL; set server.public_url to the https:// address.",
+      });
+    } else if (problems.length) {
+      add({
+        id: "stripe",
+        name,
+        status: "warn",
+        message: `Key valid (${mode}, ${hook}, ${last}). ${problems.join(" ")}`,
+        remediation:
+          "Fix the key's permissions and payment methods in the Stripe dashboard, then use Test connection under Settings → Online payments. The invoice shows why its pay link failed.",
       });
     } else {
       add({ id: "stripe", name, status: "pass", message: `Key valid (${mode}, ${hook}, ${last})` });

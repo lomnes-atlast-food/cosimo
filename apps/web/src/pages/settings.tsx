@@ -1,5 +1,5 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { useNavigate } from "@tanstack/react-router";
+import { Link, useNavigate } from "@tanstack/react-router";
 import { type ReactNode, useEffect, useState } from "react";
 import { ApiError, api, rawFetch, unwrap } from "../api/client";
 import type { components } from "../api/schema";
@@ -708,8 +708,9 @@ function PlaidKeys() {
 }
 
 type PaymentMethod = "card" | "us_bank_account" | "customer_balance";
+/** Labels are the Stripe dashboard's names (Settings → Payments → Payment methods). */
 const PAYMENT_METHODS: { value: PaymentMethod; label: string; hint: string }[] = [
-  { value: "card", label: "Card", hint: "Typically 2.9% + 30¢ per payment." },
+  { value: "card", label: "Cards", hint: "Typically 2.9% + 30¢ per payment." },
   {
     value: "us_bank_account",
     label: "ACH Direct Debit",
@@ -717,10 +718,36 @@ const PAYMENT_METHODS: { value: PaymentMethod; label: string; hint: string }[] =
   },
   {
     value: "customer_balance",
-    label: "Bank transfer",
+    label: "Bank Transfers",
     hint: "The customer wires or sends ACH to account details Stripe shows. Typically 0.5%, capped at $5.",
   },
 ];
+const methodLabel = (m: PaymentMethod) => PAYMENT_METHODS.find((x) => x.value === m)?.label ?? m;
+
+type SetupCheck = NonNullable<components["schemas"]["OnlinePaymentSettings"]["setup_check"]>;
+
+/** What the last setup check found that needs fixing in Stripe, or null. */
+function SetupProblems({ check }: { check: SetupCheck }) {
+  const items: string[] = [];
+  if (check.missing.length) items.push(`The key is missing permissions: ${check.missing.join(", ")}.`);
+  if (check.inactive_methods.length)
+    items.push(
+      `Not active in Stripe: ${check.inactive_methods.map(methodLabel).join(", ")}. Checkouts leave them out until you activate them and test the connection again.`,
+    );
+  if (check.missing_events.length)
+    items.push(`The webhook endpoint doesn't send: ${check.missing_events.join(", ")}.`);
+  if (!items.length) return null;
+  return (
+    <Alert kind="warn">
+      <p className="font-medium">Stripe setup needs attention (checked {fmtDateTime(check.checked_at)})</p>
+      <ul className="mt-1 list-disc pl-5">
+        {items.map((i) => (
+          <li key={i}>{i}</li>
+        ))}
+      </ul>
+    </Alert>
+  );
+}
 
 /** Owner-only: online invoice payments through the org's own Stripe account, or a pasted link per invoice. */
 function OnlinePayments() {
@@ -778,6 +805,8 @@ function OnlinePayments() {
           body: { secret_key: key || null },
         }),
       ),
+    // Testing the stored key refreshes the stored check.
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["online-payments", orgId] }),
   });
   if (q.isLoading) return <Loading />;
   if (!q.data) return <ErrorText error={q.error} />;
@@ -834,6 +863,25 @@ function OnlinePayments() {
           }
         >
           <div className="grid gap-4 text-sm sm:grid-cols-2">
+            {d.provider === "stripe" && (d.setup_check || d.last_pay_error) && (
+              <div className="space-y-2 sm:col-span-2">
+                {d.setup_check && <SetupProblems check={d.setup_check} />}
+                {d.last_pay_error && (
+                  <Alert kind="error">
+                    A pay link failed{d.last_pay_error.at ? ` ${fmtDateTime(d.last_pay_error.at)}` : ""}{" "}
+                    (invoice{" "}
+                    <Link
+                      to="/o/$orgId/sales/invoices/$invoiceId"
+                      params={{ orgId, invoiceId: d.last_pay_error.invoice_id }}
+                      className="font-medium underline"
+                    >
+                      {d.last_pay_error.number}
+                    </Link>
+                    ): {d.last_pay_error.message}
+                  </Alert>
+                )}
+              </div>
+            )}
             <Field
               label="Secret or restricted key"
               hint={
@@ -864,10 +912,42 @@ function OnlinePayments() {
               </Button>
             </div>
             {test.data && (
-              <div className="sm:col-span-2">
+              <div className="space-y-2 sm:col-span-2">
                 <Alert kind="success">
                   Connected to {test.data.account_name} ({test.data.livemode ? "live mode" : "test mode"}).
                 </Alert>
+                <ul className="space-y-1">
+                  {test.data.permissions.map((p) => (
+                    <li key={p.name} className="flex flex-wrap items-center gap-2">
+                      <Badge tone={p.ok ? "green" : p.ok === false ? "red" : "zinc"}>
+                        {p.ok ? "OK" : p.ok === false ? "Missing" : "Couldn't check"}
+                      </Badge>
+                      {p.name}
+                      {p.ok !== true && p.detail && (
+                        <span className="text-xs text-zinc-500 dark:text-zinc-400">{p.detail}</span>
+                      )}
+                    </li>
+                  ))}
+                  {test.data.methods.map((m) => (
+                    <li key={m.type} className="flex flex-wrap items-center gap-2">
+                      <Badge
+                        tone={m.status === "active" ? "green" : m.status === "unknown" ? "zinc" : "amber"}
+                      >
+                        {m.status === "active"
+                          ? "Active"
+                          : m.status === "inactive"
+                            ? "Not active"
+                            : m.status === "pending"
+                              ? "Pending"
+                              : "Unknown"}
+                      </Badge>
+                      {methodLabel(m.type)}
+                      {m.detail && (
+                        <span className="text-xs text-zinc-500 dark:text-zinc-400">{m.detail}</span>
+                      )}
+                    </li>
+                  ))}
+                </ul>
               </div>
             )}
             <div className="sm:col-span-2">
@@ -875,6 +955,10 @@ function OnlinePayments() {
             </div>
             <fieldset className="space-y-2 sm:col-span-2">
               <legend className="mb-1 text-sm font-medium">Payment methods</legend>
+              <p className="text-xs text-zinc-500 dark:text-zinc-400">
+                Each must be active in Stripe → Settings → Payments → Payment methods, in the same mode as the
+                key.
+              </p>
               {PAYMENT_METHODS.map((m) => (
                 <label key={m.value} className="flex items-start gap-2">
                   <input
@@ -884,7 +968,11 @@ function OnlinePayments() {
                     onChange={(e) => toggle(m.value, e.target.checked)}
                   />
                   <span>
-                    {m.label} <span className="text-xs text-zinc-500">{m.hint}</span>
+                    {m.label}{" "}
+                    {d.setup_check?.inactive_methods.includes(m.value) && (
+                      <Badge tone="amber">Not active in Stripe</Badge>
+                    )}{" "}
+                    <span className="text-xs text-zinc-500">{m.hint}</span>
                   </span>
                 </label>
               ))}
@@ -938,7 +1026,7 @@ function OnlinePayments() {
               {d.webhook_url && d.webhook_mode !== "registered" && (
                 <Field
                   label="Webhook signing secret (optional)"
-                  hint={`If Cosimo couldn't register the webhook, add an endpoint for ${d.webhook_url} in the Stripe dashboard and paste its signing secret (whsec_...).`}
+                  hint={`If Cosimo couldn't register the webhook, add an endpoint for ${d.webhook_url} in the Stripe dashboard with the events ${d.webhook_events.join(", ")}, and paste its signing secret (whsec_...).`}
                 >
                   {(id) => (
                     <Input

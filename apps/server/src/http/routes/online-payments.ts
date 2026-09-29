@@ -26,6 +26,31 @@ const tags = ["Online payments"];
 
 const Method = z.enum(PAYMENT_METHOD_TYPES);
 
+const Permission = z.object({
+  name: z.string().describe("As the Stripe dashboard names it, for example `Customers: Write`."),
+  ok: z.boolean().nullable().describe("Null when Cosimo couldn't check it."),
+  detail: z.string().nullable(),
+});
+
+const MethodCheck = z.object({
+  type: Method,
+  status: z
+    .enum(["active", "inactive", "pending", "unknown"])
+    .describe("`unknown` when the key can't read the account (Account: Read is optional)."),
+  detail: z.string().nullable(),
+});
+
+const SetupCheckSchema = z
+  .object({
+    checked_at: z.string(),
+    missing: z.array(z.string()).describe("Permissions the key lacks."),
+    inactive_methods: z.array(Method).describe("Methods not active in Stripe; checkouts leave them out."),
+    unknown_methods: z.array(Method),
+    missing_events: z.array(z.string()).describe("Events the webhook endpoint doesn't send."),
+  })
+  .nullable()
+  .describe("The last check of the key's permissions and the payment methods (Save or Test connection).");
+
 const SettingsSchema = z
   .object({
     provider: z.enum(["off", "manual_link", "stripe"]),
@@ -48,6 +73,17 @@ const SettingsSchema = z
     fee_account_id: z.string().nullable(),
     online_pay_default: z.boolean(),
     last_event_at: z.string().nullable(),
+    setup_check: SetupCheckSchema,
+    webhook_events: z.array(z.string()).describe("The events a webhook endpoint set up by hand must send."),
+    last_pay_error: z
+      .object({
+        invoice_id: z.string(),
+        number: z.string(),
+        at: z.string().nullable(),
+        message: z.string(),
+      })
+      .nullable()
+      .describe("The invoice whose pay link failed most recently, with Stripe's reason."),
   })
   .openapi("OnlinePaymentSettings");
 
@@ -100,7 +136,16 @@ export function onlinePaymentRoutes() {
       security: bearerSecurity,
       request: { params: OrgParams, body: jsonBody(SettingsInput) },
       responses: {
-        200: json(SettingsSchema.extend({ warning: z.string().nullable() })),
+        200: json(
+          SettingsSchema.extend({
+            warning: z
+              .string()
+              .nullable()
+              .describe(
+                "What to fix in Stripe (missing permissions, inactive methods); the settings are saved.",
+              ),
+          }),
+        ),
         ...errorResponses,
       },
     }),
@@ -116,6 +161,8 @@ export function onlinePaymentRoutes() {
       path: "/orgs/{orgId}/online-payments/test",
       tags,
       summary: "Check a Stripe key (the stored one, or one being entered) without saving",
+      description:
+        "Checks every permission Cosimo uses and whether the chosen payment methods are active. Testing the stored key also updates the stored check.",
       security: bearerSecurity,
       request: {
         params: OrgParams,
@@ -126,7 +173,18 @@ export function onlinePaymentRoutes() {
       },
       responses: {
         200: json(
-          z.object({ account_name: z.string(), livemode: z.boolean() }).openapi("PaymentConnectionTest"),
+          z
+            .object({
+              account_name: z.string(),
+              livemode: z.boolean(),
+              permissions: z.array(Permission),
+              methods: z.array(MethodCheck),
+              missing_events: z
+                .array(z.string())
+                .nullable()
+                .describe("Events the webhook endpoint doesn't send; null when it can't be read."),
+            })
+            .openapi("PaymentConnectionTest"),
         ),
         ...errorResponses,
       },
@@ -228,21 +286,31 @@ const COPY: Record<StatusPage["page"] | "error", { title: string; body: string }
     body: "Bank payments can take a few business days to arrive. There is nothing more to do; you don't need to pay again.",
   },
   cancelled: { title: "Payment not completed", body: "You left checkout before paying." },
+  too_small: {
+    title: "This amount can't be paid online",
+    body: "This amount is below the minimum for online payment. Please pay another way.",
+  },
   error: {
     title: "Online payment isn't working right now",
     body: "Please try again later, or contact the business that sent the invoice.",
   },
 };
 
-/** A small server-rendered status page: org name and invoice number only, no scripts. */
-export function payPageHtml(p: Omit<StatusPage, "page"> & { page: StatusPage["page"] | "error" }) {
+/**
+ * A small server-rendered status page: org name and invoice number only, no scripts. An error page
+ * shows the request ID as a reference the business can find in its server log.
+ */
+export function payPageHtml(
+  p: Omit<StatusPage, "page"> & { page: StatusPage["page"] | "error"; reference?: string | null },
+) {
   const copy = COPY[p.page];
   const heading =
     p.orgName && p.invoiceNumber
       ? `<p style="color:#666;margin:0 0 .5rem">${esc(p.orgName)} · Invoice ${esc(p.invoiceNumber)}</p>`
       : "";
   const again = p.payUrl ? `<p><a href="${esc(p.payUrl)}">Pay now</a></p>` : "";
-  return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="robots" content="noindex"><title>${esc(copy.title)}</title></head><body style="font-family:system-ui,sans-serif;max-width:32rem;margin:4rem auto;padding:0 1rem;line-height:1.5">${heading}<h1 style="font-size:1.4rem">${esc(copy.title)}</h1><p>${esc(copy.body)}</p>${again}</body></html>`;
+  const ref = p.reference ? `<p style="color:#666;font-size:.85rem">Reference: ${esc(p.reference)}</p>` : "";
+  return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="robots" content="noindex"><title>${esc(copy.title)}</title></head><body style="font-family:system-ui,sans-serif;max-width:32rem;margin:4rem auto;padding:0 1rem;line-height:1.5">${heading}<h1 style="font-size:1.4rem">${esc(copy.title)}</h1><p>${esc(copy.body)}</p>${again}${ref}</body></html>`;
 }
 
 /** GET /pay/{orgId}/{token}: redirect to Checkout, or explain why not. */
@@ -258,8 +326,18 @@ export function mountPay(app: OpenAPIHono<AppEnv>, ctx: AppContext) {
         returned: ret === "success" || ret === "cancel" ? ret : null,
       });
     } catch (e) {
-      ctx.logger.warn("pay link failed", { error: (e as Error).message, request_id: c.get("requestId") });
-      return c.html(payPageHtml({ kind: "page", page: "error", orgName: null, invoiceNumber: null }), 503);
+      const requestId = c.get("requestId");
+      ctx.logger.warn("pay link failed", { error: (e as Error).message, request_id: requestId });
+      return c.html(
+        payPageHtml({
+          kind: "page",
+          page: "error",
+          orgName: null,
+          invoiceNumber: null,
+          reference: requestId,
+        }),
+        503,
+      );
     }
     if (res.kind === "redirect") return c.redirect(res.url, 303);
     return c.html(payPageHtml(res), res.page === "unavailable" ? 404 : 200);

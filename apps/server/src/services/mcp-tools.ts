@@ -385,7 +385,7 @@ tool({
   name: "list_invoices",
   title: "List invoices",
   description:
-    "Invoices to customers, with status, balance due, and whether each is overdue. Each invoice also says whether it accepts online payment (online_payment_enabled), its customer pay link (pay_url) or hand-entered payment link (manual_pay_url), whether a bank payment is still processing (online_pay_status), and when the customer first opened the link. Payments made online are recorded automatically. For bills from vendors use list_bills instead; there is no tool yet for payments received against invoices.",
+    "Invoices to customers, with status, balance due, and whether each is overdue. Each invoice also says whether it accepts online payment (online_payment_enabled), its customer pay link (pay_url; none while the balance due is under Stripe's $0.50 minimum) or hand-entered payment link (manual_pay_url), whether a bank payment is still processing (online_pay_status), when the customer first opened the link, and why the link last failed (pay_error). Payments made online are recorded automatically. For bills from vendors use list_bills instead; there is no tool yet for payments received against invoices.",
   input: z.object({
     status: z.array(z.enum(["draft", "sent", "partial", "paid", "void"])).optional(),
     customer_id: z.string().optional(),

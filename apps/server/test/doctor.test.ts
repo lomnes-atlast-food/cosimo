@@ -251,4 +251,61 @@ describe("doctor with online payments through Stripe", () => {
     expect(bad.stripe).toMatchObject({ status: "fail" });
     expect(bad.stripe!.message).not.toContain("abcdefghij");
   });
+
+  test("warns about missing permissions, an inactive method, and a recent pay-link failure", async () => {
+    await useKey(`${"rk_"}test_abcdefghijklmnopqrstuvwxyz`);
+    const ctx = await createContext(loadConfig(payConfigPath, {}).effective, {
+      logger: silentLogger,
+      env: {},
+    });
+    const h = await ctx.orgs.mustOpen(payOrg);
+    await h.write(async (tx) => {
+      await tx
+        .update(org.orgSettings)
+        .set({ paymentOptionsJson: JSON.stringify({ methods: ["card", "customer_balance"] }) })
+        .where(eq(org.orgSettings.id, 1));
+      await tx.insert(org.contacts).values({ id: "c_doc", kind: "customer", name: "Globex" });
+      await tx.insert(org.invoices).values({
+        id: "i_doc",
+        number: "INV-DOC-1",
+        customerId: "c_doc",
+        issueDate: "2026-09-01",
+        dueDate: "2026-10-01",
+        payError: "Stripe: No such customer: 'cus_x'",
+        payErrorAt: new Date().toISOString(),
+      });
+    });
+    await ctx.close();
+
+    const stripeFetch = (async (url: string, init?: RequestInit) => {
+      const u = String(url);
+      if (!u.includes("stripe")) return new Response('{"status":"ok"}');
+      const path = new URL(u).pathname;
+      if (init?.method === "POST" && path === "/v1/customers")
+        return new Response(
+          JSON.stringify({
+            error: { message: "Needs rak_customer_write", code: "more_permissions_required" },
+          }),
+          { status: 403 },
+        );
+      if (init?.method === "POST")
+        return new Response(JSON.stringify({ error: { message: "Received unknown parameter" } }), {
+          status: 400,
+        });
+      if (path === "/v1/account")
+        return new Response(
+          JSON.stringify({
+            id: "acct_1",
+            capabilities: { card_payments: "active", bank_transfer_payments: "inactive" },
+          }),
+        );
+      return new Response(JSON.stringify({ data: [] }));
+    }) as unknown as typeof fetch;
+    const r = byId(await runDoctor({ configPath: payConfigPath, env: {}, fetchImpl: stripeFetch }));
+    expect(r.stripe).toMatchObject({ status: "warn" });
+    expect(r.stripe!.message).toContain("missing permissions: Customers: Write");
+    expect(r.stripe!.message).toContain("Not active in Stripe: Bank Transfers");
+    expect(r.stripe!.message).toContain("A pay link failed");
+    expect(r.stripe!.message).toContain("INV-DOC-1");
+  });
 });

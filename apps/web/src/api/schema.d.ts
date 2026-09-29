@@ -16153,6 +16153,7 @@ export interface paths {
                     };
                     content: {
                         "application/json": components["schemas"]["OnlinePaymentSettings"] & {
+                            /** @description What to fix in Stripe (missing permissions, inactive methods); the settings are saved. */
                             warning: string | null;
                         };
                     };
@@ -16238,7 +16239,10 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** Check a Stripe key (the stored one, or one being entered) without saving */
+        /**
+         * Check a Stripe key (the stored one, or one being entered) without saving
+         * @description Checks every permission Cosimo uses and whether the chosen payment methods are active. Testing the stored key also updates the stored check.
+         */
         post: {
             parameters: {
                 query?: never;
@@ -19683,7 +19687,7 @@ export interface components {
             voided_at: string | null;
             /** @description Whether the invoice offers the online pay link. */
             online_payment_enabled: boolean;
-            /** @description The customer's pay link (online payments through the org's Stripe account); null when there is none. */
+            /** @description The customer's pay link (online payments through the org's Stripe account); null when there is none, including while the balance due is under Stripe's $0.50 minimum. */
             pay_url: string | null;
             /**
              * @description `processing` while a bank payment is on its way; null otherwise.
@@ -19692,6 +19696,9 @@ export interface components {
             online_pay_status: "processing" | null;
             /** @description When the customer first opened the pay link. */
             pay_link_opened_at: string | null;
+            /** @description Why the pay link last failed to open checkout (Stripe's reason), or a method Stripe rejected; null once it works. */
+            pay_error: string | null;
+            pay_error_at: string | null;
             /** @description A payment page URL entered by hand (payment link mode). */
             manual_pay_url: string | null;
             lines: {
@@ -20107,10 +20114,49 @@ export interface components {
             fee_account_id: string | null;
             online_pay_default: boolean;
             last_event_at: string | null;
+            /** @description The last check of the key's permissions and the payment methods (Save or Test connection). */
+            setup_check: {
+                checked_at: string;
+                /** @description Permissions the key lacks. */
+                missing: string[];
+                /** @description Methods not active in Stripe; checkouts leave them out. */
+                inactive_methods: ("card" | "us_bank_account" | "customer_balance")[];
+                unknown_methods: ("card" | "us_bank_account" | "customer_balance")[];
+                /** @description Events the webhook endpoint doesn't send. */
+                missing_events: string[];
+            } | null;
+            /** @description The events a webhook endpoint set up by hand must send. */
+            webhook_events: string[];
+            /** @description The invoice whose pay link failed most recently, with Stripe's reason. */
+            last_pay_error: {
+                invoice_id: string;
+                number: string;
+                at: string | null;
+                message: string;
+            } | null;
         };
         PaymentConnectionTest: {
             account_name: string;
             livemode: boolean;
+            permissions: {
+                /** @description As the Stripe dashboard names it, for example `Customers: Write`. */
+                name: string;
+                /** @description Null when Cosimo couldn't check it. */
+                ok: boolean | null;
+                detail: string | null;
+            }[];
+            methods: {
+                /** @enum {string} */
+                type: "card" | "us_bank_account" | "customer_balance";
+                /**
+                 * @description `unknown` when the key can't read the account (Account: Read is optional).
+                 * @enum {string}
+                 */
+                status: "active" | "inactive" | "pending" | "unknown";
+                detail: string | null;
+            }[];
+            /** @description Events the webhook endpoint doesn't send; null when it can't be read. */
+            missing_events: string[] | null;
         };
         InstanceStatus: {
             version: string;
