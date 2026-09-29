@@ -3,7 +3,7 @@ import { checkLock, reversalLines, validateLines } from "./ledger.ts";
 import { decide, type PolicyRule } from "./policy.ts";
 
 describe("review policy defaults (SPEC §7.5)", () => {
-  const p = (actor: "user" | "api_token" | "mcp" | "rule" | "system", extra = {}) =>
+  const p = (actor: "user" | "api_token" | "mcp" | "rule" | "system" | "integration", extra = {}) =>
     decide({ actor, itemType: "journal_entry", amount: 10000, ...extra }, []);
 
   test("defaults by actor", () => {
@@ -13,10 +13,27 @@ describe("review policy defaults (SPEC §7.5)", () => {
     expect(p("rule", { ruleAutoPost: true }).action).toBe("auto_approve");
     expect(p("rule").action).toBe("require_review");
     expect(p("mcp").action).toBe("require_review");
+    expect(p("integration")).toEqual({
+      action: "auto_approve",
+      reason: "Recorded from a payment provider.",
+      ruleId: null,
+    });
+  });
+
+  test("payment provider entries still honour the threshold and owner rules", () => {
+    expect(decide({ actor: "integration", itemType: "journal_entry", amount: 250000 }, []).action).toBe(
+      "require_review",
+    );
+    const rules: PolicyRule[] = [
+      { id: "r1", actor: "integration", condition: {}, action: "require_review", priority: 10 },
+    ];
+    expect(decide({ actor: "integration", itemType: "journal_entry", amount: 100 }, rules).action).toBe(
+      "require_review",
+    );
   });
 
   test("threshold catches every actor", () => {
-    for (const actor of ["user", "api_token", "mcp", "rule", "system"] as const) {
+    for (const actor of ["user", "api_token", "mcp", "rule", "system", "integration"] as const) {
       expect(
         decide({ actor, itemType: "journal_entry", amount: 250000, ruleAutoPost: true }, []).action,
       ).toBe("require_review");

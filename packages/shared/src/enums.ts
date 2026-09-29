@@ -44,7 +44,7 @@ export type AccountSubtype = (typeof ACCOUNT_SUBTYPES)[number];
 export const ENTRY_STATUSES = ["draft", "pending_review", "posted", "rejected"] as const;
 export type EntryStatus = (typeof ENTRY_STATUSES)[number];
 
-export const ACTORS = ["user", "api_token", "mcp", "rule", "system"] as const;
+export const ACTORS = ["user", "api_token", "mcp", "rule", "system", "integration"] as const;
 export type Actor = (typeof ACTORS)[number];
 
 export const SOURCE_TYPES = [
@@ -52,6 +52,7 @@ export const SOURCE_TYPES = [
   "bank_transaction",
   "invoice",
   "invoice_payment",
+  "payment_fee",
   "bill",
   "bill_payment",
   "transfer",

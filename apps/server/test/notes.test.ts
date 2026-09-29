@@ -83,6 +83,7 @@ describe("secret detector", () => {
     "account number: 00123456789",
     "routing # 021000021",
     `stripe ${"sk_"}live_abcdefghijklmnopqrstuv`,
+    `webhook signing secret ${"whsec_"}abcdefghijklmnopqrstuv`,
   ];
   const negatives = [
     "Payments from Acme are retainer billing, account 4010.",
@@ -95,6 +96,7 @@ describe("secret detector", () => {
     "Password manager is 1Password; ask the owner.",
     "Grouped but not a card: 1234 5678 9012 3456",
     "Account codes 1000 1010 1200 2000 3000 4000 5000",
+    "Stripe payouts land in checking; the webhook secret lives in Settings.",
   ];
   for (const t of positives) test(`flags: ${t.slice(0, 40)}`, () => expect(detectSecret(t)).not.toBeNull());
   for (const t of negatives) test(`allows: ${t.slice(0, 40)}`, () => expect(detectSecret(t)).toBeNull());

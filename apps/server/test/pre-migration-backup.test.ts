@@ -11,6 +11,7 @@ import {
   pendingMigrations,
   systemMigrations,
 } from "@cosimo/db";
+import { getTableConfig } from "drizzle-orm/sqlite-core";
 import { hasPendingMigrations } from "../src/cli/commands/serve.ts";
 import { coaSeeder } from "../src/services/accounts.ts";
 import { SYSTEM_ACTOR } from "../src/services/actor.ts";
@@ -44,6 +45,57 @@ async function instance(systemLevel: number) {
 }
 
 /**
+ * The fixture is written with the current code, which reads and writes every org_settings column.
+ * Columns added by later migrations are added for the writes and dropped again, so the database
+ * keeps the schema of its level.
+ */
+async function withCurrentSettingsColumns(h: ReturnType<typeof connectOrg>, fn: () => Promise<void>) {
+  const rs = await h.client.execute("SELECT name FROM pragma_table_info('org_settings')");
+  const have = new Set(rs.rows.map((r) => String(r.name)));
+  const missing = getTableConfig(org.orgSettings).columns.filter((c) => !have.has(c.name));
+  for (const c of missing)
+    await h.client.execute(`ALTER TABLE org_settings ADD COLUMN "${c.name}" ${c.getSQLType()}`);
+  await fn();
+  for (const c of missing) await h.client.execute(`ALTER TABLE org_settings DROP COLUMN "${c.name}"`);
+}
+
+/** A chart of accounts, an audit row and a posted entry. */
+async function seedOrg(h: ReturnType<typeof connectOrg>, id: string, name: string) {
+  await h.write(async (tx) => {
+    await tx.insert(org.schemaMeta).values([
+      { key: "org_id", value: id },
+      { key: "ledger_genesis", value: ledgerGenesis(id) },
+      { key: "audit_genesis", value: auditGenesis(id) },
+      { key: "created_at", value: new Date().toISOString() },
+    ]);
+    await tx.insert(org.orgSettings).values({ id: 1, orgId: id, legalName: name });
+    await coaSeeder(tx, id, { name, createdBy: null });
+    await appendAudit(tx, id, SYSTEM_ACTOR, { action: "org.create", targetType: "org", targetId: id });
+  });
+  const rs = await h.client.execute(
+    "SELECT (SELECT id FROM accounts WHERE type = 'asset' AND is_system = 0 ORDER BY code LIMIT 1) AS a, " +
+      "(SELECT id FROM accounts WHERE type = 'income' AND is_system = 0 ORDER BY code LIMIT 1) AS i",
+  );
+  const [asset, income] = [String(rs.rows[0]!.a), String(rs.rows[0]!.i)];
+  await h.write((tx) =>
+    submitEntryTx(
+      tx,
+      id,
+      SYSTEM_ACTOR,
+      {
+        date: "2026-01-15",
+        memo: "before the upgrade",
+        lines: [
+          { accountId: asset, amount: 12_500 },
+          { accountId: income, amount: -12_500 },
+        ],
+      },
+      { forcePost: true },
+    ),
+  );
+}
+
+/**
  * Create an org database at `orgLevel` with a chart of accounts, an audit row and a posted entry,
  * then register it with the columns of the first system migration only (as an old release did).
  */
@@ -53,38 +105,7 @@ async function addOrg(e: TestEnv, name: string, orgLevel: number, opts: { archiv
   const h = connectOrg(prov.url, prov.authToken);
   try {
     await migrate(h.client, orgMigrations.slice(0, orgLevel));
-    await h.write(async (tx) => {
-      await tx.insert(org.schemaMeta).values([
-        { key: "org_id", value: id },
-        { key: "ledger_genesis", value: ledgerGenesis(id) },
-        { key: "audit_genesis", value: auditGenesis(id) },
-        { key: "created_at", value: new Date().toISOString() },
-      ]);
-      await tx.insert(org.orgSettings).values({ id: 1, orgId: id, legalName: name });
-      await coaSeeder(tx, id, { name, createdBy: null });
-      await appendAudit(tx, id, SYSTEM_ACTOR, { action: "org.create", targetType: "org", targetId: id });
-    });
-    const rs = await h.client.execute(
-      "SELECT (SELECT id FROM accounts WHERE type = 'asset' AND is_system = 0 ORDER BY code LIMIT 1) AS a, " +
-        "(SELECT id FROM accounts WHERE type = 'income' AND is_system = 0 ORDER BY code LIMIT 1) AS i",
-    );
-    const [asset, income] = [String(rs.rows[0]!.a), String(rs.rows[0]!.i)];
-    await h.write((tx) =>
-      submitEntryTx(
-        tx,
-        id,
-        SYSTEM_ACTOR,
-        {
-          date: "2026-01-15",
-          memo: "before the upgrade",
-          lines: [
-            { accountId: asset, amount: 12_500 },
-            { accountId: income, amount: -12_500 },
-          ],
-        },
-        { forcePost: true },
-      ),
-    );
+    await withCurrentSettingsColumns(h, () => seedOrg(h, id, name));
   } finally {
     h.close();
   }

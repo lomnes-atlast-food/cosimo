@@ -131,9 +131,19 @@ export interface InvoiceInput {
   terms?: string | null;
   memo?: string | null;
   lines: DocLineInput[];
+  /** Offer the online pay link (payment provider). Defaults to the org's `online_pay_default`. */
+  online_pay_enabled?: boolean;
+  /** `manual_link` mode: a payment page URL pasted by the owner, shown on the PDF and email. */
+  manual_pay_url?: string | null;
 }
 
-export async function invoiceView(db: Reader, inv: InvoiceRow) {
+/**
+ * Builds an invoice's pay link. The token is derived from the master key, so only code holding the
+ * app context can make one (services/online-payments.ts `payLinker`); views without it show none.
+ */
+export type PayLinker = (inv: InvoiceRow) => string | null;
+
+export async function invoiceView(db: Reader, inv: InvoiceRow, link?: PayLinker) {
   const lines = await db
     .select()
     .from(org.invoiceLines)
@@ -167,6 +177,11 @@ export async function invoiceView(db: Reader, inv: InvoiceRow) {
     sent_at: inv.sentAt,
     last_reminder_at: inv.lastReminderAt,
     voided_at: inv.voidedAt,
+    online_payment_enabled: inv.onlinePayEnabled,
+    pay_url: link?.(inv) ?? null,
+    online_pay_status: inv.onlinePayStatus,
+    pay_link_opened_at: inv.payLinkOpenedAt,
+    manual_pay_url: inv.manualPayUrl,
     lines: lines.map((l) => ({
       id: l.id,
       description: l.description,
@@ -195,6 +210,7 @@ export async function listInvoices(
     overdue?: boolean;
     limit?: number;
   },
+  link?: PayLinker,
 ) {
   const conds: SQL[] = [];
   if (f.status?.length) conds.push(inArray(org.invoices.status, f.status as InvoiceRow["status"][]));
@@ -212,7 +228,7 @@ export async function listInvoices(
     .orderBy(desc(org.invoices.issueDate), desc(org.invoices.id))
     .limit(Math.min(f.limit ?? 200, 1000))
     .all();
-  return Promise.all(rows.map((r) => invoiceView(db, r)));
+  return Promise.all(rows.map((r) => invoiceView(db, r, link)));
 }
 
 export async function checkDocLines(tx: Reader, lines: DocLineInput[], kind: DocType) {
@@ -310,6 +326,8 @@ export async function createInvoiceTx(
     recurringId: extra.recurringId ?? null,
     createdBy: a.userId,
     createdByActor: a.actor,
+    onlinePayEnabled: input.online_pay_enabled ?? s.onlinePayDefault,
+    manualPayUrl: input.manual_pay_url ?? null,
   });
   const subtotal = await writeInvoiceLines(tx, id, input.lines);
   if (subtotal <= 0) throw unprocessable("The invoice total must be more than zero.", "invalid_total");
@@ -368,6 +386,8 @@ export async function updateInvoiceTx(
   else if (input.terms !== undefined || input.issue_date)
     patch.dueDate = dueFromTerms(input.issue_date ?? before.issueDate, input.terms ?? before.terms);
   if (input.memo !== undefined) patch.memo = input.memo;
+  if (input.online_pay_enabled !== undefined) patch.onlinePayEnabled = input.online_pay_enabled;
+  if (input.manual_pay_url !== undefined) patch.manualPayUrl = input.manual_pay_url;
   if (input.lines) {
     await checkDocLines(tx, input.lines, "invoice");
     const subtotal = await writeInvoiceLines(tx, id, input.lines);
@@ -444,7 +464,26 @@ export async function finalizeInvoiceTx(
     targetId: inv.id,
     after: { entry_id: r.entry.id, entry_status: r.entry.status },
   });
+  if (inv.onlinePayEnabled && inv.payTokenVersion === 0) await issuePayLinkTx(tx, orgId, a, inv.id, 1);
   return r;
+}
+
+/**
+ * Start a new pay link version. The token hash is filled in by services/online-payments.ts, which
+ * holds the master key (`storePayTokenHashesTx`); until then the link resolves through that
+ * service's lookup, which stores missing hashes first.
+ */
+export async function issuePayLinkTx(tx: OrgTx, orgId: string, a: ActorInfo, id: string, version: number) {
+  await tx
+    .update(org.invoices)
+    .set({ payTokenVersion: version, payTokenHash: null, paySessionId: null, paySessionAmount: null })
+    .where(eq(org.invoices.id, id));
+  await appendAudit(tx, orgId, a, {
+    action: version === 1 ? "invoice.pay_link_create" : "invoice.pay_link_rotate",
+    targetType: "invoice",
+    targetId: id,
+    after: { version },
+  });
 }
 
 export async function markInvoiceSentTx(
@@ -905,7 +944,13 @@ async function checkApplications(
  * Record a payment received from a customer (or sent to a vendor), optionally applied to several
  * invoices (bills). Any amount not applied stays as a credit for the contact (SPEC §8.1).
  */
-export async function recordPaymentTx(tx: OrgTx, orgId: string, a: ActorInfo, input: PaymentInput) {
+export async function recordPaymentTx(
+  tx: OrgTx,
+  orgId: string,
+  a: ActorInfo,
+  input: PaymentInput,
+  opts: { requireReview?: string; reviewContext?: Record<string, unknown> } = {},
+) {
   if (!Number.isSafeInteger(input.amount) || input.amount <= 0)
     throw unprocessable("The payment amount must be positive.", "invalid_amount");
   const contact = await mustGetContact(tx, input.contact_id);
@@ -970,7 +1015,13 @@ export async function recordPaymentTx(tx: OrgTx, orgId: string, a: ActorInfo, in
       sourceId: id,
       lockOverrideNote: input.lock_override_note ?? null,
     },
-    { reviewContext: { payment: { id, contact: contact.name, applications: input.applications } } },
+    {
+      requireReview: opts.requireReview,
+      reviewContext: {
+        payment: { id, contact: contact.name, applications: input.applications },
+        ...opts.reviewContext,
+      },
+    },
   );
   await tx.update(org.payments).set({ entryId: r.entry.id }).where(eq(org.payments.id, id));
   for (const x of input.applications) await recomputeDocTx(tx, type, x.document_id);
@@ -1136,7 +1187,7 @@ export async function voidPaymentTx(
 }
 
 /** Open invoices (bills) of a contact, oldest first, for the payment form. */
-export async function openDocuments(db: Reader, type: DocType, contactId?: string) {
+export async function openDocuments(db: Reader, type: DocType, contactId?: string, link?: PayLinker) {
   if (type === "invoice") {
     const rows = await db
       .select()
@@ -1149,7 +1200,7 @@ export async function openDocuments(db: Reader, type: DocType, contactId?: strin
       )
       .orderBy(asc(org.invoices.dueDate))
       .all();
-    return Promise.all(rows.map((r) => invoiceView(db, r)));
+    return Promise.all(rows.map((r) => invoiceView(db, r, link)));
   }
   const rows = await db
     .select()

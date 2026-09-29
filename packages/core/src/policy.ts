@@ -72,8 +72,8 @@ function matches(c: PolicyCondition, p: Proposal): boolean {
  *  2. Anything at or above the org threshold requires review, whoever proposes it.
  *  3. propose_only API tokens always require review.
  *  4. Owner-configured rules, highest priority first (lower number wins).
- *  5. Built-in defaults: user and API token auto-approve; rule auto-approves only with auto-post on;
- *     MCP and anything else requires review.
+ *  5. Built-in defaults: user, API token, and payment provider (integration) auto-approve; rule
+ *     auto-approves only with auto-post on; MCP and anything else requires review.
  */
 export function decide(p: Proposal, rules: PolicyRule[], threshold = DEFAULT_THRESHOLD): Decision {
   if (p.itemType === "import_batch") {
@@ -107,6 +107,8 @@ export function decide(p: Proposal, rules: PolicyRule[], threshold = DEFAULT_THR
       return { action: "auto_approve", reason: "Entered by a person.", ruleId: null };
     case "api_token":
       return { action: "auto_approve", reason: "API token.", ruleId: null };
+    case "integration":
+      return { action: "auto_approve", reason: "Recorded from a payment provider.", ruleId: null };
     case "rule":
       return p.ruleAutoPost
         ? { action: "auto_approve", reason: "Rule with auto-post on.", ruleId: null }

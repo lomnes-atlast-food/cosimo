@@ -3,6 +3,7 @@ import { useNavigate } from "@tanstack/react-router";
 import { type ReactNode, useEffect, useState } from "react";
 import { ApiError, api, rawFetch, unwrap } from "../api/client";
 import type { components } from "../api/schema";
+import { AccountSelect } from "../components/AccountSelect";
 import {
   Alert,
   Badge,
@@ -22,6 +23,7 @@ import {
   th,
 } from "../components/ui";
 import { fmtDateTime, money, tryParseCents } from "../lib/format";
+import { useAccounts } from "../lib/ledger";
 import { useOrg, useOrgId, useRole } from "../lib/org";
 import { useRefreshSession, useSession } from "../lib/session";
 import { BusinessContext } from "./business";
@@ -705,6 +707,268 @@ function PlaidKeys() {
   );
 }
 
+type PaymentMethod = "card" | "us_bank_account" | "customer_balance";
+const PAYMENT_METHODS: { value: PaymentMethod; label: string; hint: string }[] = [
+  { value: "card", label: "Card", hint: "Typically 2.9% + 30¢ per payment." },
+  {
+    value: "us_bank_account",
+    label: "ACH Direct Debit",
+    hint: "Typically 0.8%, capped at $5. Takes a few days.",
+  },
+  {
+    value: "customer_balance",
+    label: "Bank transfer",
+    hint: "The customer wires or sends ACH to account details Stripe shows. Typically 0.5%, capped at $5.",
+  },
+];
+
+/** Owner-only: online invoice payments through the org's own Stripe account, or a pasted link per invoice. */
+function OnlinePayments() {
+  const orgId = useOrgId();
+  const qc = useQueryClient();
+  const accounts = useAccounts(orgId);
+  const q = useQuery({
+    queryKey: ["online-payments", orgId],
+    queryFn: () => unwrap(api.GET("/api/v1/orgs/{orgId}/online-payments", { params: { path: { orgId } } })),
+  });
+  const [provider, setProvider] = useState<"off" | "manual_link" | "stripe">("off");
+  const [key, setKey] = useState("");
+  const [whsec, setWhsec] = useState("");
+  const [methods, setMethods] = useState<PaymentMethod[]>(["card"]);
+  const [clearing, setClearing] = useState("");
+  const [fee, setFee] = useState("");
+  const [byDefault, setByDefault] = useState(false);
+  useEffect(() => {
+    if (!q.data) return;
+    setProvider(q.data.provider);
+    setMethods(q.data.methods);
+    setClearing(q.data.clearing_account_id ?? "");
+    setFee(q.data.fee_account_id ?? "");
+    setByDefault(q.data.online_pay_default);
+  }, [q.data]);
+  const save = useMutation({
+    mutationFn: () =>
+      unwrap(
+        api.PUT("/api/v1/orgs/{orgId}/online-payments", {
+          params: { path: { orgId } },
+          body: {
+            provider,
+            secret_key: key || undefined,
+            webhook_secret: whsec || undefined,
+            methods,
+            clearing_account_id: clearing || null,
+            fee_account_id: fee || null,
+            online_pay_default: byDefault,
+          },
+        }),
+      ),
+    onSuccess: async () => {
+      setKey("");
+      setWhsec("");
+      await qc.invalidateQueries({ queryKey: ["online-payments", orgId] });
+      await qc.invalidateQueries({ queryKey: ["org", orgId] });
+      await qc.invalidateQueries({ queryKey: ["accounts", orgId] });
+    },
+  });
+  const test = useMutation({
+    mutationFn: () =>
+      unwrap(
+        api.POST("/api/v1/orgs/{orgId}/online-payments/test", {
+          params: { path: { orgId } },
+          body: { secret_key: key || null },
+        }),
+      ),
+  });
+  if (q.isLoading) return <Loading />;
+  if (!q.data) return <ErrorText error={q.error} />;
+  const d = q.data;
+  const toggle = (m: PaymentMethod, on: boolean) =>
+    setMethods((ms) => (on ? [...new Set([...ms, m])] : ms.filter((x) => x !== m)));
+  return (
+    <form
+      className="space-y-6"
+      onSubmit={(e) => {
+        e.preventDefault();
+        save.mutate();
+      }}
+    >
+      <Card title="Online payments">
+        <div className="space-y-4 text-sm">
+          <p className="text-zinc-600 dark:text-zinc-400">
+            Put a "Pay online" link on invoices. With Stripe, customers pay in your own Stripe account and
+            Cosimo records the payment and Stripe's fee. With a payment link, you paste a URL from any payment
+            service on each invoice and record payments yourself.
+          </p>
+          <Field label="Mode">
+            {(id) => (
+              <Select
+                id={id}
+                value={provider}
+                onChange={(e) => setProvider(e.target.value as typeof provider)}
+                className="max-w-xs"
+              >
+                <option value="off">Off</option>
+                <option value="manual_link">Payment link</option>
+                <option value="stripe">Stripe</option>
+              </Select>
+            )}
+          </Field>
+          {provider !== "off" && (
+            <label className="flex items-center gap-2">
+              <input type="checkbox" checked={byDefault} onChange={(e) => setByDefault(e.target.checked)} />
+              Accept online payment on new invoices by default
+            </label>
+          )}
+        </div>
+      </Card>
+      {provider === "stripe" && (
+        <Card
+          title="Stripe"
+          actions={
+            d.secret_key_set && d.provider === "stripe" ? (
+              <>
+                {d.livemode === false && <Badge tone="amber">Test mode</Badge>}
+                {d.account_name && <Badge tone="blue">{d.account_name}</Badge>}
+              </>
+            ) : null
+          }
+        >
+          <div className="grid gap-4 text-sm sm:grid-cols-2">
+            <Field
+              label="Secret or restricted key"
+              hint={
+                d.secret_key_set
+                  ? "A key is stored. Enter a new one to replace it."
+                  : "sk_... or rk_... from the Stripe dashboard. Encrypted, never shown again."
+              }
+            >
+              {(id) => (
+                <Input
+                  id={id}
+                  type="password"
+                  autoComplete="off"
+                  value={key}
+                  onChange={(e) => setKey(e.target.value)}
+                  placeholder={d.secret_key_set ? "••••••••" : "rk_live_..."}
+                />
+              )}
+            </Field>
+            <div className="flex items-end">
+              <Button
+                variant="secondary"
+                loading={test.isPending}
+                disabled={!key && !d.secret_key_set}
+                onClick={() => test.mutate()}
+              >
+                Test connection
+              </Button>
+            </div>
+            {test.data && (
+              <div className="sm:col-span-2">
+                <Alert kind="success">
+                  Connected to {test.data.account_name} ({test.data.livemode ? "live mode" : "test mode"}).
+                </Alert>
+              </div>
+            )}
+            <div className="sm:col-span-2">
+              <ErrorText error={test.error} />
+            </div>
+            <fieldset className="space-y-2 sm:col-span-2">
+              <legend className="mb-1 text-sm font-medium">Payment methods</legend>
+              {PAYMENT_METHODS.map((m) => (
+                <label key={m.value} className="flex items-start gap-2">
+                  <input
+                    type="checkbox"
+                    className="mt-1"
+                    checked={methods.includes(m.value)}
+                    onChange={(e) => toggle(m.value, e.target.checked)}
+                  />
+                  <span>
+                    {m.label} <span className="text-xs text-zinc-500">{m.hint}</span>
+                  </span>
+                </label>
+              ))}
+            </fieldset>
+            <Field
+              label="Clearing account"
+              hint="Payments land here until Stripe pays out. Empty: Stripe Clearing."
+            >
+              {(id) => (
+                <AccountSelect
+                  id={id}
+                  accounts={accounts.data ?? []}
+                  types={["asset"]}
+                  value={clearing}
+                  onChange={setClearing}
+                  placeholder="Create Stripe Clearing"
+                />
+              )}
+            </Field>
+            <Field label="Fee account" hint="Stripe's fees. Empty: Bank and Merchant Fees.">
+              {(id) => (
+                <AccountSelect
+                  id={id}
+                  accounts={accounts.data ?? []}
+                  types={["expense"]}
+                  value={fee}
+                  onChange={setFee}
+                  placeholder="Bank and Merchant Fees"
+                />
+              )}
+            </Field>
+            <div className="space-y-2 sm:col-span-2">
+              <p>
+                {d.provider !== "stripe" || !d.secret_key_set ? (
+                  d.webhook_url ? (
+                    "Cosimo will register a webhook in your Stripe account when you save."
+                  ) : (
+                    "This instance has no public HTTPS address, so Cosimo will check Stripe for payments every 15 minutes."
+                  )
+                ) : d.webhook_mode === "registered" ? (
+                  <Badge tone="green">Webhook registered</Badge>
+                ) : d.webhook_mode === "manual" ? (
+                  <Badge tone="green">Webhook secret entered</Badge>
+                ) : (
+                  <Badge tone="zinc">No webhook: checking every 15 minutes</Badge>
+                )}{" "}
+                {d.last_event_at && (
+                  <span className="text-xs text-zinc-500">Last event {fmtDateTime(d.last_event_at)}</span>
+                )}
+              </p>
+              {d.webhook_url && d.webhook_mode !== "registered" && (
+                <Field
+                  label="Webhook signing secret (optional)"
+                  hint={`If Cosimo couldn't register the webhook, add an endpoint for ${d.webhook_url} in the Stripe dashboard and paste its signing secret (whsec_...).`}
+                >
+                  {(id) => (
+                    <Input
+                      id={id}
+                      type="password"
+                      autoComplete="off"
+                      value={whsec}
+                      onChange={(e) => setWhsec(e.target.value)}
+                    />
+                  )}
+                </Field>
+              )}
+            </div>
+          </div>
+        </Card>
+      )}
+      <ErrorText error={save.error} />
+      {save.data?.warning && <Alert kind="warn">{save.data.warning}</Alert>}
+      {save.isSuccess && !save.data?.warning && <Alert kind="success">Saved.</Alert>}
+      <Button
+        type="submit"
+        loading={save.isPending}
+        disabled={provider === "stripe" && !key && !d.secret_key_set}
+      >
+        Save
+      </Button>
+    </form>
+  );
+}
+
 function OrgConnectionsTab() {
   const { isOwner } = useRole();
   return isOwner ? (
@@ -714,29 +978,33 @@ function OrgConnectionsTab() {
   );
 }
 
-export const settingsTabs: { value: string; label: string; render: () => ReactNode }[] = [
-  { value: "general", label: "General", render: () => <General /> },
-  { value: "members", label: "Members", render: () => <Members /> },
-  { value: "business", label: "Business profile", render: () => <BusinessContext /> },
-  { value: "lock", label: "Lock dates", render: () => <LockDates /> },
-  { value: "integrity", label: "Integrity", render: () => <Integrity /> },
-  { value: "policies", label: "Review policies", render: () => <ReviewPolicies /> },
-  { value: "feeds", label: "Bank feeds", render: () => <PlaidKeys /> },
-  { value: "ai", label: "AI connections", render: () => <OrgConnectionsTab /> },
-  { value: "audit", label: "Audit log", render: () => <AuditLog /> },
-  { value: "import", label: "Import & export", render: () => <ImportExport /> },
-];
+export const settingsTabs: { value: string; label: string; render: () => ReactNode; ownerOnly?: boolean }[] =
+  [
+    { value: "general", label: "General", render: () => <General /> },
+    { value: "members", label: "Members", render: () => <Members /> },
+    { value: "business", label: "Business profile", render: () => <BusinessContext /> },
+    { value: "lock", label: "Lock dates", render: () => <LockDates /> },
+    { value: "integrity", label: "Integrity", render: () => <Integrity /> },
+    { value: "policies", label: "Review policies", render: () => <ReviewPolicies /> },
+    { value: "feeds", label: "Bank feeds", render: () => <PlaidKeys /> },
+    { value: "payments", label: "Online payments", render: () => <OnlinePayments />, ownerOnly: true },
+    { value: "ai", label: "AI connections", render: () => <OrgConnectionsTab /> },
+    { value: "audit", label: "Audit log", render: () => <AuditLog /> },
+    { value: "import", label: "Import & export", render: () => <ImportExport /> },
+  ];
 
 export function SettingsPage() {
+  const { isOwner } = useRole();
+  const tabs = settingsTabs.filter((t) => isOwner || !t.ownerOnly);
   const [tab, setTab] = useState(settingsTabs[0]!.value);
-  const current = settingsTabs.find((t) => t.value === tab) ?? settingsTabs[0]!;
+  const current = tabs.find((t) => t.value === tab) ?? tabs[0]!;
   return (
     <>
       <PageHeader title="Settings" />
       <Tabs
-        value={tab}
+        value={current.value}
         onChange={setTab}
-        tabs={settingsTabs.map((t) => ({ value: t.value, label: t.label }))}
+        tabs={tabs.map((t) => ({ value: t.value, label: t.label }))}
       />
       {current.render()}
     </>

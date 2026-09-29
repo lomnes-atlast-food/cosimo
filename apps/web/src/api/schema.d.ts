@@ -8997,7 +8997,7 @@ export interface paths {
                     "application/json": {
                         name?: string | null;
                         /** @enum {string} */
-                        actor: "user" | "api_token" | "mcp" | "rule" | "system" | "*";
+                        actor: "user" | "api_token" | "mcp" | "rule" | "system" | "integration" | "*";
                         condition: {
                             /**
                              * @description Integer minor units (cents)
@@ -9128,7 +9128,7 @@ export interface paths {
                     "application/json": {
                         name?: string | null;
                         /** @enum {string} */
-                        actor: "user" | "api_token" | "mcp" | "rule" | "system" | "*";
+                        actor: "user" | "api_token" | "mcp" | "rule" | "system" | "integration" | "*";
                         condition: {
                             /**
                              * @description Integer minor units (cents)
@@ -10753,6 +10753,13 @@ export interface paths {
                             /** @example 01J9Z3K5Q7W8X9Y0A1B2C3D4E5 */
                             account_id: string;
                         }[];
+                        /** @description Offer the online pay link. Defaults to the organization's setting. */
+                        online_pay_enabled?: boolean;
+                        /**
+                         * Format: uri
+                         * @description Payment link mode: a payment page URL shown on the PDF and email.
+                         */
+                        manual_pay_url?: string | null;
                     };
                 };
             };
@@ -11074,6 +11081,13 @@ export interface paths {
                             /** @example 01J9Z3K5Q7W8X9Y0A1B2C3D4E5 */
                             account_id: string;
                         }[];
+                        /** @description Offer the online pay link. Defaults to the organization's setting. */
+                        online_pay_enabled?: boolean;
+                        /**
+                         * Format: uri
+                         * @description Payment link mode: a payment page URL shown on the PDF and email.
+                         */
+                        manual_pay_url?: string | null;
                     };
                 };
             };
@@ -16004,6 +16018,655 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/orgs/{orgId}/online-payments": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Online payment settings (owner; secrets are never returned) */
+        get: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    orgId: string;
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["OnlinePaymentSettings"];
+                    };
+                };
+                /** @description Invalid request */
+                400: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+                /** @description Not authenticated */
+                401: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+                /** @description Forbidden */
+                403: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+                /** @description Not found */
+                404: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+                /** @description Conflict */
+                409: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+                /** @description Rule or invariant violation */
+                422: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+                /** @description Rate limited */
+                429: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+            };
+        };
+        /**
+         * Set up online payments (owner)
+         * @description Stripe keys are checked with Stripe before they are stored, encrypted. On first setup Cosimo creates a Stripe Clearing account and uses (or creates) Bank and Merchant Fees unless you choose accounts. With an HTTPS public URL Cosimo registers the webhook endpoint in your Stripe account; otherwise it polls.
+         */
+        put: {
+            parameters: {
+                query?: never;
+                header?: {
+                    /** @description Makes a retry safe: the same key and body replay the first response. */
+                    "Idempotency-Key"?: string;
+                };
+                path: {
+                    orgId: string;
+                };
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": {
+                        /** @enum {string} */
+                        provider: "off" | "manual_link" | "stripe";
+                        /** @description Stripe secret (sk_) or restricted (rk_) key. Omit to keep the stored key. */
+                        secret_key?: string;
+                        /** @description Fallback when Cosimo can't register the webhook itself: the endpoint's signing secret (whsec_...). Null clears it. */
+                        webhook_secret?: string | null;
+                        methods?: ("card" | "us_bank_account" | "customer_balance")[];
+                        /** @example 01J9Z3K5Q7W8X9Y0A1B2C3D4E5 */
+                        clearing_account_id?: string | null;
+                        /** @example 01J9Z3K5Q7W8X9Y0A1B2C3D4E5 */
+                        fee_account_id?: string | null;
+                        online_pay_default?: boolean;
+                    };
+                };
+            };
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["OnlinePaymentSettings"] & {
+                            warning: string | null;
+                        };
+                    };
+                };
+                /** @description Invalid request */
+                400: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+                /** @description Not authenticated */
+                401: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+                /** @description Forbidden */
+                403: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+                /** @description Not found */
+                404: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+                /** @description Conflict */
+                409: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+                /** @description Rule or invariant violation */
+                422: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+                /** @description Rate limited */
+                429: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+            };
+        };
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/orgs/{orgId}/online-payments/test": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Check a Stripe key (the stored one, or one being entered) without saving */
+        post: {
+            parameters: {
+                query?: never;
+                header?: {
+                    /** @description Makes a retry safe: the same key and body replay the first response. */
+                    "Idempotency-Key"?: string;
+                };
+                path: {
+                    orgId: string;
+                };
+                cookie?: never;
+            };
+            requestBody?: {
+                content: {
+                    "application/json": {
+                        secret_key?: string | null;
+                    };
+                };
+            };
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["PaymentConnectionTest"];
+                    };
+                };
+                /** @description Invalid request */
+                400: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+                /** @description Not authenticated */
+                401: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+                /** @description Forbidden */
+                403: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+                /** @description Not found */
+                404: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+                /** @description Conflict */
+                409: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+                /** @description Rule or invariant violation */
+                422: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+                /** @description Rate limited */
+                429: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/orgs/{orgId}/invoices/{invoiceId}/online-pay": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Turn online payment on or off for an invoice
+         * @description A finalized invoice gets its pay link when online payment is turned on.
+         */
+        post: {
+            parameters: {
+                query?: never;
+                header?: {
+                    /** @description Makes a retry safe: the same key and body replay the first response. */
+                    "Idempotency-Key"?: string;
+                };
+                path: {
+                    orgId: string;
+                    invoiceId: string;
+                };
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": {
+                        enabled: boolean;
+                    };
+                };
+            };
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Invoice"];
+                    };
+                };
+                /** @description Invalid request */
+                400: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+                /** @description Not authenticated */
+                401: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+                /** @description Forbidden */
+                403: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+                /** @description Not found */
+                404: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+                /** @description Conflict */
+                409: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+                /** @description Rule or invariant violation */
+                422: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+                /** @description Rate limited */
+                429: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/orgs/{orgId}/invoices/{invoiceId}/rotate-pay-link": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Replace the invoice's pay link (owner); the old link stops working */
+        post: {
+            parameters: {
+                query?: never;
+                header?: {
+                    /** @description Makes a retry safe: the same key and body replay the first response. */
+                    "Idempotency-Key"?: string;
+                };
+                path: {
+                    orgId: string;
+                    invoiceId: string;
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Invoice"];
+                    };
+                };
+                /** @description Invalid request */
+                400: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+                /** @description Not authenticated */
+                401: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+                /** @description Forbidden */
+                403: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+                /** @description Not found */
+                404: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+                /** @description Conflict */
+                409: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+                /** @description Rule or invariant violation */
+                422: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+                /** @description Rate limited */
+                429: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/webhooks/payments/{provider}/{orgId}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Payment provider webhook receiver (verified with the provider's signature) */
+        post: {
+            parameters: {
+                query?: never;
+                header?: {
+                    /** @description Makes a retry safe: the same key and body replay the first response. */
+                    "Idempotency-Key"?: string;
+                };
+                path: {
+                    orgId: string;
+                    provider: "stripe";
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            /** @enum {boolean} */
+                            received: true;
+                            action: string;
+                        };
+                    };
+                };
+                /** @description Invalid request */
+                400: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+                /** @description Not authenticated */
+                401: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+                /** @description Forbidden */
+                403: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+                /** @description Not found */
+                404: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+                /** @description Conflict */
+                409: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+                /** @description Rule or invariant violation */
+                422: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+                /** @description Rate limited */
+                429: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/admin/status": {
         parameters: {
             query?: never;
@@ -18461,6 +19124,15 @@ export interface components {
             plaid_override: boolean;
             /** @enum {string|null} */
             plaid_env: "sandbox" | "production" | null;
+            /**
+             * @description Online invoice payments: off, a payment link entered per invoice, or Stripe.
+             * @enum {string}
+             */
+            payment_provider: "off" | "manual_link" | "stripe";
+            /** @description New invoices accept online payment unless turned off. */
+            online_pay_default: boolean;
+            /** @description With Stripe: false while using a test-mode key. */
+            payment_livemode: boolean | null;
         };
         Member: {
             user_id: string;
@@ -19009,6 +19681,19 @@ export interface components {
             sent_at: string | null;
             last_reminder_at: string | null;
             voided_at: string | null;
+            /** @description Whether the invoice offers the online pay link. */
+            online_payment_enabled: boolean;
+            /** @description The customer's pay link (online payments through the org's Stripe account); null when there is none. */
+            pay_url: string | null;
+            /**
+             * @description `processing` while a bank payment is on its way; null otherwise.
+             * @enum {string|null}
+             */
+            online_pay_status: "processing" | null;
+            /** @description When the customer first opened the pay link. */
+            pay_link_opened_at: string | null;
+            /** @description A payment page URL entered by hand (payment link mode). */
+            manual_pay_url: string | null;
             lines: {
                 id: string;
                 description: string;
@@ -19401,6 +20086,32 @@ export interface components {
             transfers_paired: number;
             rules_applied: number;
         } | null;
+        OnlinePaymentSettings: {
+            /** @enum {string} */
+            provider: "off" | "manual_link" | "stripe";
+            /** @description A Stripe key is stored. Keys are never returned. */
+            secret_key_set: boolean;
+            webhook_secret_set: boolean;
+            /**
+             * @description `registered`: Cosimo created the webhook endpoint; `manual`: a signing secret was pasted; `polling`: no webhook, Cosimo checks every 15 minutes.
+             * @enum {string|null}
+             */
+            webhook_mode: "registered" | "manual" | "polling" | null;
+            /** @description The webhook URL for this org; null without a public HTTPS URL. */
+            webhook_url: string | null;
+            methods: ("card" | "us_bank_account" | "customer_balance")[];
+            account_name: string | null;
+            /** @description False for a test-mode key. */
+            livemode: boolean | null;
+            clearing_account_id: string | null;
+            fee_account_id: string | null;
+            online_pay_default: boolean;
+            last_event_at: string | null;
+        };
+        PaymentConnectionTest: {
+            account_name: string;
+            livemode: boolean;
+        };
         InstanceStatus: {
             version: string;
             commit: string;

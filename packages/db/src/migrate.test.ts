@@ -105,7 +105,7 @@ test("0003 moves recurring invoices to recurring templates, back-fills runs, and
       args: [id, `INV-${id}`, date, date, rid, sent],
     });
 
-  expect(await migrate(client, orgMigrations)).toEqual(["0003_recurring_templates"]);
+  expect(await migrate(client, orgMigrations.slice(0, upTo + 1))).toEqual(["0003_recurring_templates"]);
   const rs = await client.execute(
     "SELECT id, kind, contact_id, run_mode, status, unit, interval, anchor_day, start_date, end_date, next_index, next_date, last_run_date FROM recurring_templates ORDER BY id",
   );
@@ -179,6 +179,45 @@ test("0003 moves recurring invoices to recurring templates, back-fills runs, and
   expect(Number(old.rows[0]!.n)).toBe(0);
   const billCols = await client.execute("SELECT name FROM pragma_table_info('bills')");
   expect(billCols.rows.map((r) => r.name)).toContain("recurring_id");
+});
+
+test("0004 adds online payment settings, invoice pay-link columns, and the provider tables", async () => {
+  const upTo = orgMigrations.findIndex((m) => m.tag === "0004_online_payments");
+  expect(upTo).toBeGreaterThan(0);
+  expect(await migrate(client, orgMigrations.slice(0, upTo))).toEqual([]);
+  expect(await migrate(client, orgMigrations.slice(0, upTo + 1))).toEqual(["0004_online_payments"]);
+  const cols = async (t: string) =>
+    (await client.execute(`SELECT name FROM pragma_table_info('${t}')`)).rows.map((r) => String(r.name));
+  expect(await cols("org_settings")).toEqual(
+    expect.arrayContaining([
+      "payment_provider",
+      "payment_credentials_enc",
+      "payment_options_json",
+      "payment_clearing_account_id",
+      "payment_fee_account_id",
+      "online_pay_default",
+    ]),
+  );
+  expect(await cols("invoices")).toEqual(
+    expect.arrayContaining(["online_pay_enabled", "manual_pay_url", "pay_token_version", "pay_token_hash"]),
+  );
+  // Existing invoices keep working: online payment off, no link yet.
+  const inv = await client.execute(
+    "SELECT online_pay_enabled, pay_token_version FROM invoices WHERE id = 'i1'",
+  );
+  expect(inv.rows[0]).toMatchObject({ online_pay_enabled: 0, pay_token_version: 0 });
+
+  await client.execute(
+    "INSERT INTO payments (id, direction, contact_id, date, amount, bank_account_id) VALUES ('p1', 'received', 'c1', '2026-05-01', 100, 'p')",
+  );
+  const pp =
+    "INSERT INTO provider_payments (provider, provider_payment_id, payment_id, gross) VALUES ('stripe', 'pi_1', 'p1', 100)";
+  await client.execute(pp);
+  // The same provider payment can't be recorded twice.
+  await expect(client.execute(pp)).rejects.toThrow(/UNIQUE/);
+  const ev = "INSERT INTO provider_events (id, provider, event_id, type) VALUES (?, 'stripe', 'evt_1', 'x')";
+  await client.execute({ sql: ev, args: ["e1"] });
+  await expect(client.execute({ sql: ev, args: ["e2"] })).rejects.toThrow(/UNIQUE/);
 });
 
 test("0001_known_randall (system) backfills is_sample for the existing demo org by name", async () => {

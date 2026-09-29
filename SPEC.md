@@ -379,6 +379,7 @@ Owners can change policies. For example: "auto-approve MCP categorizations under
 - Optional reminder emails for overdue invoices, off by default.
 - Partial payments and overpayments supported. Overpayment creates a customer credit applicable to future invoices.
 - Recurring invoice templates are a SHOULD for v1.
+- Online payments (#55), behind a payment provider interface with Stripe first (see `docs/stripe.md`). An owner adds their own Stripe key and chooses card, ACH Direct Debit, and US bank transfer for the org. Each invoice can offer a "Pay online" link, printed and linked on the PDF and in the email. The link redirects to a Stripe Checkout session for the balance due; paid, processing, draft, and void invoices get a small status page instead. The link's token is derived from the master key and only its SHA-256 is stored. Payments are recorded by the `integration` actor into a clearing account, with Stripe's fee posted against it, and never twice (unique provider payment ID). They auto-approve by default, subject to the threshold and review policies; a payment that doesn't match an open invoice (unknown, void, already paid, or overpaid) always goes to review. A `manual_link` mode prints a pasted payment URL instead. Refunds, disputes, payout matching, and unapplied cash balances come later.
 
 ### 8.2 Bills and Vendors
 
@@ -491,12 +492,12 @@ The MCP endpoint MUST support OAuth 2.1 per the MCP authorization specification,
 
 ## 12. Security
 
-- A **master key** (32 random bytes) is generated at setup and stored in the instance config file with mode 0600, or supplied through the `COSIMO_MASTER_KEY` environment variable. It encrypts Plaid secrets, Plaid access tokens, Turso tokens, TOTP secrets, and SMTP passwords using AES-256-GCM.
+- A **master key** (32 random bytes) is generated at setup and stored in the instance config file with mode 0600, or supplied through the `COSIMO_MASTER_KEY` environment variable. It encrypts Plaid secrets, Plaid access tokens, Stripe keys and webhook signing secrets, Turso tokens, TOTP secrets, and SMTP passwords using AES-256-GCM.
 - Setup MUST tell the user plainly that losing the master key makes stored bank connections unrecoverable, and MUST print where it is stored.
 - CSRF protection for cookie-authenticated requests.
 - Rate limiting on login, password reset, claim links, and invitation acceptance.
 - Security headers: CSP, HSTS when served over HTTPS, frame denial, no sniffing.
-- Webhook signature verification for Plaid.
+- Webhook signature verification for Plaid and for Stripe (`Stripe-Signature` HMAC-SHA256 with the endpoint's signing secret, 5-minute tolerance). Each Stripe event is stored once by its ID.
 - OAuth tokens, codes, and client secrets are stored hashed. Rate limiting also covers dynamic client registration and token endpoints.
 - Secrets never appear in logs, API responses, error messages, or exports. Export files include a flag noting secrets were omitted.
 - Uploaded attachments are served with `Content-Disposition: attachment` unless they are images or PDFs, and are never executed.
@@ -829,6 +830,6 @@ Resolve these before or at the start of the build session. Defaults apply if not
 | License | MIT for maximum adoption. AGPL-3.0 is the alternative if you want hosted forks to share changes. |
 | Multi-currency in v1 | Out |
 | Recurring invoices in v1 | Included as a SHOULD |
-| Online invoice payments (Stripe or similar) | Out of v1. The invoice PDF shows payment instructions. |
+| Online invoice payments (Stripe or similar) | Added after v1 (#55): the org's own Stripe account through Checkout, behind a provider interface, plus a pasted payment link mode. See §8.1. |
 | Receipt OCR | Out of v1. Attachments only. |
 | Windows as a server target | Local only in v1 |

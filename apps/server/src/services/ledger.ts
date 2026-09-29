@@ -51,6 +51,11 @@ export interface SubmitOptions {
   forcePost?: boolean;
   /** Extra context stored with a review item (e.g. the bank transaction being categorized). */
   reviewContext?: Record<string, unknown>;
+  /**
+   * Hold for review with this reason whatever the policy says (e.g. a provider payment that doesn't
+   * match an open invoice). Ignored with `forcePost`.
+   */
+  requireReview?: string;
 }
 
 export interface EntryView {
@@ -352,7 +357,7 @@ export async function submitDraftTx(
     return { entry: posted, decision: null, reviewItemId: null };
   }
   const s = await settingsRow(tx);
-  const decision = decide(
+  let decision = decide(
     {
       actor: a.actor,
       itemType: opts.itemType ?? "journal_entry",
@@ -364,6 +369,9 @@ export async function submitDraftTx(
     await policyRules(tx),
     s.reviewThreshold,
   );
+  if (opts.requireReview) {
+    decision = { action: "require_review", reason: opts.requireReview, ruleId: null };
+  }
   if (decision.action === "auto_approve") {
     // Lock dates are checked before posting so the caller gets a clear message; the trigger
     // enforces the same rule.

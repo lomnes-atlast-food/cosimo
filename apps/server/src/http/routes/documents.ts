@@ -49,6 +49,7 @@ import {
   voidPaymentTx,
 } from "../../services/documents.ts";
 import { emailInvoice, invoicePdf } from "../../services/invoice-delivery.ts";
+import { payLinker, storePayTokenHashesTx } from "../../services/online-payments.ts";
 import type { BlobStore } from "../../services/storage.ts";
 import { badRequest, notFound } from "../errors.ts";
 import { requireWriter } from "../middleware.ts";
@@ -111,7 +112,7 @@ const DocLine = z.object({
   account_id: Id,
 });
 
-const InvoiceSchema = z
+export const InvoiceSchema = z
   .object({
     id: z.string(),
     number: z.string(),
@@ -137,6 +138,19 @@ const InvoiceSchema = z
     sent_at: z.string().nullable(),
     last_reminder_at: z.string().nullable(),
     voided_at: z.string().nullable(),
+    online_payment_enabled: z.boolean().describe("Whether the invoice offers the online pay link."),
+    pay_url: z
+      .string()
+      .nullable()
+      .describe(
+        "The customer's pay link (online payments through the org's Stripe account); null when there is none.",
+      ),
+    online_pay_status: z
+      .enum(["processing"])
+      .nullable()
+      .describe("`processing` while a bank payment is on its way; null otherwise."),
+    pay_link_opened_at: z.string().nullable().describe("When the customer first opened the pay link."),
+    manual_pay_url: z.string().nullable().describe("A payment page URL entered by hand (payment link mode)."),
     lines: z.array(
       z.object({
         id: z.string(),
@@ -157,6 +171,19 @@ const InvoiceInput = z.object({
   terms: z.string().max(100).nullable().optional(),
   memo: z.string().max(2000).nullable().optional(),
   lines: z.array(DocLine).min(1).max(200),
+  online_pay_enabled: z
+    .boolean()
+    .optional()
+    .openapi({ description: "Offer the online pay link. Defaults to the organization's setting." }),
+  manual_pay_url: z
+    .string()
+    .trim()
+    .max(500)
+    .url()
+    .refine((u) => /^https?:\/\//i.test(u), "Use an http or https URL")
+    .nullable()
+    .optional()
+    .openapi({ description: "Payment link mode: a payment page URL shown on the PDF and email." }),
 });
 
 const BillSchema = z
@@ -377,17 +404,23 @@ export function documentRoutes() {
     }),
     async (c) => {
       const q = c.req.valid("query");
-      const db = c.get("org").handle.db;
+      const o = c.get("org");
+      const db = o.handle.db;
+      const link = await payLinker(c.get("ctx"), db, o.id);
       const data =
         q.open === "true"
-          ? ((await openDocuments(db, "invoice", q.customer_id)) as InvoiceView[])
-          : await listInvoices(db, {
-              status: q.status?.split(",").filter(Boolean),
-              customerId: q.customer_id,
-              from: q.from,
-              to: q.to,
-              overdue: q.overdue === "true",
-            });
+          ? ((await openDocuments(db, "invoice", q.customer_id, link)) as InvoiceView[])
+          : await listInvoices(
+              db,
+              {
+                status: q.status?.split(",").filter(Boolean),
+                customerId: q.customer_id,
+                from: q.from,
+                to: q.to,
+                overdue: q.overdue === "true",
+              },
+              link,
+            );
       return c.json({ data: data }, 200);
     },
   );
@@ -404,7 +437,10 @@ export function documentRoutes() {
     async (c) => {
       const o = requireWriter(c);
       const inv = await o.handle.write((tx) => createInvoiceTx(tx, o.id, o.actor, c.req.valid("json")));
-      return c.json(await invoiceView(o.handle.db, inv), 201);
+      return c.json(
+        await invoiceView(o.handle.db, inv, await payLinker(c.get("ctx"), o.handle.db, o.id)),
+        201,
+      );
     },
   );
   r.openapi(
@@ -418,9 +454,14 @@ export function documentRoutes() {
       responses: { 200: json(InvoiceSchema), ...errorResponses },
     }),
     async (c) => {
-      const db = c.get("org").handle.db;
+      const o = c.get("org");
+      const db = o.handle.db;
       return c.json(
-        await invoiceView(db, await mustGetInvoice(db, c.req.valid("param").invoiceId as string)),
+        await invoiceView(
+          db,
+          await mustGetInvoice(db, c.req.valid("param").invoiceId as string),
+          await payLinker(c.get("ctx"), db, o.id),
+        ),
         200,
       );
     },
@@ -439,7 +480,10 @@ export function documentRoutes() {
       const o = requireWriter(c);
       const id = c.req.valid("param").invoiceId as string;
       const inv = await o.handle.write((tx) => updateInvoiceTx(tx, o.id, o.actor, id, c.req.valid("json")));
-      return c.json(await invoiceView(o.handle.db, inv), 200);
+      return c.json(
+        await invoiceView(o.handle.db, inv, await payLinker(c.get("ctx"), o.handle.db, o.id)),
+        200,
+      );
     },
   );
   r.openapi(
@@ -477,12 +521,19 @@ export function documentRoutes() {
     async (c) => {
       const o = requireWriter(c);
       const id = c.req.valid("param").invoiceId as string;
-      const res = await o.handle.write((tx) =>
-        finalizeInvoiceTx(tx, o.id, o.actor, id, {
+      const ctx = c.get("ctx");
+      const res = await o.handle.write(async (tx) => {
+        const r = await finalizeInvoiceTx(tx, o.id, o.actor, id, {
           lockOverrideNote: c.req.valid("json").lock_override_note,
-        }),
+        });
+        await storePayTokenHashesTx(ctx, tx, o.id);
+        return r;
+      });
+      const inv = await invoiceView(
+        o.handle.db,
+        await mustGetInvoice(o.handle.db, id),
+        await payLinker(ctx, o.handle.db, o.id),
       );
-      const inv = await invoiceView(o.handle.db, await mustGetInvoice(o.handle.db, id));
       return c.json({ invoice: inv, ...submitInfo(res) }, 200);
     },
   );
@@ -517,14 +568,22 @@ export function documentRoutes() {
       const current = await mustGetInvoice(o.handle.db, id);
       const waiting = (await invoiceView(o.handle.db, current)).entry_status === "pending_review";
       if (current.status === "draft" && !waiting)
-        res = await o.handle.write((tx) => finalizeInvoiceTx(tx, o.id, o.actor, id));
+        res = await o.handle.write(async (tx) => {
+          const r = await finalizeInvoiceTx(tx, o.id, o.actor, id);
+          await storePayTokenHashesTx(ctx, tx, o.id);
+          return r;
+        });
       let to: string | null = null;
       const after = await mustGetInvoice(o.handle.db, id);
       if (after.status !== "draft") {
         to = (await emailInvoice(ctx, o.handle.db, o.id, id, { to: b.to, message: b.message })).to;
         await o.handle.write((tx) => markInvoiceSentTx(tx, o.id, o.actor, id, to));
       }
-      const inv = await invoiceView(o.handle.db, await mustGetInvoice(o.handle.db, id));
+      const inv = await invoiceView(
+        o.handle.db,
+        await mustGetInvoice(o.handle.db, id),
+        await payLinker(ctx, o.handle.db, o.id),
+      );
       return c.json(
         {
           invoice: inv,
@@ -551,7 +610,14 @@ export function documentRoutes() {
       const o = requireWriter(c);
       const id = c.req.valid("param").invoiceId as string;
       await o.handle.write((tx) => voidInvoiceTx(tx, o.id, o.actor, id, c.req.valid("json").date));
-      return c.json(await invoiceView(o.handle.db, await mustGetInvoice(o.handle.db, id)), 200);
+      return c.json(
+        await invoiceView(
+          o.handle.db,
+          await mustGetInvoice(o.handle.db, id),
+          await payLinker(c.get("ctx"), o.handle.db, o.id),
+        ),
+        200,
+      );
     },
   );
   r.openapi(

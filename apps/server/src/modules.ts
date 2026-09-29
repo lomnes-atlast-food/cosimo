@@ -10,12 +10,14 @@ import { exportRoutes } from "./http/routes/exports.ts";
 import { ledgerRoutes } from "./http/routes/ledger.ts";
 import { mountMcp } from "./http/routes/mcp.ts";
 import { mountOAuth, oauthRoutes } from "./http/routes/oauth.ts";
+import { mountPay, onlinePaymentRoutes } from "./http/routes/online-payments.ts";
 import { operationsRoutes } from "./http/routes/operations.ts";
 import { plaidRoutes } from "./http/routes/plaid.ts";
 import { recurringRoutes } from "./http/routes/recurring.ts";
 import { registerBankingJobs } from "./jobs/banking-jobs.ts";
 import { registerDocumentJobs } from "./jobs/document-jobs.ts";
 import { registerOpsJobs } from "./jobs/ops-jobs.ts";
+import { registerPaymentJobs } from "./jobs/payment-jobs.ts";
 import { registerPlaidJobs } from "./jobs/plaid-jobs.ts";
 import { Mailer } from "./services/mailer.ts";
 import { OAuthService } from "./services/oauth.ts";
@@ -59,6 +61,13 @@ registerContextPlugin(() => {
   registerPlaidJobs();
 });
 registerApiModule(plaidRoutes);
+
+// Online invoice payments (#55): provider settings, pay links, webhooks, and polling
+registerContextPlugin(() => {
+  registerPaymentJobs();
+});
+registerApiModule(onlinePaymentRoutes);
+registerRootMount(mountPay);
 
 // Phase 7: operations
 registerContextPlugin((ctx) => {

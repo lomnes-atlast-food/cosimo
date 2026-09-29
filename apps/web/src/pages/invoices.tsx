@@ -391,6 +391,9 @@ function InvoiceEditor({ invoice, onDone }: { invoice: Invoice | null; onDone: (
   const [terms, setTerms] = useState(invoice?.terms ?? "");
   const [due, setDue] = useState(invoice?.due_date ?? "");
   const [memo, setMemo] = useState(invoice?.memo ?? "");
+  const [onlinePay, setOnlinePay] = useState<boolean | null>(invoice?.online_payment_enabled ?? null);
+  const [manualUrl, setManualUrl] = useState(invoice?.manual_pay_url ?? "");
+  const payMode = org.data?.settings.payment_provider ?? "off";
   const [lines, setLines] = useState<EditLine[]>(
     invoice?.lines.map((l) => ({
       key: ++lk,
@@ -417,6 +420,8 @@ function InvoiceEditor({ invoice, onDone }: { invoice: Invoice | null; onDone: (
     due_date: due || null,
     terms: terms || null,
     memo: memo || null,
+    ...(payMode === "stripe" && onlinePay !== null ? { online_pay_enabled: onlinePay } : {}),
+    ...(payMode === "manual_link" ? { manual_pay_url: manualUrl.trim() || null } : {}),
     lines: lines
       .filter((l) => l.description || l.price)
       .map((l) => ({
@@ -479,6 +484,29 @@ function InvoiceEditor({ invoice, onDone }: { invoice: Invoice | null; onDone: (
       <Field label="Notes to the customer">
         {(id) => <Textarea id={id} rows={2} value={memo} onChange={(e) => setMemo(e.target.value)} />}
       </Field>
+      {payMode === "stripe" && (
+        <label className="flex items-center gap-2 text-sm">
+          <input
+            type="checkbox"
+            checked={onlinePay ?? org.data?.settings.online_pay_default ?? false}
+            onChange={(e) => setOnlinePay(e.target.checked)}
+          />
+          Accept online payment (adds a "Pay online" link to the PDF and email)
+        </label>
+      )}
+      {payMode === "manual_link" && (
+        <Field label="Payment link" hint="A payment page URL, printed on the PDF and in the email.">
+          {(id) => (
+            <Input
+              id={id}
+              type="url"
+              value={manualUrl}
+              onChange={(e) => setManualUrl(e.target.value)}
+              placeholder="https://"
+            />
+          )}
+        </Field>
+      )}
       {invalid && <Alert kind="error">Check the quantities and rates.</Alert>}
       <ErrorText error={save.error} />
       <Button type="submit" loading={save.isPending} disabled={!customer || invalid}>
@@ -506,12 +534,102 @@ export function NewInvoicePage() {
   );
 }
 
+// ----------------------------------------------------------------------------- online payment
+
+/** The pay link on a finalized invoice: copy it, see whether the customer opened it, rotate it. */
+function OnlinePayCard({
+  inv,
+  livemode,
+  onChange,
+}: {
+  inv: Invoice;
+  livemode: boolean | null;
+  onChange: () => Promise<void>;
+}) {
+  const orgId = useOrgId();
+  const { canWrite, isOwner } = useRole();
+  const [copied, setCopied] = useState(false);
+  const params = { path: { orgId, invoiceId: inv.id } };
+  const toggle = useMutation({
+    mutationFn: (enabled: boolean) =>
+      unwrap(api.POST("/api/v1/orgs/{orgId}/invoices/{invoiceId}/online-pay", { params, body: { enabled } })),
+    onSuccess: onChange,
+  });
+  const rotate = useMutation({
+    mutationFn: () =>
+      unwrap(api.POST("/api/v1/orgs/{orgId}/invoices/{invoiceId}/rotate-pay-link", { params })),
+    onSuccess: onChange,
+  });
+  const copy = async () => {
+    if (!inv.pay_url) return;
+    await navigator.clipboard.writeText(inv.pay_url);
+    setCopied(true);
+    setTimeout(() => setCopied(false), 2000);
+  };
+  return (
+    <Card
+      title="Online payment"
+      actions={
+        <>
+          {livemode === false && <Badge tone="amber">Test mode</Badge>}
+          {inv.online_pay_status === "processing" && <Badge tone="blue">Payment processing</Badge>}
+        </>
+      }
+    >
+      <div className="space-y-3 text-sm">
+        {inv.pay_url ? (
+          <>
+            <div className="flex flex-wrap items-center gap-2">
+              <code className="min-w-0 flex-1 break-all rounded bg-zinc-50 px-2 py-1 text-xs dark:bg-zinc-800">
+                {inv.pay_url}
+              </code>
+              <Button size="sm" variant="secondary" onClick={copy}>
+                {copied ? "Copied" : "Copy link"}
+              </Button>
+            </div>
+            <p className="text-zinc-600 dark:text-zinc-400">
+              {inv.pay_link_opened_at
+                ? `The customer opened the link on ${fmtDateTime(inv.pay_link_opened_at)}.`
+                : "The customer hasn't opened the link yet."}
+            </p>
+          </>
+        ) : (
+          <p className="text-zinc-600 dark:text-zinc-400">
+            {inv.online_payment_enabled
+              ? "The pay link appears once the invoice is posted."
+              : "This invoice doesn't offer online payment."}
+          </p>
+        )}
+        {canWrite && (
+          <div className="flex flex-wrap gap-2">
+            <Button
+              size="sm"
+              variant="secondary"
+              loading={toggle.isPending}
+              onClick={() => toggle.mutate(!inv.online_payment_enabled)}
+            >
+              {inv.online_payment_enabled ? "Turn off online payment" : "Accept online payment"}
+            </Button>
+            {isOwner && inv.pay_url && (
+              <Button size="sm" variant="ghost" loading={rotate.isPending} onClick={() => rotate.mutate()}>
+                Replace link
+              </Button>
+            )}
+          </div>
+        )}
+        <ErrorText error={toggle.error || rotate.error} />
+      </div>
+    </Card>
+  );
+}
+
 // ----------------------------------------------------------------------------- detail
 
 export function InvoicePage() {
   const orgId = useOrgId();
   const { invoiceId } = useParams({ strict: false }) as { invoiceId: string };
   const { canWrite } = useRole();
+  const org = useOrg();
   const qc = useQueryClient();
   const navigate = useNavigate();
   const [editing, setEditing] = useState(false);
@@ -671,6 +789,9 @@ export function InvoicePage() {
           </dl>
           {inv.memo && <p className="mt-3 text-sm text-zinc-600 dark:text-zinc-400">{inv.memo}</p>}
         </Card>
+        {org.data?.settings.payment_provider === "stripe" && inv.status !== "void" && (
+          <OnlinePayCard inv={inv} livemode={org.data.settings.payment_livemode} onChange={refresh} />
+        )}
         {(payments.data?.length ?? 0) > 0 && (
           <Card title="Payments">
             <ul className="divide-y divide-zinc-100 text-sm dark:divide-zinc-800">
@@ -694,6 +815,21 @@ export function InvoicePage() {
               <dt className="text-xs uppercase text-zinc-500">Sent</dt>
               <dd>{inv.sent_at ? fmtDateTime(inv.sent_at) : "Not emailed"}</dd>
             </div>
+            {inv.manual_pay_url && (
+              <div>
+                <dt className="text-xs uppercase text-zinc-500">Payment link</dt>
+                <dd>
+                  <a
+                    href={inv.manual_pay_url}
+                    target="_blank"
+                    rel="noreferrer"
+                    className="break-all underline"
+                  >
+                    {inv.manual_pay_url}
+                  </a>
+                </dd>
+              </div>
+            )}
             {inv.entry_id && (
               <div>
                 <dt className="text-xs uppercase text-zinc-500">Journal entry</dt>

@@ -3,6 +3,8 @@ import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { chmodSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { org } from "@cosimo/db";
+import { eq } from "drizzle-orm";
 import { loadConfig } from "../src/config.ts";
 import { createContext } from "../src/context.ts";
 import { silentLogger } from "../src/logger.ts";
@@ -177,5 +179,76 @@ describe("doctor with backups.mode = 's3' (fake bucket)", () => {
     const r = await runDoctor({ configPath: s3ConfigPath, env: {}, fetchImpl: up, bucket });
     expect(byId(r).backup_bucket).toMatchObject({ status: "fail" });
     expect(byId(r).backup_bucket!.remediation).toContain("retention lock");
+  });
+});
+
+describe("doctor with online payments through Stripe", () => {
+  const payDir = mkdtempSync(join(tmpdir(), "cosimo-doctor-pay-"));
+  const payConfigPath = join(payDir, "config.toml");
+  let payOrg: string;
+
+  beforeAll(async () => {
+    const r = resolveAnswers(
+      {
+        admin_email: "doc-pay@example.com",
+        org_name: "Doctor Pay Co",
+        data_dir: payDir,
+        service: false,
+        port: 18997,
+      },
+      {},
+      { json: true, today: "2026-09-25", homeDataDir: payDir, tursoOrg: null, tursoToken: null },
+    );
+    payOrg = (await applyInit(r.answers, { env: {} })).org_id!;
+  });
+  afterAll(() => rmSync(payDir, { recursive: true, force: true }));
+
+  async function useKey(key: string) {
+    const ctx = await createContext(loadConfig(payConfigPath, {}).effective, {
+      logger: silentLogger,
+      env: {},
+    });
+    const h = await ctx.orgs.mustOpen(payOrg);
+    await h.write((tx) =>
+      tx
+        .update(org.orgSettings)
+        .set({
+          paymentProvider: "stripe",
+          paymentCredentialsEnc: ctx.secrets.encrypt(
+            JSON.stringify({ secret_key: key, webhook_secret: null, webhook_endpoint_id: null }),
+          ),
+        })
+        .where(eq(org.orgSettings.id, 1)),
+    );
+    await ctx.close();
+  }
+
+  test("checks the key through the injected fetch, reports mode and polling, and warns on a live key without HTTPS", async () => {
+    const seen: string[] = [];
+    const stripeUp = (async (url: string) => {
+      seen.push(String(url));
+      return new Response(
+        JSON.stringify(String(url).includes("stripe") ? { id: "acct_1" } : { status: "ok" }),
+      );
+    }) as unknown as typeof fetch;
+    await useKey(`${"rk_"}test_abcdefghijklmnopqrstuvwxyz`);
+    const test = byId(await runDoctor({ configPath: payConfigPath, env: {}, fetchImpl: stripeUp }));
+    expect(test.stripe).toMatchObject({ status: "pass" });
+    expect(test.stripe!.message).toContain("test mode");
+    expect(test.stripe!.message).toContain("polling");
+    expect(seen).toContain("https://api.stripe.com/v1/account");
+
+    await useKey(`${"sk_"}live_abcdefghijklmnopqrstuvwxyz`);
+    const live = byId(await runDoctor({ configPath: payConfigPath, env: {}, fetchImpl: stripeUp }));
+    expect(live.stripe).toMatchObject({ status: "warn" });
+    expect(live.stripe!.message).toContain("not HTTPS");
+
+    const rejected = (async (url: string) =>
+      String(url).includes("stripe")
+        ? new Response(JSON.stringify({ error: { message: "Invalid API Key provided" } }), { status: 401 })
+        : new Response('{"status":"ok"}')) as unknown as typeof fetch;
+    const bad = byId(await runDoctor({ configPath: payConfigPath, env: {}, fetchImpl: rejected }));
+    expect(bad.stripe).toMatchObject({ status: "fail" });
+    expect(bad.stripe!.message).not.toContain("abcdefghij");
   });
 });

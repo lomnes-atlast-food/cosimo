@@ -44,6 +44,7 @@ const SECRET_PATTERNS: { reason: string; re: RegExp }[] = [
     re: /\b(?:access|public|link|processor)-(?:sandbox|development|production)-[0-9a-z-]{8,}/i,
   },
   { reason: "a provider API key", re: /\b(?:sk|rk)_(?:live|test)_[A-Za-z0-9]{10,}|\bAKIA[0-9A-Z]{16}\b/ },
+  { reason: "a webhook signing secret", re: /\bwhsec_[A-Za-z0-9]{10,}/ },
   { reason: "a GitHub token", re: /\bgh[pousr]_[A-Za-z0-9]{20,}/ },
   {
     reason: "a password or API key",

@@ -36,7 +36,7 @@ Read:
 | `list_uncategorized_transactions`, `search_transactions` | Bank and card transactions |
 | `get_entry`, `list_entries` | Journal entries, with account and contact names filled in and whether each has an attachment |
 | `list_contacts` | Customers and vendors; pass `include_archived` to see archived ones too |
-| `list_invoices`, `list_bills`, `list_bill_payments` | Invoices to customers, bills from vendors, and payments sent to vendors |
+| `list_invoices`, `list_bills`, `list_bill_payments` | Invoices to customers (with the online pay link and whether a bank payment is processing), bills from vendors, and payments sent to vendors |
 | `list_pending_reviews`, `get_review_item` | The review queue |
 | `list_recurring_templates` | Recurring invoices, bills, and journal entries: schedule, next and upcoming dates, run mode, total, last error, and any change waiting for review |
 

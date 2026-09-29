@@ -37,6 +37,7 @@ const ACTOR_LABEL: Record<string, string> = {
   rule: "Rule",
   user: "Person",
   system: "System",
+  integration: "Payment provider",
 };
 
 export function ReviewQueuePage() {

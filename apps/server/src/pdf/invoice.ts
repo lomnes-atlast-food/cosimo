@@ -3,6 +3,7 @@ import {
   type PDFFont,
   type PDFImage,
   type PDFPage,
+  PDFString,
   type RGB,
   rgb,
   StandardFonts,
@@ -35,6 +36,8 @@ export interface InvoicePdfData {
   customer: { name: string; email: string | null; address: Record<string, string> | null };
   lines: { description: string; quantityMilli: number; unitPrice: number; amount: number }[];
   paymentInstructions: string | null;
+  /** The online pay link (or a payment link entered by hand); printed and clickable. */
+  payUrl?: string | null;
 }
 
 const W = 612;
@@ -85,6 +88,23 @@ function text(
   const t = toWinAnsi(s).replace(/\n/g, " ");
   const dx = align === "right" ? font.widthOfTextAtSize(t, size) : 0;
   page.drawText(t, { x: x - dx, y, size, font, color });
+}
+
+/** Make a rectangle of the page open `url` when clicked (a PDF URI link annotation). */
+export function linkAnnotation(
+  doc: PDFDocument,
+  page: PDFPage,
+  rect: { x: number; y: number; width: number; height: number },
+  url: string,
+) {
+  const annot = doc.context.obj({
+    Type: "Annot",
+    Subtype: "Link",
+    Rect: [rect.x, rect.y, rect.x + rect.width, rect.y + rect.height],
+    Border: [0, 0, 0],
+    A: { Type: "Action", S: "URI", URI: PDFString.of(url) },
+  });
+  page.node.addAnnot(doc.context.register(annot));
 }
 
 async function embedLogo(doc: PDFDocument, logo: InvoicePdfData["org"]["logo"]): Promise<PDFImage | null> {
@@ -316,6 +336,29 @@ export async function renderInvoicePdf(d: InvoicePdfData): Promise<Uint8Array> {
     y -= 10;
   };
   section("NOTES", d.invoice.memo);
+  const payUrl = d.payUrl?.trim();
+  if (payUrl && /^https?:\/\//i.test(payUrl) && d.invoice.status !== "paid" && d.invoice.status !== "void") {
+    const lines = wrapText(payUrl, f.regular, 9.5, CONTENT_W);
+    if (y - 14 - lh * (lines.length + 1) < BOTTOM) newPage();
+    y -= 4;
+    text(page, "PAY ONLINE", M, y, f.bold, 8, MUTED);
+    y -= 14;
+    text(page, "Pay securely online:", M, y, f.regular, 9.5);
+    y -= lh;
+    for (const l of lines) {
+      text(page, l, M, y, f.regular, 9.5, accent);
+      const w = f.regular.widthOfTextAtSize(l, 9.5);
+      page.drawLine({
+        start: { x: M, y: y - 1.5 },
+        end: { x: M + w, y: y - 1.5 },
+        thickness: 0.5,
+        color: accent,
+      });
+      linkAnnotation(doc, page, { x: M, y: y - 3, width: w, height: lh }, payUrl);
+      y -= lh;
+    }
+    y -= 10;
+  }
   section("PAYMENT INSTRUCTIONS", d.paymentInstructions);
 
   const pages = doc.getPages();

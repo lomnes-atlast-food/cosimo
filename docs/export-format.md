@@ -84,6 +84,7 @@ The tables most readers want:
 | `invoices`, `invoice_lines` | Receivables; `entry_id` links the posted entry |
 | `bills`, `bill_lines` | Payables |
 | `payments`, `payment_applications` | Payments received and made, and which documents they settle |
+| `provider_payments`, `provider_events`, `provider_customers` | Online payments: each Stripe payment recorded (with its fee entry), webhook events received, and each contact's Stripe customer |
 | `bank_accounts`, `bank_transactions` | Bank and card accounts and their imported or synced transactions |
 | `reconciliations`, `reconciliation_items` | Completed and in-progress reconciliations |
 | `rules`, `review_items`, `review_policy` | Categorization rules and the review queue |
@@ -99,10 +100,12 @@ whose entry has `status = "posted"`.
 
 ## What is left out
 
-- **Secrets.** `bank_connections.access_token_enc` is exported as an empty string and
-  `org_settings.plaid_secret_enc` as `null`, and the manifest says `"secrets_omitted": true`. After
-  an import, reconnect each bank feed (Settings → Bank feeds) and re-enter any per-organization
-  Plaid keys.
+- **Secrets.** `bank_connections.access_token_enc` is exported as an empty string, and
+  `org_settings.plaid_secret_enc` and `org_settings.payment_credentials_enc` (the Stripe key and
+  webhook secret) as `null`; the manifest says `"secrets_omitted": true`. After an import, reconnect
+  each bank feed (Settings → Bank feeds) and re-enter any per-organization Plaid keys and the Stripe
+  key (Settings → Online payments). Invoice pay links are derived from the master key, so on another
+  instance they change; only their hashes (`invoices.pay_token_hash`) are exported.
 - **Users.** `members.json` lists members by email and role only. On import, members whose email
   already has an account on the new instance are added with their role; the others are listed as
   skipped. The importing user becomes an owner.
