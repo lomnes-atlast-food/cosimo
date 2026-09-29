@@ -15,7 +15,7 @@
 import { checkLock } from "@cosimo/core";
 import { newId, type OrgDb, type OrgTx, org } from "@cosimo/db";
 import { formatCents } from "@cosimo/shared";
-import { and, desc, eq, gt, inArray, isNotNull, isNull, or } from "drizzle-orm";
+import { and, desc, eq, gt, inArray, isNotNull, isNull, or, sql } from "drizzle-orm";
 import type { AppContext } from "../context.ts";
 import { hashToken } from "../crypto.ts";
 import { ApiError, badRequest, conflict, forbidden, notFound, unprocessable } from "../http/errors.ts";
@@ -26,18 +26,30 @@ import { mustGetContact } from "./contacts.ts";
 import { issuePayLinkTx, mustGetInvoice, type PayLinker, recordPaymentTx } from "./documents.ts";
 import { accountMap, settingsRow, submitEntryTx } from "./ledger.ts";
 import {
+  type CreateSessionInput,
+  offeredMethods,
   type PaymentMethodType,
   type PaymentProvider,
   ProviderError,
   type ProviderEvent,
   providerFor,
   type SessionResult,
+  type SetupCheck,
+  type StoredSetupCheck,
   type StripeSecrets,
+  scrubProviderText,
   stripeOptions,
   stripeSecrets,
   WebhookSignatureError,
 } from "./payment-providers/index.ts";
-import { stripeClient, stripeKeyLivemode, stripeKeyProblem } from "./payment-providers/stripe.ts";
+import {
+  stripeClient,
+  stripeKeyLivemode,
+  stripeKeyProblem,
+  WEBHOOK_EVENTS,
+  WEBHOOK_EVENTS_VERSION,
+  WEBHOOK_WRITE_PERMISSION,
+} from "./payment-providers/stripe.ts";
 import type { OrgHandle } from "./types.ts";
 
 type Reader = OrgDb | OrgTx;
@@ -54,11 +66,25 @@ export const STRIPE_ACTOR: ActorInfo = {
   displayName: "Stripe",
 };
 
+/** How a payment memo names the method ("Paid online by card"). */
 const METHOD_LABEL: Record<string, string> = {
   card: "card",
   us_bank_account: "ACH Direct Debit",
   customer_balance: "bank transfer",
 };
+
+/** The Stripe dashboard's names for the methods (Settings → Payments → Payment methods). */
+export const METHOD_NAME: Record<PaymentMethodType, string> = {
+  card: "Cards",
+  us_bank_account: "ACH Direct Debit",
+  customer_balance: "Bank Transfers",
+};
+
+/** Stripe Checkout's minimum charge in USD: a smaller balance due gets no pay link. */
+export const MIN_ONLINE_PAYMENT_CENTS = 50;
+
+/** Longest pay-link error stored on an invoice. */
+const PAY_ERROR_MAX = 500;
 
 function assertCanManage(a: ActorInfo) {
   if (a.role !== "owner") throw forbidden("Only owners can manage online payments.");
@@ -87,6 +113,7 @@ export async function settingsView(ctx: AppContext, db: Reader, orgId: string) {
     .orderBy(desc(org.providerEvents.receivedAt))
     .limit(1)
     .get();
+  const failed = await lastPayError(db);
   return {
     provider: s.paymentProvider,
     secret_key_set: Boolean(secrets?.secret_key),
@@ -107,9 +134,33 @@ export async function settingsView(ctx: AppContext, db: Reader, orgId: string) {
     fee_account_id: s.paymentFeeAccountId,
     online_pay_default: s.onlinePayDefault,
     last_event_at: last?.at ?? null,
+    setup_check: secrets ? opts.setup_check : null,
+    /** The events Cosimo needs, for an endpoint set up by hand. */
+    webhook_events: [...WEBHOOK_EVENTS],
+    last_pay_error: failed
+      ? { invoice_id: failed.id, number: failed.number, at: failed.payErrorAt, message: failed.payError! }
+      : null,
   };
 }
 export type OnlinePaymentSettingsView = Awaited<ReturnType<typeof settingsView>>;
+
+/** The invoice whose pay link failed most recently, or null. */
+export async function lastPayError(db: Reader) {
+  return (
+    (await db
+      .select({
+        id: org.invoices.id,
+        number: org.invoices.number,
+        payError: org.invoices.payError,
+        payErrorAt: org.invoices.payErrorAt,
+      })
+      .from(org.invoices)
+      .where(isNotNull(org.invoices.payError))
+      .orderBy(desc(org.invoices.payErrorAt))
+      .limit(1)
+      .get()) ?? null
+  );
+}
 
 export async function getSettings(ctx: AppContext, orgId: string, a: ActorInfo) {
   assertCanManage(a);
@@ -154,14 +205,118 @@ export async function testStripeKey(key: string) {
   }
 }
 
+/**
+ * Check what the key can do: every permission Cosimo uses, whether the methods are active, and
+ * whether the webhook endpoint sends every event. Never throws; a failed check reads as unknown.
+ */
+async function checkSetup(key: string, methods: PaymentMethodType[], webhookUrl: string | null) {
+  try {
+    return await stripeClient({ secretKey: key }).checkSetup(methods, webhookUrl);
+  } catch (e) {
+    const detail = `Couldn't check: ${scrubProviderText((e as Error).message)}`;
+    return {
+      permissions: [],
+      methods: methods.map((type) => ({ type, status: "unknown" as const, detail })),
+      missingEvents: null,
+    } satisfies SetupCheck;
+  }
+}
+
+/**
+ * The stored summary of a setup check. Webhook Endpoints: Write only matters when Cosimo registers
+ * the endpoint itself, so it isn't counted for a hand-made endpoint or without a public URL. A
+ * method a checkout showed to be inactive (`previous`, same key) stays inactive until a check sees
+ * it active; a check that can't tell doesn't clear it.
+ */
+export function summarizeSetup(
+  check: SetupCheck,
+  creds: StripeSecrets,
+  webhookUrl: string | null,
+  previous: StoredSetupCheck | null = null,
+): StoredSetupCheck {
+  const manual = Boolean(creds.webhook_secret && !creds.webhook_endpoint_id);
+  const known = new Set(previous?.inactive_methods ?? []);
+  const inactive = (m: SetupCheck["methods"][number]) =>
+    m.status === "inactive" || m.status === "pending" || (m.status === "unknown" && known.has(m.type));
+  return {
+    checked_at: new Date().toISOString(),
+    missing: check.permissions
+      .filter((p) => p.ok === false && !(p.name === WEBHOOK_WRITE_PERMISSION && (manual || !webhookUrl)))
+      .map((p) => p.name),
+    inactive_methods: check.methods.filter(inactive).map((m) => m.type),
+    unknown_methods: check.methods.filter((m) => m.status === "unknown" && !inactive(m)).map((m) => m.type),
+    missing_events: check.missingEvents ?? [],
+  };
+}
+
+/** What an owner should fix, in one paragraph, or null when the check found nothing. */
+export function setupWarning(c: StoredSetupCheck | null): string | null {
+  if (!c) return null;
+  const out: string[] = [];
+  if (c.missing.length)
+    out.push(
+      `The Stripe key is missing permissions: ${c.missing.join(", ")}. Add them to the restricted key in the Stripe dashboard (Developers → API keys), or customers can't pay online.`,
+    );
+  if (c.inactive_methods.length)
+    out.push(
+      `Not active in Stripe: ${c.inactive_methods.map((m) => METHOD_NAME[m]).join(", ")}. Activate them under Settings → Payments → Payment methods in the key's mode, then save or test the connection again; until then checkouts leave them out.`,
+    );
+  if (c.missing_events.length)
+    out.push(
+      `The Stripe webhook endpoint doesn't send: ${c.missing_events.join(", ")}. Add these events to it.`,
+    );
+  return out.length ? out.join(" ") : null;
+}
+
+/** Merge a change into the stored provider options (keeps fields this code doesn't know). */
+async function patchOptionsTx(tx: OrgTx, fn: (o: Record<string, unknown>) => void) {
+  const s = await settingsRow(tx);
+  let o: Record<string, unknown> = {};
+  try {
+    o = s.paymentOptionsJson ? (JSON.parse(s.paymentOptionsJson) as Record<string, unknown>) : {};
+  } catch {
+    // rewritten below
+  }
+  fn(o);
+  await tx
+    .update(org.orgSettings)
+    .set({ paymentOptionsJson: JSON.stringify(o) })
+    .where(eq(org.orgSettings.id, 1));
+}
+
 /** Test the stored key (or a key being entered) without saving. */
 export async function testConnection(ctx: AppContext, orgId: string, a: ActorInfo, key?: string | null) {
   assertCanManage(a);
   const h = await ctx.orgs.mustOpen(orgId);
-  const stored = stripeSecrets(ctx.secrets, await settingsRow(h.db));
+  const s = await settingsRow(h.db);
+  const stored = stripeSecrets(ctx.secrets, s);
   const k = key || stored?.secret_key;
   if (!k) throw unprocessable("Add a Stripe secret key first.", "payments_not_configured");
-  return testStripeKey(k);
+  const acct = await testStripeKey(k);
+  const opts = stripeOptions(s);
+  const url = paymentWebhookUrl(ctx, orgId);
+  const check = await checkSetup(k, opts.methods, url);
+  // Testing the stored key refreshes the stored result, so a fixed method is offered again.
+  if (stored && k === stored.secret_key && s.paymentProvider === "stripe") {
+    const summary = summarizeSetup(check, stored, url, opts.setup_check);
+    await h.write((tx) => patchOptionsTx(tx, (o) => (o.setup_check = summary)));
+  }
+  return {
+    ...acct,
+    permissions: check.permissions,
+    methods: check.methods,
+    missing_events: check.missingEvents,
+  };
+}
+
+/** Bring a registered endpoint's events up to date. Returns an error message, or null when it worked. */
+async function syncWebhookEvents(key: string, endpointId: string): Promise<string | null> {
+  try {
+    await stripeClient({ secretKey: key }).updateWebhook(endpointId, WEBHOOK_EVENTS);
+    return null;
+  } catch (e) {
+    return (e as Error).message;
+  }
 }
 
 async function deleteEndpoint(ctx: AppContext, old: StripeSecrets | null, orgId: string) {
@@ -242,7 +397,8 @@ export async function saveSettings(ctx: AppContext, orgId: string, a: ActorInfo,
   const old = stripeSecrets(ctx.secrets, s);
   const opts = stripeOptions(s);
   let creds: StripeSecrets | null = null;
-  let warning: string | null = null;
+  const warnings: string[] = [];
+  let eventsVersion = opts.webhook_events_version;
   let account: { account_name: string; livemode: boolean } | null = null;
 
   if (input.webhook_secret && !/^whsec_[A-Za-z0-9]+$/.test(input.webhook_secret))
@@ -271,16 +427,32 @@ export async function saveSettings(ctx: AppContext, orgId: string, a: ActorInfo,
           const w = await stripeClient({ secretKey: key }).registerWebhook(url);
           creds.webhook_secret = w.secret;
           creds.webhook_endpoint_id = w.id;
+          eventsVersion = WEBHOOK_EVENTS_VERSION;
         } catch (e) {
-          warning = `Stripe didn't accept the webhook endpoint (${(e as Error).message}). Cosimo checks for payments every 15 minutes instead; you can paste a signing secret from the Stripe dashboard.`;
+          warnings.push(
+            `Stripe didn't accept the webhook endpoint (${(e as Error).message}). Cosimo checks for payments every 15 minutes instead; you can paste a signing secret from the Stripe dashboard.`,
+          );
         }
       }
+    } else if (creds.webhook_endpoint_id && eventsVersion < WEBHOOK_EVENTS_VERSION) {
+      // An endpoint registered by an older release: add the events it lacks.
+      const err = await syncWebhookEvents(key, creds.webhook_endpoint_id);
+      if (err) warnings.push(`Cosimo couldn't update the Stripe webhook endpoint's events (${err}).`);
+      else eventsVersion = WEBHOOK_EVENTS_VERSION;
     }
   } else {
     await deleteEndpoint(ctx, old, orgId);
   }
 
   const methods = input.methods?.length ? [...new Set(input.methods)] : opts.methods;
+  let setupCheck: StoredSetupCheck | null = null;
+  if (creds) {
+    const url = paymentWebhookUrl(ctx, orgId);
+    const previous = creds.secret_key === old?.secret_key ? opts.setup_check : null;
+    setupCheck = summarizeSetup(await checkSetup(creds.secret_key, methods, url), creds, url, previous);
+    const w = setupWarning(setupCheck);
+    if (w) warnings.push(w);
+  }
   await h.write(async (tx) => {
     const before = await settingsView(ctx, tx, orgId);
     const patch: Partial<typeof org.orgSettings.$inferInsert> = {
@@ -290,6 +462,8 @@ export async function saveSettings(ctx: AppContext, orgId: string, a: ActorInfo,
         methods,
         account_name: account?.account_name ?? null,
         livemode: account?.livemode ?? false,
+        setup_check: setupCheck,
+        webhook_events_version: eventsVersion,
       }),
     };
     if (input.online_pay_default !== undefined) patch.onlinePayDefault = input.online_pay_default;
@@ -310,7 +484,8 @@ export async function saveSettings(ctx: AppContext, orgId: string, a: ActorInfo,
       after: await settingsView(ctx, tx, orgId),
     });
   });
-  return { ...(await settingsView(ctx, h.db, orgId)), warning };
+  // Saving never fails over what the check found; the owner is told what to fix.
+  return { ...(await settingsView(ctx, h.db, orgId)), warning: warnings.length ? warnings.join(" ") : null };
 }
 
 // ----------------------------------------------------------------------------- pay links
@@ -323,7 +498,16 @@ export function payUrl(ctx: AppContext, orgId: string, inv: Pick<InvoiceRow, "id
   return `${publicBase(ctx)}/pay/${orgId}/${payToken(ctx, orgId, inv.id, inv.payTokenVersion)}`;
 }
 
-/** Pay link builder for invoice views: only for Stripe, with online payment on, once finalized. */
+/** A balance due Stripe can't take online: more than nothing, but under the Checkout minimum. */
+export function belowOnlineMinimum(inv: Pick<InvoiceRow, "total" | "amountPaid">) {
+  const balance = inv.total - inv.amountPaid;
+  return balance > 0 && balance < MIN_ONLINE_PAYMENT_CENTS;
+}
+
+/**
+ * Pay link builder for invoice views: only for Stripe, with online payment on, once finalized, and
+ * not while the balance due is under Stripe's minimum (the link comes back if the balance rises).
+ */
 export async function payLinker(ctx: AppContext, db: Reader, orgId: string): Promise<PayLinker> {
   const s = await settingsRow(db);
   return (inv) =>
@@ -331,7 +515,8 @@ export async function payLinker(ctx: AppContext, db: Reader, orgId: string): Pro
     inv.onlinePayEnabled &&
     inv.payTokenVersion > 0 &&
     inv.status !== "draft" &&
-    inv.status !== "void"
+    inv.status !== "void" &&
+    !belowOnlineMinimum(inv)
       ? payUrl(ctx, orgId, inv)
       : null;
 }
@@ -390,11 +575,13 @@ export async function rotatePayLink(ctx: AppContext, orgId: string, a: ActorInfo
   return mustGetInvoice(h.db, invoiceId);
 }
 
+type PayPageKind = "unavailable" | "paid" | "processing" | "cancelled" | "too_small";
+
 export type PayPage =
   | { kind: "redirect"; url: string }
   | {
       kind: "page";
-      page: "unavailable" | "paid" | "processing" | "cancelled";
+      page: PayPageKind;
       orgName: string | null;
       invoiceNumber: string | null;
       payUrl?: string;
@@ -438,7 +625,7 @@ export async function openPayLink(
   let inv = await findByToken(ctx, h, orgId, token);
   if (!inv) return UNAVAILABLE;
   const s = await settingsRow(h.db);
-  const page = (p: "unavailable" | "paid" | "processing" | "cancelled"): PayPage => ({
+  const page = (p: PayPageKind): PayPage => ({
     kind: "page",
     page: p,
     orgName: s.dba || reg.name || s.legalName,
@@ -465,6 +652,7 @@ export async function openPayLink(
   if (inv.onlinePayStatus === "processing") return page("processing");
   if (opts.returned === "cancel") return page("cancelled");
   if (opts.returned === "success") return page("processing");
+  if (balance < MIN_ONLINE_PAYMENT_CENTS) return page("too_small");
 
   // Reuse an open session for the same amount, so a double click doesn't make two.
   if (
@@ -485,7 +673,8 @@ export async function openPayLink(
 
   // Close the session this one replaces, so a tab still open on it can't pay (polling only watches
   // the latest session). If it completed meanwhile, record that instead of starting a new one.
-  const prev = (await mustGetInvoice(h.db, inv.id)).paySessionId;
+  const fresh = await mustGetInvoice(h.db, inv.id);
+  const prev = fresh.paySessionId;
   if (prev) {
     await provider.expireSession(prev).catch(() => undefined);
     const r = await reconcileSession(ctx, orgId, prev);
@@ -498,28 +687,127 @@ export async function openPayLink(
   const balanceNow = inv.total - inv.amountPaid;
   if (balanceNow <= 0) return page("paid");
 
-  const customerId = await ensureProviderCustomer(h, provider, inv.customerId);
   const url = payUrl(ctx, orgId, inv);
-  const session = await provider.createSession({
-    orgId,
-    invoice: { id: inv.id, number: inv.number },
-    amount: balanceNow,
-    currency: inv.currency,
-    customerId,
-    methods: stripeOptions(s).methods,
-    successUrl: `${url}?return=success`,
-    cancelUrl: `${url}?return=cancel`,
-    // Keyed on the session this replaces: a double click gets the same new session back, and a
-    // later replacement gets a fresh one rather than the session just closed.
-    idempotencyKey: `cosimo-pay-${inv.id}-${inv.payTokenVersion}-${balanceNow}-${prev ?? "first"}`,
-  });
+  let created: Awaited<ReturnType<typeof createCheckout>>;
+  try {
+    created = await createCheckout(h, provider, fresh, {
+      orgId,
+      invoice: { id: inv.id, number: inv.number },
+      amount: balanceNow,
+      currency: inv.currency,
+      methods: offeredMethods(stripeOptions(s)),
+      successUrl: `${url}?return=success`,
+      cancelUrl: `${url}?return=cancel`,
+      // Keyed on the session this replaces: a double click gets the same new session back, and a
+      // later replacement gets a fresh one rather than the session just closed. The attempt count
+      // moves on after a failure, so a retry once the cause is fixed isn't Stripe's replay of it.
+      idempotencyKey: `cosimo-pay-${inv.id}-${inv.payTokenVersion}-${balanceNow}-${prev ?? "first"}-${fresh.payAttempt}`,
+    });
+  } catch (e) {
+    if (e instanceof ProviderError) {
+      const at = new Date().toISOString();
+      await h.write((tx) =>
+        tx
+          .update(org.invoices)
+          .set({
+            payError: scrubProviderText(e.message).slice(0, PAY_ERROR_MAX),
+            payErrorAt: at,
+            payAttempt: sql`${org.invoices.payAttempt} + 1`,
+          })
+          .where(eq(org.invoices.id, inv!.id)),
+      );
+    }
+    throw e;
+  }
+  const { session, dropped } = created;
+  // A method Stripe rejected stays on the invoice as a warning; otherwise a success clears the error.
+  const warning = dropped
+    ? `Stripe rejected ${METHOD_NAME[dropped]}; the customer was offered the other methods.`
+    : null;
   await h.write((tx) =>
     tx
       .update(org.invoices)
-      .set({ paySessionId: session.id, paySessionAmount: balanceNow, paySessionExpiresAt: session.expiresAt })
+      .set({
+        paySessionId: session.id,
+        paySessionAmount: balanceNow,
+        paySessionExpiresAt: session.expiresAt,
+        payError: warning,
+        payErrorAt: warning ? new Date().toISOString() : null,
+        ...(dropped ? { payAttempt: sql`${org.invoices.payAttempt} + 1` } : {}),
+      })
       .where(eq(org.invoices.id, inv!.id)),
   );
   return { kind: "redirect", url: session.url };
+}
+
+/**
+ * The method a Stripe 400 on `payment_method_types` says isn't active in the account, or null.
+ * Stripe's message: "The payment method type provided: customer_balance is invalid...".
+ */
+function rejectedMethod(e: ProviderError, methods: PaymentMethodType[]): PaymentMethodType | null {
+  if (e.status !== 400 || e.param !== "payment_method_types") return null;
+  return methods.find((m) => new RegExp(`\\b${m}\\b`).test(e.message)) ?? null;
+}
+
+/**
+ * Create the checkout session, recovering once from each of two causes, so a loop is impossible:
+ * - the saved Stripe customer doesn't exist in this account or mode (the key was switched): make a
+ *   new customer and retry;
+ * - a method isn't active in Stripe: record that and retry without it, while another remains.
+ * Every retry uses its own idempotency key, since the request changed.
+ */
+async function createCheckout(
+  h: OrgHandle,
+  provider: PaymentProvider,
+  inv: InvoiceRow,
+  base: Omit<CreateSessionInput, "customerId">,
+) {
+  let customerId = await ensureProviderCustomer(h, provider, inv.customerId);
+  let { methods, idempotencyKey } = base;
+  let recreated = false;
+  let dropped: PaymentMethodType | null = null;
+  for (;;) {
+    try {
+      const session = await provider.createSession({ ...base, methods, customerId, idempotencyKey });
+      return { session, dropped };
+    } catch (e) {
+      if (!(e instanceof ProviderError)) throw e;
+      if (!recreated && e.code === "resource_missing" && e.param === "customer") {
+        recreated = true;
+        customerId = await replaceProviderCustomer(h, provider, inv.customerId, customerId);
+        idempotencyKey = `${idempotencyKey}-${customerId}`;
+        continue;
+      }
+      const bad: PaymentMethodType | null = dropped ? null : rejectedMethod(e, methods);
+      if (bad) await recordInactiveMethod(h, bad);
+      if (bad && methods.length > 1) {
+        dropped = bad;
+        methods = methods.filter((m) => m !== bad);
+        idempotencyKey = `${idempotencyKey}-without-${bad}`;
+        continue;
+      }
+      throw e;
+    }
+  }
+}
+
+/** Add a method to the stored setup check's inactive list, so later checkouts leave it out. */
+async function recordInactiveMethod(h: OrgHandle, method: PaymentMethodType) {
+  await h.write((tx) =>
+    patchOptionsTx(tx, (o) => {
+      const c = (o.setup_check ?? {
+        checked_at: new Date().toISOString(),
+        missing: [],
+        inactive_methods: [],
+        unknown_methods: [],
+        missing_events: [],
+      }) as StoredSetupCheck;
+      const inactive = Array.isArray(c.inactive_methods) ? c.inactive_methods : [];
+      if (!inactive.includes(method)) c.inactive_methods = [...inactive, method];
+      if (Array.isArray(c.unknown_methods)) c.unknown_methods = c.unknown_methods.filter((m) => m !== method);
+      o.setup_check = c;
+    }),
+  );
 }
 
 async function ensureProviderCustomer(h: OrgHandle, provider: PaymentProvider, contactId: string) {
@@ -533,6 +821,41 @@ async function ensureProviderCustomer(h: OrgHandle, provider: PaymentProvider, c
   if (known) return known.providerCustomerId;
   const c = await mustGetContact(h.db, contactId);
   const id = await provider.ensureCustomer({ id: c.id, name: c.name, email: c.email });
+  await h.write((tx) =>
+    tx
+      .insert(org.providerCustomers)
+      .values({ contactId, provider: provider.name, providerCustomerId: id })
+      .onConflictDoNothing(),
+  );
+  return id;
+}
+
+/**
+ * The saved customer isn't in this Stripe account or mode: forget it and create another. The key
+ * is new, because the per-contact key would replay the customer that's gone.
+ */
+async function replaceProviderCustomer(
+  h: OrgHandle,
+  provider: PaymentProvider,
+  contactId: string,
+  missingId: string,
+) {
+  await h.write((tx) =>
+    tx
+      .delete(org.providerCustomers)
+      .where(
+        and(
+          eq(org.providerCustomers.contactId, contactId),
+          eq(org.providerCustomers.provider, provider.name),
+          eq(org.providerCustomers.providerCustomerId, missingId),
+        ),
+      ),
+  );
+  const c = await mustGetContact(h.db, contactId);
+  const id = await provider.ensureCustomer(
+    { id: c.id, name: c.name, email: c.email },
+    `cosimo-customer-${c.id}-${Date.now()}`,
+  );
   await h.write((tx) =>
     tx
       .insert(org.providerCustomers)
@@ -803,50 +1126,98 @@ export async function fillMissingFees(ctx: AppContext, orgId: string) {
     .where(and(eq(org.providerPayments.provider, provider.name), isNull(org.providerPayments.fee)))
     .all();
   let filled = 0;
-  for (const row of rows) {
-    const f = await provider.paymentFee(row.providerPaymentId);
-    if (!f) continue;
-    await h.write(async (tx) => {
-      const cur = await tx
-        .select()
-        .from(org.providerPayments)
-        .where(
-          and(
-            eq(org.providerPayments.provider, row.provider),
-            eq(org.providerPayments.providerPaymentId, row.providerPaymentId),
-          ),
-        )
-        .get();
-      if (!cur || cur.fee !== null) return;
-      const p = await tx.select().from(org.payments).where(eq(org.payments.id, cur.paymentId)).get();
-      const pe = p?.entryId
-        ? await tx.select().from(org.journalEntries).where(eq(org.journalEntries.id, p.entryId)).get()
-        : null;
-      const inv = cur.invoiceId
-        ? await tx.select().from(org.invoices).where(eq(org.invoices.id, cur.invoiceId)).get()
-        : null;
-      let feeEntryId: string | null = null;
-      if (f.fee > 0 && p && !p.voidedAt)
-        feeEntryId = await postFeeTx(tx, orgId, await settingsRow(tx), {
-          paymentId: cur.paymentId,
-          date: p.date,
-          fee: f.fee,
-          invoiceNumber: inv?.number ?? null,
-          reason: pe?.status === "posted" ? null : "The payment it belongs to is waiting for review.",
-        });
-      await tx
-        .update(org.providerPayments)
-        .set({ fee: f.fee, feeEntryId, balanceTxnId: f.balanceTxnId })
-        .where(
-          and(
-            eq(org.providerPayments.provider, row.provider),
-            eq(org.providerPayments.providerPaymentId, row.providerPaymentId),
-          ),
-        );
-      filled++;
-    });
-  }
+  for (const row of rows) if (await fillFeeFor(h, orgId, provider, row)) filled++;
   return filled;
+}
+
+type ProviderPaymentRow = typeof org.providerPayments.$inferSelect;
+
+async function findProviderPayment(db: Reader, provider: string, providerPaymentId: string) {
+  return db
+    .select()
+    .from(org.providerPayments)
+    .where(
+      and(
+        eq(org.providerPayments.provider, provider),
+        eq(org.providerPayments.providerPaymentId, providerPaymentId),
+      ),
+    )
+    .get();
+}
+
+/**
+ * Post the fee of one recorded payment, once the provider has settled it. The webhook
+ * (`charge.updated`) and the polling job can both get here for the same payment: the fee is
+ * rechecked inside the write, so only the first posts it. Returns whether this call posted it.
+ */
+async function fillFeeFor(h: OrgHandle, orgId: string, provider: PaymentProvider, row: ProviderPaymentRow) {
+  const f = await provider.paymentFee(row.providerPaymentId);
+  if (!f) return false;
+  return h.write(async (tx) => {
+    const cur = await tx
+      .select()
+      .from(org.providerPayments)
+      .where(
+        and(
+          eq(org.providerPayments.provider, row.provider),
+          eq(org.providerPayments.providerPaymentId, row.providerPaymentId),
+        ),
+      )
+      .get();
+    if (!cur || cur.fee !== null) return false;
+    const p = await tx.select().from(org.payments).where(eq(org.payments.id, cur.paymentId)).get();
+    const pe = p?.entryId
+      ? await tx.select().from(org.journalEntries).where(eq(org.journalEntries.id, p.entryId)).get()
+      : null;
+    const inv = cur.invoiceId
+      ? await tx.select().from(org.invoices).where(eq(org.invoices.id, cur.invoiceId)).get()
+      : null;
+    let feeEntryId: string | null = null;
+    if (f.fee > 0 && p && !p.voidedAt)
+      feeEntryId = await postFeeTx(tx, orgId, await settingsRow(tx), {
+        paymentId: cur.paymentId,
+        date: p.date,
+        fee: f.fee,
+        invoiceNumber: inv?.number ?? null,
+        reason: pe?.status === "posted" ? null : "The payment it belongs to is waiting for review.",
+      });
+    await tx
+      .update(org.providerPayments)
+      .set({ fee: f.fee, feeEntryId, balanceTxnId: f.balanceTxnId })
+      .where(
+        and(
+          eq(org.providerPayments.provider, row.provider),
+          eq(org.providerPayments.providerPaymentId, row.providerPaymentId),
+        ),
+      );
+    return true;
+  });
+}
+
+/**
+ * A charge got its balance transaction, so its fee is known. A payment already recorded without
+ * its fee gets the fee now. One not recorded yet (this event beat `checkout.session.completed`) is
+ * reconciled from its session, which records the payment with the fee; a charge that isn't from a
+ * Checkout session isn't Cosimo's and is ignored.
+ */
+async function chargeUpdated(
+  ctx: AppContext,
+  h: OrgHandle,
+  orgId: string,
+  provider: PaymentProvider,
+  paymentIntentId: string,
+): Promise<"recorded" | "ignored"> {
+  let row = await findProviderPayment(h.db, provider.name, paymentIntentId);
+  let recorded = false;
+  if (!row) {
+    const sessionId = await provider.sessionForPaymentIntent(paymentIntentId);
+    if (!sessionId) return "ignored";
+    recorded = (await reconcileSession(ctx, orgId, sessionId)) === "recorded";
+    // Recorded here with the fee, or by another path meanwhile, maybe before the fee was known.
+    row = await findProviderPayment(h.db, provider.name, paymentIntentId);
+  }
+  if (row && row.fee === null && (await fillFeeFor(h, orgId, provider, row))) recorded = true;
+  return recorded ? "recorded" : "ignored";
 }
 
 // ----------------------------------------------------------------------------- webhooks and polling
@@ -863,6 +1234,7 @@ async function processEvent(
   let error: string | null = null;
   try {
     if (ev.kind === "unhandled") result = "unhandled";
+    else if (ev.kind === "charge") result = await chargeUpdated(ctx, h, orgId, provider, ev.paymentIntentId);
     else if (ev.kind === "session" || ev.kind === "payment_intent") {
       const sessionId =
         ev.kind === "session" ? ev.sessionId : await provider.sessionForPaymentIntent(ev.paymentIntentId);
@@ -926,9 +1298,15 @@ export async function handlePaymentWebhook(
   return { action: ev.kind, done: processEvent(ctx, h, orgId, provider, rowId, ev) };
 }
 
-/** Webhooks off: poll every 15 minutes. Webhooks on: a safety net every 6 hours. */
+/**
+ * Webhooks off: poll every 15 minutes. Webhooks on: a safety net every 6 hours, or every 15
+ * minutes while a recorded payment waits for its fee or a webhook event waits for a retry.
+ */
 export const POLL_MINUTES_WITHOUT_WEBHOOK = 15;
 export const POLL_HOURS_WITH_WEBHOOK = 6;
+
+/** Retry window for events whose processing failed. */
+const EVENT_RETRY_DAYS = 7;
 
 /** How often the polling job should run for this org, in ms, or null when it has nothing to do. */
 export async function pollInterval(ctx: AppContext, orgId: string): Promise<number | null> {
@@ -938,11 +1316,40 @@ export async function pollInterval(ctx: AppContext, orgId: string): Promise<numb
   if (s.paymentProvider !== "stripe") return null;
   const c = stripeSecrets(ctx.secrets, s);
   if (!c) return null;
-  return c.webhook_secret ? POLL_HOURS_WITH_WEBHOOK * 3_600_000 : POLL_MINUTES_WITHOUT_WEBHOOK * 60_000;
+  const soon = POLL_MINUTES_WITHOUT_WEBHOOK * 60_000;
+  if (!c.webhook_secret) return soon;
+  const feeDue = await h.db
+    .select({ id: org.providerPayments.providerPaymentId })
+    .from(org.providerPayments)
+    .where(isNull(org.providerPayments.fee))
+    .limit(1)
+    .get();
+  if (feeDue) return soon;
+  const since = new Date(Date.now() - EVENT_RETRY_DAYS * 86_400_000).toISOString();
+  const retry = await h.db
+    .select({ id: org.providerEvents.id })
+    .from(org.providerEvents)
+    .where(and(isNull(org.providerEvents.processedAt), gt(org.providerEvents.receivedAt, since)))
+    .limit(1)
+    .get();
+  return retry ? soon : POLL_HOURS_WITH_WEBHOOK * 3_600_000;
 }
 
-/** Retry window for events whose processing failed. */
-const EVENT_RETRY_DAYS = 7;
+/**
+ * An endpoint registered by an older release lacks newer events (`charge.updated`): add them. A
+ * failure is logged and reported by doctor; the job goes on, and tries again on its next run.
+ */
+async function updateWebhookEvents(ctx: AppContext, h: OrgHandle, orgId: string) {
+  const s = await settingsRow(h.db);
+  const c = stripeSecrets(ctx.secrets, s);
+  if (!c?.webhook_endpoint_id || stripeOptions(s).webhook_events_version >= WEBHOOK_EVENTS_VERSION) return;
+  const err = await syncWebhookEvents(c.secret_key, c.webhook_endpoint_id);
+  if (err) {
+    ctx.logger.warn("could not update the Stripe webhook endpoint's events", { org_id: orgId, error: err });
+    return;
+  }
+  await h.write((tx) => patchOptionsTx(tx, (o) => (o.webhook_events_version = WEBHOOK_EVENTS_VERSION)));
+}
 
 /**
  * The polling job: reconcile invoices with an open or processing checkout, retry failed webhook
@@ -953,6 +1360,7 @@ export async function pollPayments(ctx: AppContext, orgId: string) {
   const provider = providerFor(ctx.secrets, await settingsRow(h.db));
   const out = { reconciled: 0, recorded: 0, events: 0, fees: 0, failed: 0 };
   if (!provider) return out;
+  await updateWebhookEvents(ctx, h, orgId);
   const open = await h.db
     .select({ id: org.invoices.id, sessionId: org.invoices.paySessionId })
     .from(org.invoices)

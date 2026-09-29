@@ -181,6 +181,8 @@ export async function invoiceView(db: Reader, inv: InvoiceRow, link?: PayLinker)
     pay_url: link?.(inv) ?? null,
     online_pay_status: inv.onlinePayStatus,
     pay_link_opened_at: inv.payLinkOpenedAt,
+    pay_error: inv.payError,
+    pay_error_at: inv.payErrorAt,
     manual_pay_url: inv.manualPayUrl,
     lines: lines.map((l) => ({
       id: l.id,

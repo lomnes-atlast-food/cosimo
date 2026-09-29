@@ -1,14 +1,16 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, test } from "bun:test";
 import { org } from "@cosimo/db";
-import { and, eq, sql } from "drizzle-orm";
+import { and, eq, inArray, sql } from "drizzle-orm";
 import { PDFArray, PDFDict, PDFDocument, PDFName, PDFString } from "pdf-lib";
 import { registeredJobs, type Scheduler } from "../src/jobs/scheduler.ts";
 import { readZip } from "../src/services/archive.ts";
 import { exportOrgBytes } from "../src/services/export.ts";
 import type { Mailer, SentMail } from "../src/services/mailer.ts";
-import { payUrl, pollPayments, saveSettings } from "../src/services/online-payments.ts";
+import { payUrl, pollInterval, pollPayments, saveSettings } from "../src/services/online-payments.ts";
 import {
   type CreateSessionInput,
+  type MethodStatus,
+  type PaymentMethodType,
   type PaymentProvider,
   ProviderError,
   type ProviderEvent,
@@ -36,6 +38,17 @@ const WHSEC = `${"whsec_"}fakesigningsecret0123456789`;
 
 type Paid = Extract<SessionResult, { kind: "payment_succeeded" }>;
 
+const PERMISSIONS = [
+  "Customers: Read",
+  "PaymentIntents: Read",
+  "Charges: Read",
+  "Balance transactions: Read",
+  "Events: Read",
+  "Customers: Write",
+  "Checkout Sessions: Write",
+  "Webhook Endpoints: Write",
+];
+
 /** A scripted Stripe: sessions live in memory and tests move them through their states. */
 class FakeStripe implements PaymentProvider {
   readonly name = "stripe" as const;
@@ -46,19 +59,72 @@ class FakeStripe implements PaymentProvider {
   fees = new Map<string, { fee: number; balanceTxnId: string }>();
   webhooks: { id: string; url: string }[] = [];
   deletedWebhooks: string[] = [];
+  updatedWebhooks: { id: string; events: string[] }[] = [];
   customers: string[] = [];
+  customerKeys: (string | undefined)[] = [];
   getSessionCalls = 0;
+  /** Every create request, including the ones that failed. */
+  attempts: CreateSessionInput[] = [];
+  /** Errors the next creates throw, in order. */
+  failNext: ProviderError[] = [];
+  /** Methods Stripe rejects as not active in the account. */
+  inactive = new Set<PaymentMethodType>();
+  /** Customers that don't exist in this account (`always`: every customer). */
+  missingCustomers = new Set<string>();
+  allCustomersMissing = false;
+  /** Setup check answers: permissions the key lacks, method statuses, no Account: Read. */
+  deniedPermissions = new Set<string>();
+  methodStatus: Partial<Record<PaymentMethodType, MethodStatus>> = {};
+  accountReadDenied = false;
   #n = 0;
 
   async testConnection() {
     if (this.creds.secretKey.includes("revoked")) throw new ProviderError("Stripe: Invalid API Key", 401);
     return { accountName: "Test Studio", livemode: this.creds.secretKey.includes("_live_") };
   }
-  async ensureCustomer(contact: { id: string }) {
+  async checkSetup(methods: PaymentMethodType[], webhookUrl?: string | null) {
+    return {
+      permissions: PERMISSIONS.map((name) =>
+        this.deniedPermissions.has(name)
+          ? { name, ok: false, detail: `Stripe: The provided key lacks ${name}.` }
+          : { name, ok: true, detail: null },
+      ),
+      methods: methods.map((type) =>
+        this.accountReadDenied
+          ? {
+              type,
+              status: "unknown" as const,
+              detail: "Add Account: Read to the key to let Cosimo check payment methods.",
+            }
+          : { type, status: this.methodStatus[type] ?? ("active" as const), detail: null },
+      ),
+      missingEvents: webhookUrl ? [] : null,
+    };
+  }
+  async ensureCustomer(contact: { id: string }, key?: string) {
     this.customers.push(contact.id);
-    return `cus_${contact.id}`;
+    this.customerKeys.push(key);
+    return key ? `cus_${contact.id}_${++this.#n}` : `cus_${contact.id}`;
   }
   async createSession(i: CreateSessionInput) {
+    this.attempts.push(i);
+    const fail = this.failNext.shift();
+    if (fail) throw fail;
+    if (this.allCustomersMissing || this.missingCustomers.has(i.customerId))
+      throw new ProviderError(
+        `Stripe: No such customer: '${i.customerId}'`,
+        400,
+        "resource_missing",
+        "customer",
+      );
+    const off = i.methods.find((m) => this.inactive.has(m));
+    if (off)
+      throw new ProviderError(
+        `Stripe: The payment method type provided: ${off} is invalid. Please ensure the provided type is activated in your dashboard.`,
+        400,
+        "parameter_invalid",
+        "payment_method_types",
+      );
     this.created.push(i);
     const id = `cs_test_${++this.#n}`;
     const url = `https://checkout.stripe.test/${id}`;
@@ -98,6 +164,9 @@ class FakeStripe implements PaymentProvider {
     const id = `we_${++this.#n}`;
     this.webhooks.push({ id, url });
     return { id, secret: WHSEC };
+  }
+  async updateWebhook(id: string, events: readonly string[]) {
+    this.updatedWebhooks.push({ id, events: [...events] });
   }
   async deleteWebhook(id: string) {
     this.deletedWebhooks.push(id);
@@ -368,7 +437,13 @@ describe(`online payment settings (${DB_MODE})`, () => {
   test("Test connection checks the stored key", async () => {
     const r = await owner.json("POST", `${base()}/online-payments/test`, {});
     expect(r.status).toBe(200);
-    expect(r.body).toEqual({ account_name: "Test Studio", livemode: false });
+    expect(r.body).toMatchObject({ account_name: "Test Studio", livemode: false });
+    // Every permission is listed, and each chosen method's status.
+    expect(r.body.permissions.map((p: any) => p.name)).toEqual(PERMISSIONS);
+    expect(r.body.methods).toEqual([
+      { type: "card", status: "active", detail: null },
+      { type: "us_bank_account", status: "active", detail: null },
+    ]);
   });
 });
 
@@ -871,6 +946,14 @@ describe(`PDF and email (${DB_MODE})`, () => {
     expect(m.text!.indexOf("Pay online")).toBeLessThan(m.text!.indexOf("Thank you"));
   });
 
+  test("an invoice under $0.50 has no pay link in the view, the PDF, or the email", async () => {
+    const inv = await openInvoice(40);
+    expect(inv).toMatchObject({ online_payment_enabled: true, pay_url: null, balance_due: 40 });
+    expect(await pdfLinks(inv.id)).toEqual([]);
+    await owner.json("POST", `${base()}/invoices/${inv.id}/send`, {});
+    expect(mail.at(-1)!.text).not.toContain("Pay online");
+  });
+
   test("payment link mode prints the URL entered on the invoice", async () => {
     await owner.json("PUT", `${base()}/online-payments`, { provider: "manual_link" });
     // Leaving Stripe removes the registered endpoint and the stored key.
@@ -892,5 +975,420 @@ describe(`PDF and email (${DB_MODE})`, () => {
     await owner.json("POST", `${base()}/invoices/${inv.id}/send`, {});
     expect(mail.at(-1)!.text).toContain("Pay online: https://pay.example.com/inv-42");
     await setUpStripe();
+  });
+});
+
+/** Deliver a webhook whose object is given in full (charge events carry more than an ID). */
+async function webhookObject(type: string, object: Record<string, unknown>, opts: { id?: string } = {}) {
+  const id = opts.id ?? `evt_${++evt}`;
+  const body = JSON.stringify({ id, type, data: { object } });
+  return { res: await deliver(body, signed(body)), id };
+}
+
+async function invoiceRow(id: string) {
+  return (await (await db()).select().from(org.invoices).where(eq(org.invoices.id, id)).get())!;
+}
+
+async function feeEntries(paymentId: string) {
+  return (await db())
+    .select()
+    .from(org.journalEntries)
+    .where(and(eq(org.journalEntries.sourceType, "payment_fee"), eq(org.journalEntries.sourceId, paymentId)))
+    .all();
+}
+
+describe(`setup check (${DB_MODE})`, () => {
+  test("a missing permission saves, with a warning that is stored and shown", async () => {
+    fake.deniedPermissions = new Set(["Customers: Write", "Checkout Sessions: Write"]);
+    try {
+      const body = await setUpStripe();
+      expect(body.provider).toBe("stripe");
+      expect(body.warning).toContain("missing permissions: Customers: Write, Checkout Sessions: Write");
+      expect(body.setup_check).toMatchObject({
+        missing: ["Customers: Write", "Checkout Sessions: Write"],
+        inactive_methods: [],
+        unknown_methods: [],
+      });
+      const g = (await owner.json("GET", `${base()}/online-payments`)).body;
+      expect(g.setup_check.missing).toEqual(["Customers: Write", "Checkout Sessions: Write"]);
+      const t = (await owner.json("POST", `${base()}/online-payments/test`, {})).body;
+      expect(t.permissions.find((p: any) => p.name === "Customers: Write")).toMatchObject({ ok: false });
+    } finally {
+      fake.deniedPermissions = new Set();
+    }
+    const fixed = await setUpStripe();
+    expect(fixed.warning).toBeNull();
+    expect(fixed.setup_check.missing).toEqual([]);
+  });
+
+  test("an inactive method is reported and left out of checkouts until a check passes it", async () => {
+    fake.methodStatus = { customer_balance: "inactive" };
+    const body = await setUpStripe({ methods: ["card", "customer_balance"] });
+    expect(body.warning).toContain("Not active in Stripe: Bank Transfers");
+    expect(body.setup_check.inactive_methods).toEqual(["customer_balance"]);
+    // The owner's choice is kept.
+    expect(body.methods).toEqual(["card", "customer_balance"]);
+    const inv = await openInvoice(11_000);
+    await checkout(inv);
+    expect(fake.created.at(-1)!.methods).toEqual(["card"]);
+
+    // Activated in Stripe; Test connection sees it and checkouts offer it again.
+    fake.methodStatus = {};
+    const t = (await owner.json("POST", `${base()}/online-payments/test`, {})).body;
+    expect(t.methods).toEqual([
+      { type: "card", status: "active", detail: null },
+      { type: "customer_balance", status: "active", detail: null },
+    ]);
+    expect((await owner.json("GET", `${base()}/online-payments`)).body.setup_check.inactive_methods).toEqual(
+      [],
+    );
+    const inv2 = await openInvoice(12_000);
+    await checkout(inv2);
+    expect(fake.created.at(-1)!.methods).toEqual(["card", "customer_balance"]);
+    await setUpStripe();
+  });
+
+  test("without Account: Read the methods show as unknown, with no warning", async () => {
+    fake.accountReadDenied = true;
+    try {
+      const body = await setUpStripe();
+      expect(body.warning).toBeNull();
+      expect(body.setup_check.unknown_methods).toEqual(["card", "us_bank_account"]);
+      const t = (await owner.json("POST", `${base()}/online-payments/test`, {})).body;
+      expect(t.methods[0]).toMatchObject({ type: "card", status: "unknown" });
+      expect(t.methods[0].detail).toContain("Account: Read");
+    } finally {
+      fake.accountReadDenied = false;
+    }
+    expect((await setUpStripe()).setup_check.unknown_methods).toEqual([]);
+  });
+});
+
+describe(`pay-link failures (${DB_MODE})`, () => {
+  test("a failed create is shown on the invoice and in settings; the retry uses a new key; success clears it", async () => {
+    const inv = await openInvoice(21_000);
+    fake.failNext.push(
+      new ProviderError(
+        "Stripe: The provided key 'rk_test_****wxyz' does not have the required permissions for this endpoint on account 'acct_1Example'. See https://docs.example.com/keys (request req_Example123)",
+        403,
+        "more_permissions_required",
+      ),
+    );
+    const res = await visit(inv.pay_url);
+    expect(res.status).toBe(503);
+    const html = await res.text();
+    expect(html).toContain("Online payment isn&#39;t working right now");
+    expect(html).toMatch(/Reference: [\w-]+/);
+    const failedKey = fake.attempts.at(-1)!.idempotencyKey;
+
+    const row = await invoiceRow(inv.id);
+    expect(row.payAttempt).toBe(1);
+    expect(row.payErrorAt).not.toBeNull();
+    for (const leak of ["acct_", "req_", "https://", "rk_test_"]) expect(row.payError).not.toContain(leak);
+    expect(row.payError).toContain("does not have the required permissions");
+    const view = await getInvoice(inv.id);
+    expect(view.pay_error).toBe(row.payError);
+    expect(view.pay_error_at).toBe(row.payErrorAt);
+    const settings = (await owner.json("GET", `${base()}/online-payments`)).body;
+    expect(settings.last_pay_error).toMatchObject({
+      invoice_id: inv.id,
+      number: inv.number,
+      message: row.payError,
+    });
+
+    // Fixed in Stripe: the next open gets through, with a key Stripe hasn't seen.
+    await checkout(inv);
+    const okKey = fake.created.at(-1)!.idempotencyKey;
+    expect(okKey).not.toBe(failedKey);
+    expect(failedKey).toEndWith("-0");
+    expect(okKey).toEndWith("-1");
+    const after = await getInvoice(inv.id);
+    expect(after).toMatchObject({ pay_error: null, pay_error_at: null });
+    // A double click still reuses the session rather than creating another.
+    const n = fake.attempts.length;
+    await checkout(inv);
+    expect(fake.attempts.length).toBe(n);
+  });
+
+  test("a method Stripe rejects is dropped once, recorded, and left out of later checkouts", async () => {
+    fake.inactive = new Set(["us_bank_account"]);
+    try {
+      const inv = await openInvoice(22_000);
+      const n = fake.attempts.length;
+      await checkout(inv);
+      const [first, retry] = fake.attempts.slice(n);
+      expect(fake.attempts.length - n).toBe(2);
+      expect(first!.methods).toEqual(["card", "us_bank_account"]);
+      expect(retry!.methods).toEqual(["card"]);
+      expect(retry!.idempotencyKey).toBe(`${first!.idempotencyKey}-without-us_bank_account`);
+      const view = await getInvoice(inv.id);
+      expect(view.pay_error).toBe(
+        "Stripe rejected ACH Direct Debit; the customer was offered the other methods.",
+      );
+      const settings = (await owner.json("GET", `${base()}/online-payments`)).body;
+      expect(settings.setup_check.inactive_methods).toEqual(["us_bank_account"]);
+      expect(settings.methods).toEqual(["card", "us_bank_account"]);
+
+      // A check that can't read the account doesn't clear what the checkout showed.
+      fake.accountReadDenied = true;
+      await owner.json("POST", `${base()}/online-payments/test`, {});
+      fake.accountReadDenied = false;
+      const kept = (await owner.json("GET", `${base()}/online-payments`)).body.setup_check;
+      expect(kept).toMatchObject({ inactive_methods: ["us_bank_account"], unknown_methods: ["card"] });
+
+      // The next invoice goes straight to card.
+      const inv2 = await openInvoice(23_000);
+      const m = fake.attempts.length;
+      await checkout(inv2);
+      expect(fake.attempts.length - m).toBe(1);
+      expect(fake.attempts.at(-1)!.methods).toEqual(["card"]);
+    } finally {
+      fake.inactive = new Set();
+    }
+    await setUpStripe();
+  });
+
+  test("when every method is rejected it stops after one retry and shows the error", async () => {
+    fake.inactive = new Set(["card", "us_bank_account"]);
+    try {
+      const inv = await openInvoice(24_000);
+      const n = fake.attempts.length;
+      expect((await visit(inv.pay_url)).status).toBe(503);
+      expect(fake.attempts.length - n).toBe(2);
+      const row = await invoiceRow(inv.id);
+      // Card was dropped; the retry's error (the other method) is what the owner sees.
+      expect(row.payError).toContain("payment method type provided: us_bank_account is invalid");
+      expect(row.payAttempt).toBe(1);
+    } finally {
+      fake.inactive = new Set();
+    }
+    await setUpStripe();
+  });
+
+  test("a saved customer missing from this Stripe account is recreated, and the create retried once", async () => {
+    const inv = await openInvoice(25_500);
+    await checkout(inv);
+    const old = `cus_${customer}`;
+    expect(fake.created.at(-1)!.customerId).toBe(old);
+
+    // The key was switched to another account or mode, where that customer doesn't exist.
+    fake.missingCustomers.add(old);
+    const inv2 = await openInvoice(26_000);
+    const n = fake.attempts.length;
+    await checkout(inv2);
+    const [first, retry] = fake.attempts.slice(n);
+    expect(fake.attempts.length - n).toBe(2);
+    expect(first!.customerId).toBe(old);
+    expect(retry!.customerId).not.toBe(old);
+    expect(retry!.idempotencyKey).not.toBe(first!.idempotencyKey);
+    expect(fake.customerKeys.at(-1)).toMatch(new RegExp(`^cosimo-customer-${customer}-\\d+$`));
+    const saved = await (await db())
+      .select()
+      .from(org.providerCustomers)
+      .where(eq(org.providerCustomers.contactId, customer))
+      .all();
+    expect(saved.map((c) => c.providerCustomerId)).toEqual([retry!.customerId]);
+    expect((await getInvoice(inv2.id)).pay_error).toBeNull();
+
+    // A customer that keeps going missing is retried once, not in a loop.
+    fake.allCustomersMissing = true;
+    try {
+      const inv3 = await openInvoice(27_000);
+      const m = fake.attempts.length;
+      expect((await visit(inv3.pay_url)).status).toBe(503);
+      expect(fake.attempts.length - m).toBe(2);
+      expect((await getInvoice(inv3.id)).pay_error).toContain("No such customer");
+    } finally {
+      fake.allCustomersMissing = false;
+      fake.missingCustomers.clear();
+    }
+  });
+
+  test("a link opened after the balance dropped under $0.50 explains, without calling Stripe", async () => {
+    const inv = await openInvoice(10_000);
+    await owner.json("POST", `${base()}/payments`, {
+      direction: "received",
+      contact_id: customer,
+      date: "2026-03-05",
+      amount: 9_970,
+      account_id: acct["1000"],
+      applications: [{ document_id: inv.id, amount: 9_970 }],
+    });
+    expect((await getInvoice(inv.id)).pay_url).toBeNull();
+    const [attempts, reads] = [fake.attempts.length, fake.getSessionCalls];
+    const res = await visit(inv.pay_url);
+    expect(res.status).toBe(200);
+    expect(await res.text()).toContain("below the minimum for online payment");
+    expect(fake.attempts.length).toBe(attempts);
+    expect(fake.getSessionCalls).toBe(reads);
+  });
+});
+
+describe(`fees from charge.updated (${DB_MODE})`, () => {
+  const job = () => registeredJobs().find((j) => j.name === "payments.poll")!;
+  const charge = (pi: string, n: number) => ({
+    id: `ch_${n}`,
+    object: "charge",
+    payment_intent: pi,
+    balance_transaction: `txn_${n}`,
+  });
+
+  test("a payment recorded before its fee gets the fee from charge.updated, once", async () => {
+    const inv = await openInvoice(30_000);
+    const sid = await checkout(inv);
+    const paid = fake.pay(sid, { gross: 30_000, fee: null });
+    await webhook("checkout.session.completed", sid);
+    await settle();
+    const [pp] = await providerPayments(inv.id);
+    expect(pp).toMatchObject({ fee: null, feeEntryId: null });
+
+    // While the fee is missing, the job runs every 15 minutes even with a webhook.
+    expect(await pollInterval(env.ctx, orgId)).toBe(15 * 60_000);
+    const now = new Date();
+    expect(await job().due(now, new Date(now.getTime() - 20 * 60_000), env.ctx, orgId)).toBe(true);
+
+    fake.fees.set(paid.paymentId, { fee: 900, balanceTxnId: "txn_900" });
+    const first = await webhookObject("charge.updated", charge(paid.paymentId, 900));
+    expect(((await first.res.json()) as any).action).toBe("charge");
+    // A redelivery, a second update, and the job at the same time.
+    await Promise.all([
+      webhookObject("charge.updated", charge(paid.paymentId, 900), { id: first.id }),
+      webhookObject("charge.updated", charge(paid.paymentId, 900)),
+      pollPayments(env.ctx, orgId),
+    ]);
+    await settle();
+    const [after] = await providerPayments(inv.id);
+    expect(after).toMatchObject({ fee: 900, balanceTxnId: "txn_900" });
+    const fees = await feeEntries(after!.paymentId);
+    expect(fees.length).toBe(1);
+    expect(fees[0]).toMatchObject({ id: after!.feeEntryId, status: "posted" });
+    const payment = (await owner.json("GET", `${base()}/payments/${after!.paymentId}`)).body;
+    // Dated the day of the payment.
+    expect(fees[0]!.date).toBe(payment.date);
+    const ev = await (await db())
+      .select()
+      .from(org.providerEvents)
+      .where(eq(org.providerEvents.eventId, first.id))
+      .get();
+    expect(ev).toMatchObject({ result: "recorded" });
+    expect(await pollInterval(env.ctx, orgId)).toBe(6 * 3_600_000);
+  });
+
+  test("charge.updated before the payment is recorded records it with the fee", async () => {
+    const inv = await openInvoice(31_000);
+    const sid = await checkout(inv);
+    const paid = fake.pay(sid, { gross: 31_000, fee: 930, balanceTxnId: "txn_930" });
+    const { id } = await webhookObject("charge.updated", charge(paid.paymentId, 930));
+    await settle();
+    const [pp] = await providerPayments(inv.id);
+    expect(pp).toMatchObject({ fee: 930 });
+    expect((await getInvoice(inv.id)).status).toBe("paid");
+    await webhook("checkout.session.completed", sid);
+    await settle();
+    expect((await providerPayments(inv.id)).length).toBe(1);
+    expect((await feeEntries(pp!.paymentId)).length).toBe(1);
+    const ev = await (await db())
+      .select()
+      .from(org.providerEvents)
+      .where(eq(org.providerEvents.eventId, id))
+      .get();
+    expect(ev).toMatchObject({ result: "recorded" });
+  });
+
+  test("a failed charge.updated is retried by the job; other charges are ignored", async () => {
+    const inv = await openInvoice(32_000);
+    const sid = await checkout(inv);
+    const paid = fake.pay(sid, { gross: 32_000, fee: 960, balanceTxnId: "txn_960" });
+    // Stripe can't be reached while the event is processed.
+    const saved = fake.sessions.get(sid)!;
+    fake.sessions.delete(sid);
+    const lookup = fake.sessionForPaymentIntent;
+    fake.sessionForPaymentIntent = async () => sid;
+    try {
+      const { id } = await webhookObject("charge.updated", charge(paid.paymentId, 960));
+      await settle();
+      const failed = await (await db())
+        .select()
+        .from(org.providerEvents)
+        .where(eq(org.providerEvents.eventId, id))
+        .get();
+      expect(failed).toMatchObject({ result: "error", processedAt: null });
+      expect(await pollInterval(env.ctx, orgId)).toBe(15 * 60_000);
+      fake.sessions.set(sid, saved);
+      fake.events.set(id, {
+        id,
+        type: "charge.updated",
+        kind: "charge",
+        chargeId: "ch_960",
+        paymentIntentId: paid.paymentId,
+        balanceTxnId: "txn_960",
+      });
+      // Drop the stored session so only the event retry can find the payment.
+      await (await env.ctx.orgs.mustOpen(orgId)).write((tx) =>
+        tx.update(org.invoices).set({ paySessionId: null }).where(eq(org.invoices.id, inv.id)),
+      );
+      await pollPayments(env.ctx, orgId);
+      const retried = await (await db())
+        .select()
+        .from(org.providerEvents)
+        .where(eq(org.providerEvents.eventId, id))
+        .get();
+      expect(retried).toMatchObject({ result: "recorded" });
+      expect((await providerPayments(inv.id))[0]).toMatchObject({ fee: 960 });
+    } finally {
+      fake.sessionForPaymentIntent = lookup;
+    }
+
+    // A charge that isn't from a Cosimo checkout, and one without its balance transaction yet.
+    const other = await webhookObject("charge.updated", charge("pi_elsewhere", 1));
+    const early = await webhookObject("charge.updated", {
+      ...charge("pi_elsewhere", 2),
+      balance_transaction: null,
+    });
+    expect(((await early.res.json()) as any).action).toBe("ignored");
+    await settle();
+    const rows = await (await db())
+      .select()
+      .from(org.providerEvents)
+      .where(inArray(org.providerEvents.eventId, [other.id, early.id]))
+      .all();
+    expect(rows.map((r) => r.result)).toEqual(["ignored", "ignored"]);
+  });
+});
+
+describe(`webhook endpoint events (${DB_MODE})`, () => {
+  const setVersion = async (v: number) => {
+    const h = await env.ctx.orgs.mustOpen(orgId);
+    const s = (await h.db.select().from(org.orgSettings).get())!;
+    const o = JSON.parse(s.paymentOptionsJson!);
+    o.webhook_events_version = v;
+    await h.write((tx) =>
+      tx
+        .update(org.orgSettings)
+        .set({ paymentOptionsJson: JSON.stringify(o) })
+        .where(eq(org.orgSettings.id, 1)),
+    );
+  };
+  const version = async () =>
+    JSON.parse((await (await db()).select().from(org.orgSettings).get())!.paymentOptionsJson!)
+      .webhook_events_version;
+
+  test("an endpoint registered by an older release gets charge.updated from the job and from Save", async () => {
+    const endpoint = fake.webhooks.at(-1)!.id;
+    await setVersion(1);
+    const n = fake.updatedWebhooks.length;
+    await pollPayments(env.ctx, orgId);
+    expect(fake.updatedWebhooks.length - n).toBe(1);
+    expect(fake.updatedWebhooks.at(-1)).toMatchObject({ id: endpoint });
+    expect(fake.updatedWebhooks.at(-1)!.events).toContain("charge.updated");
+    expect(await version()).toBe(2);
+    // Up to date: nothing more is sent.
+    await pollPayments(env.ctx, orgId);
+    expect(fake.updatedWebhooks.length - n).toBe(1);
+
+    await setVersion(1);
+    await setUpStripe();
+    expect(fake.updatedWebhooks.length - n).toBe(2);
+    expect(await version()).toBe(2);
   });
 });

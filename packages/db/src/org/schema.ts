@@ -212,6 +212,11 @@ export const invoices = sqliteTable(
     paySessionExpiresAt: text("pay_session_expires_at"),
     onlinePayStatus: text("online_pay_status", { enum: ["processing"] }),
     payLinkOpenedAt: text("pay_link_opened_at"),
+    /** Failed checkout creates so far; part of the idempotency key, so a retry isn't Stripe's replay. */
+    payAttempt: integer("pay_attempt").notNull().default(0),
+    /** The last pay-link failure (provider message, IDs and URLs stripped), cleared on success. */
+    payError: text("pay_error"),
+    payErrorAt: text("pay_error_at"),
   },
   (t) => [
     uniqueIndex("invoices_number_uq").on(t.number),

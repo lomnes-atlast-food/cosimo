@@ -220,6 +220,22 @@ test("0004 adds online payment settings, invoice pay-link columns, and the provi
   await expect(client.execute({ sql: ev, args: ["e2"] })).rejects.toThrow(/UNIQUE/);
 });
 
+test("0005 adds the pay-link failure columns to invoices", async () => {
+  const upTo = orgMigrations.findIndex((m) => m.tag === "0005_pay_link_errors");
+  expect(upTo).toBeGreaterThan(0);
+  expect(await migrate(client, orgMigrations.slice(0, upTo))).toEqual([]);
+  expect(await migrate(client, orgMigrations.slice(0, upTo + 1))).toEqual(["0005_pay_link_errors"]);
+  const cols = (await client.execute("SELECT name FROM pragma_table_info('invoices')")).rows.map((r) =>
+    String(r.name),
+  );
+  expect(cols).toEqual(expect.arrayContaining(["pay_attempt", "pay_error", "pay_error_at"]));
+  // Existing invoices start with no attempts and no error.
+  const inv = await client.execute(
+    "SELECT pay_attempt, pay_error, pay_error_at FROM invoices WHERE id = 'i1'",
+  );
+  expect(inv.rows[0]).toMatchObject({ pay_attempt: 0, pay_error: null, pay_error_at: null });
+});
+
 test("0001_known_randall (system) backfills is_sample for the existing demo org by name", async () => {
   const sysDir = mkdtempSync(join(tmpdir(), "cosimo-migrate-sys-"));
   const sysClient = createClient({ url: `file:${join(sysDir, "system.db")}` });

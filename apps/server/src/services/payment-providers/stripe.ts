@@ -7,12 +7,17 @@ import { createHmac } from "node:crypto";
 import { safeEqual } from "../../crypto.ts";
 import {
   type CreateSessionInput,
+  type MethodStatus,
+  type PaymentMethodType,
   type PaymentProvider,
+  type PermissionCheck,
   type ProviderAccount,
   ProviderError,
   type ProviderEvent,
   type ProviderSession,
   type SessionResult,
+  type SetupCheck,
+  scrubProviderText,
   WebhookSignatureError,
 } from "./types.ts";
 
@@ -34,10 +39,16 @@ export const WEBHOOK_EVENTS = [
   "checkout.session.expired",
   "payment_intent.succeeded",
   "payment_intent.payment_failed",
+  "charge.updated",
   "charge.refunded",
   "charge.dispute.created",
   "payout.paid",
 ] as const;
+/**
+ * Bumped whenever WEBHOOK_EVENTS changes, so endpoints registered by an older release are brought
+ * up to date. 1 was the list without `charge.updated`.
+ */
+export const WEBHOOK_EVENTS_VERSION = 2;
 const UNHANDLED_EVENTS = new Set(["charge.refunded", "charge.dispute.created", "payout.paid"]);
 
 /**
@@ -104,7 +115,11 @@ export function verifyStripeWebhook(
 }
 
 export function parseStripeEvent(rawBody: string): ProviderEvent {
-  let e: { id?: unknown; type?: unknown; data?: { object?: { id?: unknown } } };
+  let e: {
+    id?: unknown;
+    type?: unknown;
+    data?: { object?: { id?: unknown; payment_intent?: unknown; balance_transaction?: unknown } };
+  };
   try {
     e = JSON.parse(rawBody);
   } catch {
@@ -118,6 +133,17 @@ export function parseStripeEvent(rawBody: string): ProviderEvent {
     return { id, type, kind: "session", sessionId: objectId };
   if ((type === "payment_intent.succeeded" || type === "payment_intent.payment_failed") && objectId)
     return { id, type, kind: "payment_intent", paymentIntentId: objectId };
+  if (type === "charge.updated") {
+    // Stripe sends it about two seconds after the payment, once the fee (balance transaction) exists.
+    const o = e.data?.object;
+    const idOf = (v: unknown) =>
+      typeof v === "string" ? v : typeof obj(v)?.id === "string" ? (obj(v)!.id as string) : "";
+    const paymentIntentId = idOf(o?.payment_intent);
+    const balanceTxnId = idOf(o?.balance_transaction);
+    if (objectId && paymentIntentId && balanceTxnId)
+      return { id, type, kind: "charge", chargeId: objectId, paymentIntentId, balanceTxnId };
+    return { id, type, kind: "ignored" };
+  }
   if (UNHANDLED_EVENTS.has(type)) return { id, type, kind: "unhandled" };
   return { id, type, kind: "ignored" };
 }
@@ -163,6 +189,31 @@ export function sessionResult(s: Obj): SessionResult {
   return { kind: "open", sessionId, invoiceId, url: str(s.url) };
 }
 
+/** The permissions Cosimo uses, as the Stripe dashboard names them, and a request that needs each. */
+const READ_PROBES: [string, string][] = [
+  ["Customers: Read", "/v1/customers"],
+  ["PaymentIntents: Read", "/v1/payment_intents"],
+  ["Charges: Read", "/v1/charges"],
+  ["Balance transactions: Read", "/v1/balance_transactions"],
+  ["Events: Read", "/v1/events"],
+];
+const WRITE_PROBES: [string, string][] = [
+  ["Customers: Write", "/v1/customers"],
+  ["Checkout Sessions: Write", "/v1/checkout/sessions"],
+  ["Webhook Endpoints: Write", "/v1/webhook_endpoints"],
+];
+export const WEBHOOK_WRITE_PERMISSION = "Webhook Endpoints: Write";
+
+/** The account capability behind each payment method type. */
+const METHOD_CAPABILITY: Record<PaymentMethodType, string> = {
+  card: "card_payments",
+  us_bank_account: "us_bank_account_ach_payments",
+  customer_balance: "bank_transfer_payments",
+};
+
+const couldNotCheck = (e: unknown) =>
+  `Couldn't check: ${e instanceof ProviderError ? e.message : scrubProviderText(String((e as Error)?.message ?? e))}`;
+
 export class HttpStripe implements PaymentProvider {
   readonly name = "stripe" as const;
   constructor(
@@ -197,15 +248,20 @@ export class HttpStripe implements PaymentProvider {
         signal: AbortSignal.timeout(30_000),
       });
     } catch (e) {
-      throw new ProviderError(`Could not reach Stripe: ${(e as Error).message}`, 0, "network_error");
+      throw new ProviderError(
+        `Could not reach Stripe: ${scrubProviderText((e as Error).message)}`,
+        0,
+        "network_error",
+      );
     }
     const data = (await res.json().catch(() => ({}))) as Obj;
     if (!res.ok) {
       const err = obj(data.error);
       throw new ProviderError(
-        `Stripe: ${str(err?.message) ?? `HTTP ${res.status}`}`,
+        `Stripe: ${scrubProviderText(str(err?.message) ?? `HTTP ${res.status}`)}`,
         res.status,
         str(err?.code) ?? str(err?.type) ?? undefined,
+        str(err?.param) ?? undefined,
       );
     }
     return data as T;
@@ -230,12 +286,89 @@ export class HttpStripe implements PaymentProvider {
     }
   }
 
-  async ensureCustomer(contact: { id: string; name: string; email: string | null }) {
+  async checkSetup(methods: PaymentMethodType[], webhookUrl?: string | null): Promise<SetupCheck> {
+    const permissions = await Promise.all([
+      ...READ_PROBES.map(([name, path]) => this.probeRead(name, path)),
+      ...WRITE_PROBES.map(([name, path]) => this.probeWrite(name, path)),
+    ]);
+    return {
+      permissions,
+      methods: await this.methodStatuses(methods),
+      missingEvents: webhookUrl ? await this.missingEvents(webhookUrl) : null,
+    };
+  }
+
+  private async probeRead(name: string, path: string): Promise<PermissionCheck> {
+    try {
+      await this.call("GET", path, { limit: 1 });
+      return { name, ok: true, detail: null };
+    } catch (e) {
+      if (e instanceof ProviderError && e.status === 403) return { name, ok: false, detail: e.message };
+      return { name, ok: null, detail: couldNotCheck(e) };
+    }
+  }
+
+  /**
+   * A write probe sends only an unknown parameter, so it can't create anything: Stripe answers 403
+   * when the key lacks the permission and 400 (unknown parameter) when it has it. Any other answer
+   * means Cosimo can't tell.
+   */
+  private async probeWrite(name: string, path: string): Promise<PermissionCheck> {
+    try {
+      await this.call("POST", path, { cosimo_permission_check: 1 });
+      return { name, ok: null, detail: "Stripe accepted the check request, so the result is unknown." };
+    } catch (e) {
+      if (e instanceof ProviderError && e.status === 403 && e.code === "more_permissions_required")
+        return { name, ok: false, detail: e.message };
+      if (e instanceof ProviderError && e.status === 400) return { name, ok: true, detail: null };
+      return { name, ok: null, detail: couldNotCheck(e) };
+    }
+  }
+
+  /** Each method's account capability. Account: Read is optional; without it every method is unknown. */
+  private async methodStatuses(methods: PaymentMethodType[]): Promise<SetupCheck["methods"]> {
+    let caps: Obj | null = null;
+    let detail: string | null = null;
+    try {
+      caps = obj((await this.call("GET", "/v1/account")).capabilities);
+      if (!caps) detail = "Stripe didn't report the account's capabilities.";
+    } catch (e) {
+      detail =
+        e instanceof ProviderError && e.status === 403
+          ? "Add Account: Read to the key to let Cosimo check payment methods."
+          : couldNotCheck(e);
+    }
+    return methods.map((type) => {
+      const v = str(caps?.[METHOD_CAPABILITY[type]]);
+      const status: MethodStatus = v === "active" || v === "inactive" || v === "pending" ? v : "unknown";
+      return {
+        type,
+        status,
+        detail: status === "unknown" ? (detail ?? "Stripe didn't report this method's status.") : null,
+      };
+    });
+  }
+
+  /** The events the endpoint at `url` doesn't send, or null when there is none or it can't be read. */
+  private async missingEvents(url: string): Promise<string[] | null> {
+    try {
+      const r = await this.call("GET", "/v1/webhook_endpoints", { limit: 100 });
+      const ep = ((r.data as unknown[] | undefined) ?? []).map(obj).find((w) => str(w?.url) === url);
+      if (!ep) return null;
+      const enabled = new Set(((ep.enabled_events as unknown[] | undefined) ?? []).map(String));
+      if (enabled.has("*")) return [];
+      return WEBHOOK_EVENTS.filter((e) => !enabled.has(e));
+    } catch {
+      return null;
+    }
+  }
+
+  async ensureCustomer(contact: { id: string; name: string; email: string | null }, idempotencyKey?: string) {
     const c = await this.call(
       "POST",
       "/v1/customers",
       { name: contact.name, email: contact.email ?? undefined, metadata: { cosimo_contact_id: contact.id } },
-      `cosimo-customer-${contact.id}`,
+      idempotencyKey ?? `cosimo-customer-${contact.id}`,
     );
     return str(c.id)!;
   }
@@ -316,6 +449,12 @@ export class HttpStripe implements PaymentProvider {
       description: "Cosimo online invoice payments",
     });
     return { id: str(w.id)!, secret: str(w.secret)! };
+  }
+
+  async updateWebhook(id: string, events: readonly string[]) {
+    await this.call("POST", `/v1/webhook_endpoints/${encodeURIComponent(id)}`, {
+      enabled_events: [...events],
+    });
   }
 
   async deleteWebhook(id: string) {

@@ -11,6 +11,27 @@ export interface ProviderAccount {
   livemode: boolean;
 }
 
+/** One permission the key needs. `ok` is null when Cosimo couldn't tell. */
+export interface PermissionCheck {
+  name: string;
+  ok: boolean | null;
+  /** The provider's message (IDs and URLs stripped), or why it couldn't be checked. */
+  detail: string | null;
+}
+
+export type MethodStatus = "active" | "inactive" | "pending" | "unknown";
+
+/** What a key can do in the provider account: the permissions Cosimo uses and each method's status. */
+export interface SetupCheck {
+  permissions: PermissionCheck[];
+  methods: { type: PaymentMethodType; status: MethodStatus; detail: string | null }[];
+  /**
+   * For the webhook endpoint at the URL passed in: the events it doesn't send. Null when there is
+   * no URL, no endpoint at it, or the key can't list endpoints.
+   */
+  missingEvents: string[] | null;
+}
+
 export interface CreateSessionInput {
   orgId: string;
   invoice: { id: string; number: string };
@@ -59,6 +80,15 @@ export type SessionResult =
 export type ProviderEvent =
   | { id: string; type: string; kind: "session"; sessionId: string }
   | { id: string; type: string; kind: "payment_intent"; paymentIntentId: string }
+  /** A charge now has its balance transaction, so the fee is known. */
+  | {
+      id: string;
+      type: string;
+      kind: "charge";
+      chargeId: string;
+      paymentIntentId: string;
+      balanceTxnId: string;
+    }
   /** Refunds, disputes, payouts: stored for later processing; nothing is posted. */
   | { id: string; type: string; kind: "unhandled" }
   | { id: string; type: string; kind: "ignored" };
@@ -66,8 +96,19 @@ export type ProviderEvent =
 export interface PaymentProvider {
   readonly name: "stripe";
   testConnection(): Promise<ProviderAccount>;
-  /** Create the provider's customer for a contact. */
-  ensureCustomer(contact: { id: string; name: string; email: string | null }): Promise<string>;
+  /**
+   * Check the key's permissions and whether `methods` are active, without creating anything. Each
+   * check that fails for another reason is reported as unknown rather than thrown.
+   */
+  checkSetup(methods: PaymentMethodType[], webhookUrl?: string | null): Promise<SetupCheck>;
+  /**
+   * Create the provider's customer for a contact. `idempotencyKey` overrides the per-contact key
+   * (to replace a customer that no longer exists in the account).
+   */
+  ensureCustomer(
+    contact: { id: string; name: string; email: string | null },
+    idempotencyKey?: string,
+  ): Promise<string>;
   createSession(input: CreateSessionInput): Promise<ProviderSession>;
   getSession(id: string): Promise<SessionResult>;
   /** Close an open session so it can't be paid any more. Fails when it already completed or expired. */
@@ -81,18 +122,44 @@ export interface PaymentProvider {
   /** Verify the signature and parse the event. Throws `WebhookSignatureError` when it fails. */
   verifyWebhook(signature: string | undefined, rawBody: string, now?: number): ProviderEvent;
   registerWebhook(url: string): Promise<{ id: string; secret: string }>;
+  /** Set the events a registered endpoint sends. */
+  updateWebhook(id: string, events: readonly string[]): Promise<void>;
   deleteWebhook(id: string): Promise<void>;
 }
 
 export class WebhookSignatureError extends Error {}
 
-/** A provider API error. `status` is 0 for network failures. */
+/** A provider API error. `status` is 0 for network failures; `param` names the rejected parameter. */
 export class ProviderError extends Error {
   constructor(
     message: string,
     readonly status: number,
     readonly code?: string,
+    readonly param?: string,
   ) {
     super(message);
   }
+}
+
+/**
+ * Provider text that is stored or shown: account IDs, request IDs, keys, and URLs removed, so an
+ * error message can't leak which account or request it came from.
+ */
+export function scrubProviderText(text: string): string {
+  return (
+    text
+      .replace(/\s*\(https?:\/\/[^)]*\)/g, "")
+      // Keep the sentence readable: "edit permissions at <url>" becomes "at the Stripe dashboard".
+      .replace(/https?:\/\/dashboard\.stripe\.com\S*?(?=[.,;]?(?:\s|$))/g, "the Stripe dashboard")
+      .replace(/https?:\/\/\S+?(?=[.,;]?(?:\s|$))/g, "Stripe's documentation")
+      // Stripe masks keys in messages as rk_live_...AB12; drop the fragment too.
+      .replace(/\b(?:sk|rk|pk)_(?:test|live)_[\w*.]+/g, "[key]")
+      .replace(/\bwhsec_\w+/g, "[secret]")
+      .replace(/\bacct_\w+/g, "[account]")
+      .replace(/\s*\(?\b(?:request(?: id)?:?\s*)?req_\w+\)?/gi, "")
+      .replace(/\s*;?\s*(?:see|visit)\s*\.?$/i, "")
+      .replace(/\s+([.,;:])/g, "$1")
+      .replace(/\s{2,}/g, " ")
+      .trim()
+  );
 }
