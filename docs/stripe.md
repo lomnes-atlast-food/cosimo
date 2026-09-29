@@ -26,12 +26,23 @@ In the Stripe dashboard, under **Developers → API keys → Create restricted k
 | Webhook Endpoints | Write |
 | Events | Read |
 
+Every permission in the table is needed. **Test connection doesn't catch a missing permission yet**
+([#58](https://github.com/steve-lomnes/cosimo/issues/58)). It only proves the key can read, so a key
+without, say, Customers write passes. The first customer to open a pay link then gets an error page,
+and Stripe's log shows `403 more_permissions_required`. Check the table before you save.
+
 A full secret key (`sk_...`) also works, but a restricted key (`rk_...`) limits what a leaked key can
 do. Publishable keys (`pk_...`) are rejected.
 
 Start with a **test mode** key (`rk_test_...`). Pay links then open Stripe's test Checkout, where the
 card `4242 4242 4242 4242` with any future date and CVC succeeds. The invoice page and the settings
 show a **Test mode** badge. Switch to a live key when you're ready.
+
+Test mode and live mode are separate in Stripe: each has its own keys, payment method settings,
+webhooks, and customers. If you switch an organization between a test key and a live key, invoices
+for customers who already opened a pay link can fail with "No such customer", because Cosimo reuses
+the Stripe customer from the other mode ([#58](https://github.com/steve-lomnes/cosimo/issues/58)). To
+test live after testing in test mode, or the other way round, use a new customer contact.
 
 ## 2. Add the key to Cosimo
 
@@ -42,9 +53,22 @@ Only owners see this tab; AI assistants can't change it.
   any time.
 - The key is encrypted with the instance master key (AES-256-GCM). It never appears in API
   responses, logs, the audit log, or exports.
-- Choose the payment methods to offer: **card**, **ACH Direct Debit** (`us_bank_account`), and
-  **bank transfer** (`customer_balance`, where Stripe shows the customer account details to send a
-  transfer to).
+- Choose the payment methods to offer. Cosimo and the Stripe dashboard use different names for
+  them:
+
+  | Stripe dashboard | Cosimo setting | Stripe API type |
+  |---|---|---|
+  | Cards | card | `card` |
+  | ACH Direct Debit | ACH Direct Debit | `us_bank_account` |
+  | Bank Transfers | bank transfer | `customer_balance` |
+
+  **Each method you offer must be active in Stripe first**, under **Settings → Payments → Payment
+  methods**, in the same mode as the key (test and live are set separately). Stripe rejects the
+  whole checkout if any offered method isn't active, so card payments fail too. The error in
+  Stripe's log is `The payment method type provided: customer_balance is invalid`. Save doesn't check
+  this yet ([#58](https://github.com/steve-lomnes/cosimo/issues/58)).
+
+  **Link**, Stripe's saved-card wallet, can appear with card and is recorded as a card payment.
 - On first setup Cosimo creates a **Stripe Clearing** asset account (code 1090, or the next free
   code) and uses **6300 Bank and Merchant Fees** for Stripe's fees, creating it if your chart doesn't
   have it. You can pick other accounts instead.
@@ -79,6 +103,8 @@ reminders say `Pay online: <link>`. The link is
 
 - For an open invoice it goes straight to Checkout for the **balance due**, so after a partial
   payment the next checkout is for the rest.
+- Stripe won't take less than **$0.50** through Checkout. An invoice with a smaller balance due can't
+  be paid online, and its link shows an error page. Ask for another payment method instead.
 - A paid invoice shows "This invoice is paid", a bank payment on its way shows "Your payment is
   processing", and a draft or void invoice shows that the link isn't available. These pages show
   only your organization name and the invoice number.
@@ -96,12 +122,22 @@ When Stripe reports a successful payment, Cosimo records, as the **Payment provi
 1. A **payment received** from the customer into **Stripe Clearing** (method `stripe`, reference the
    PaymentIntent ID), applied to the invoice.
 2. **Stripe's fee** as a journal entry: debit the fee account, credit Stripe Clearing, with the memo
-   "Stripe fee, invoice <number>". Bank payments settle later; their fee is posted when Stripe
-   reports it (the polling job checks).
+   "Stripe fee, invoice <number>", dated the day of the payment.
 
-When Stripe pays out, the clearing account holds the payout amount (payments less fees). Until
-payout matching arrives, record each payout as a transfer from Stripe Clearing to checking when it
-shows up in the bank feed.
+The payment's journal entry reads "Payment from <customer> (<PaymentIntent ID>)", like any payment.
+The payment's own memo says how it was paid, for example "Paid online by card, invoice INV-1001".
+
+**The fee usually arrives later than the payment.** Stripe works out the fee a few seconds after the
+charge, often after it has reported the payment. Cosimo then records the payment first and posts the
+fee on its next scheduled check, which runs every 6 hours when webhooks are on (every 15 minutes
+without). Until then, Stripe Clearing shows the full payment rather than Stripe's net. Making this
+immediate is tracked in [#58](https://github.com/steve-lomnes/cosimo/issues/58). Bank payments
+settle days later, and their fee is posted the same way once Stripe reports it.
+
+Stripe takes its fee when the customer pays, not when it pays out, so once the fee is posted Stripe
+Clearing matches your Stripe balance: payments less fees. A payout then moves that net amount to
+your bank with no fee in it. Until payout matching arrives, record each payout as a transfer from
+Stripe Clearing to checking when it shows up in the bank feed.
 
 Provider payments auto-approve by default, but the org's review threshold and review policies still
 apply (add a policy for the **Payment provider** actor to hold them). A payment that doesn't match an
@@ -115,6 +151,29 @@ transaction as the payment.
 
 Refunds, disputes, and payouts are received and stored, but nothing is posted for them yet; handle
 them by hand for now.
+
+## When a pay link shows an error
+
+If a customer sees "Online payment isn't working right now", Stripe refused to create the checkout.
+Cosimo doesn't show this on the invoice yet
+([#58](https://github.com/steve-lomnes/cosimo/issues/58)); to find the reason:
+
+1. Search the server log for `pay link failed`. The message is Stripe's.
+2. Or open **Developers → Logs** in the Stripe dashboard (in the key's mode) and find the failed
+   `POST /v1/checkout/sessions` or `POST /v1/customers` request.
+
+The usual causes:
+
+| Stripe says | Fix |
+|---|---|
+| `403 more_permissions_required` | Add the named permission to the restricted key (see the table above). |
+| `payment method type provided: … is invalid` | Activate that method in Stripe, or turn it off in Cosimo. |
+| The amount is below the minimum | The balance due is under $0.50. Ask for another payment method. |
+
+**After fixing the cause, use Replace link on the invoice** (or wait 24 hours). Cosimo retries with
+the same request key, and Stripe returns the stored error for that key for 24 hours, even once the
+cause is fixed. Stripe's log shows this as a request with an **Original request** field. A new
+link gets a new key. Send the customer the new link, because the old one stops working.
 
 ## Typical fees
 
@@ -137,3 +196,11 @@ email says `Pay online: <link>`. Cosimo doesn't know when such a payment is made
 Refund and dispute handling, matching Stripe payouts in Categorize, and a Stripe status card for
 instance admins come in a later release. `cosimo doctor` already checks each org's Stripe key, mode,
 webhook, and last event.
+
+Known gaps, tracked in [#58](https://github.com/steve-lomnes/cosimo/issues/58):
+
+- Test connection and Save don't check write permissions or payment method activation.
+- Pay-link errors appear only in the server log.
+- Fees wait for the next scheduled check.
+- A failed checkout's error is replayed for 24 hours.
+- Stripe customers aren't kept per mode.
