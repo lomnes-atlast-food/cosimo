@@ -342,6 +342,7 @@ const ACTOR_OPTIONS = [
   ["mcp", "AI assistant (MCP)"],
   ["api_token", "API token"],
   ["rule", "Rule"],
+  ["integration", "Payment provider (Stripe)"],
   ["user", "Person"],
   ["*", "Anyone"],
 ] as const;

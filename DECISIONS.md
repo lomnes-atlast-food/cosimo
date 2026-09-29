@@ -355,3 +355,22 @@ Choices made during the build. SPEC.md is the source of truth for requirements; 
   once-per-instance seed.
 - **2026-09-28**: GitHub account renamed to steve-lomnes; repo, image and signing identity moved;
   installers accept both identities for older releases.
+- **Online invoice payments go through a provider interface, Stripe first** (#55, changes SPEC §17):
+  `services/payment-providers/` defines a small `PaymentProvider` (test connection, customer,
+  Checkout session, session state, webhook verification, webhook registration) with normalized
+  results, and `stripe.ts` implements it over plain `fetch` (no SDK, no Stripe.js; the pay link
+  redirects to hosted Checkout, so the CSP is unchanged). Settings are stored provider-agnostically:
+  a mode (`off`, `manual_link`, `stripe`), an encrypted credentials blob, and options. **The pay
+  token is derived, not stored**: `hmac(master key, "pay:org:invoice:version")`, with only its
+  SHA-256 kept for lookup, so a database copy alone yields no working links (like Plaid tokens, links
+  depend on the master key). Finalizing runs without the app context, so it only bumps the link
+  version; the hash is filled in by code holding the key, and a lookup miss fills any missing hashes
+  before giving up. **Idempotency uses a new `provider_payments` table** with a unique (provider,
+  payment ID) key, written in the same transaction as the payment, rather than a unique index on
+  `payments(method, reference)`: hand-entered payments may already repeat `method = "stripe"`
+  references, and the table also links each payment to its fee entry. The webhook, polling, and
+  the customer's return all call one `reconcileSession`, which re-reads the session from Stripe.
+  **A new `integration` actor** records these payments: it auto-approves by default, still subject
+  to the review threshold and owner policies, and `SubmitOptions.requireReview` forces anything that
+  doesn't match an open invoice into review. Fees use a new `payment_fee` source type linked to the
+  payment, not `invoice_payment`, so rejecting a fee doesn't void the payment.

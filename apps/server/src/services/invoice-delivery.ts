@@ -7,14 +7,18 @@ import { fmtMoney, type InvoicePdfData, renderInvoicePdf } from "../pdf/index.ts
 import { invoiceView, mustGetInvoice } from "./documents.ts";
 import { settingsRow } from "./ledger.ts";
 import type { Mailer } from "./mailer.ts";
+import { payLinker } from "./online-payments.ts";
 import type { BlobStore } from "./storage.ts";
 
 type Reader = OrgDb | OrgTx;
 
 export async function invoicePdf(ctx: AppContext, db: Reader, orgId: string, invoiceId: string) {
   const inv = await mustGetInvoice(db, invoiceId);
-  const v = await invoiceView(db, inv);
+  const v = await invoiceView(db, inv, await payLinker(ctx, db, orgId));
   const s = await settingsRow(db);
+  // The online pay link, or in payment link mode the URL entered on the invoice.
+  const payUrl =
+    v.balance_due > 0 ? (v.pay_url ?? (s.paymentProvider === "manual_link" ? v.manual_pay_url : null)) : null;
   const reg = await ctx.orgs.get(orgId);
   const customer = await db.select().from(org.contacts).where(eq(org.contacts.id, inv.customerId)).get();
   let logo: InvoicePdfData["org"]["logo"] = null;
@@ -59,12 +63,14 @@ export async function invoicePdf(ctx: AppContext, db: Reader, orgId: string, inv
       amount: l.amount,
     })),
     paymentInstructions: s.paymentInstructions,
+    payUrl,
   });
   return {
     bytes,
     filename: `${v.number.replace(/[^\w.-]+/g, "_")}.pdf`,
     view: v,
     settings: s,
+    payUrl,
     orgName: s.dba || reg?.name || s.legalName,
   };
 }
@@ -96,6 +102,7 @@ export async function emailInvoice(
   const text = [
     `Hello ${v.customer_name},`,
     opts.message?.trim() || intro,
+    pdf.payUrl ? `Pay online: ${pdf.payUrl}` : null,
     pdf.settings.paymentInstructions ? `How to pay:\n${pdf.settings.paymentInstructions}` : null,
     `Thank you,\n${pdf.orgName}`,
   ]

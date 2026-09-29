@@ -53,6 +53,7 @@ export const SOURCE_LABEL: Record<string, string> = {
   bank_transaction: "Bank",
   invoice: "Invoice",
   invoice_payment: "Payment received",
+  payment_fee: "Payment fee",
   bill: "Bill",
   bill_payment: "Bill payment",
   transfer: "Transfer",

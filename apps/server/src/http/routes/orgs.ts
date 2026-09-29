@@ -5,6 +5,7 @@ import { and, desc, eq, gt, isNull, lt } from "drizzle-orm";
 import { hashToken, randomToken } from "../../crypto.ts";
 import { appendAudit } from "../../services/audit.ts";
 import { instanceAudit } from "../../services/instance-audit.ts";
+import { stripeOptions } from "../../services/payment-providers/index.ts";
 import { verifyPlaidKeys } from "../../services/plaid.ts";
 import { loadSampleData } from "../../services/sample-data.ts";
 import { ApiError, badRequest, conflict, forbidden, notFound } from "../errors.ts";
@@ -48,6 +49,11 @@ export const OrgSettingsSchema = z
     reminders_enabled: z.boolean(),
     plaid_override: z.boolean(),
     plaid_env: z.enum(["sandbox", "production"]).nullable(),
+    payment_provider: z
+      .enum(["off", "manual_link", "stripe"])
+      .describe("Online invoice payments: off, a payment link entered per invoice, or Stripe."),
+    online_pay_default: z.boolean().describe("New invoices accept online payment unless turned off."),
+    payment_livemode: z.boolean().nullable().describe("With Stripe: false while using a test-mode key."),
   })
   .openapi("OrgSettings");
 
@@ -89,6 +95,9 @@ export function settingsView(s: typeof org.orgSettings.$inferSelect) {
         ? ("production" as const)
         : ("sandbox" as const)
       : null,
+    payment_provider: s.paymentProvider,
+    online_pay_default: s.onlinePayDefault,
+    payment_livemode: s.paymentProvider === "stripe" ? stripeOptions(s).livemode : null,
   };
 }
 

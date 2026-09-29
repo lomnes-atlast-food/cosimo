@@ -4,15 +4,20 @@
  */
 import { accessSync, constants, existsSync, readdirSync, statfsSync, statSync } from "node:fs";
 import { join } from "node:path";
-import { orgMigrations, pendingMigrations, systemMigrations } from "@cosimo/db";
+import { orgMigrations, org as orgSchema, pendingMigrations, systemMigrations } from "@cosimo/db";
 import { VERSION } from "@cosimo/shared";
+import { desc } from "drizzle-orm";
 import { type Config, loadConfig } from "../config.ts";
 import { type AppContext, createContext } from "../context.ts";
 import { SecretBox } from "../crypto.ts";
 import { silentLogger } from "../logger.ts";
 import { type BackupBucket, type BucketObject, backupBucket } from "./backup.ts";
 import { verifyOrg } from "./chain.ts";
+import { settingsRow } from "./ledger.ts";
 import type { Mailer } from "./mailer.ts";
+import { stripeSecrets } from "./payment-providers/index.ts";
+import { stripeClient } from "./payment-providers/stripe.ts";
+import { ProviderError } from "./payment-providers/types.ts";
 import { plaidCredentials } from "./plaid.ts";
 import { type PlaidCredentials, PlaidError, plaidClient } from "./plaid-client.ts";
 import { createStore } from "./storage.ts";
@@ -324,6 +329,74 @@ async function serviceChecks(
       });
     }
   }
+  // ---------------------------------------------------------------- online payments (Stripe)
+  const stripeOrgs: { name: string; secrets: ReturnType<typeof stripeSecrets>; lastEvent: string | null }[] =
+    [];
+  for (const o of await ctx.orgs.list()) {
+    try {
+      const h = await ctx.orgs.mustOpen(o.id);
+      const st = await settingsRow(h.db);
+      if (st.paymentProvider !== "stripe") continue;
+      const last = await h.db
+        .select({ at: orgSchema.providerEvents.receivedAt })
+        .from(orgSchema.providerEvents)
+        .orderBy(desc(orgSchema.providerEvents.receivedAt))
+        .limit(1)
+        .get();
+      stripeOrgs.push({ name: o.name, secrets: stripeSecrets(ctx.secrets, st), lastEvent: last?.at ?? null });
+    } catch {
+      // reported by the database checks
+    }
+  }
+  for (const o of stripeOrgs) {
+    const name = stripeOrgs.length > 1 ? `Stripe (${o.name})` : "Stripe";
+    if (!o.secrets) {
+      add({
+        id: "stripe",
+        name,
+        status: "fail",
+        message: "Online payments are set to Stripe but no key is stored",
+        remediation: "An owner can add the key under Settings → Online payments.",
+      });
+      continue;
+    }
+    const live = /^(sk|rk)_live_/.test(o.secrets.secret_key);
+    try {
+      await stripeClient({ secretKey: o.secrets.secret_key }, f).testConnection();
+    } catch (e) {
+      const bad = e instanceof ProviderError && e.status >= 400 && e.status < 500;
+      add({
+        id: "stripe",
+        name,
+        status: bad ? "fail" : "warn",
+        message: (e as Error).message,
+        remediation: bad
+          ? "Create a new restricted key in the Stripe dashboard and enter it under Settings → Online payments."
+          : "Stripe could not be reached; check outbound HTTPS.",
+      });
+      continue;
+    }
+    const mode = live ? "live mode" : "test mode";
+    const hook = o.secrets.webhook_endpoint_id
+      ? "webhook registered"
+      : o.secrets.webhook_secret
+        ? "webhook secret entered by hand"
+        : "no webhook, polling every 15 minutes";
+    const last = o.lastEvent ? `last event ${o.lastEvent}` : "no events yet";
+    if (live && !publicUrl.startsWith("https://")) {
+      add({
+        id: "stripe",
+        name,
+        status: "warn",
+        message: `Key valid (${mode}, ${hook}) but the public URL is not HTTPS: ${publicUrl}`,
+        remediation:
+          "Customers pay through pay links on the public URL; set server.public_url to the https:// address.",
+      });
+    } else {
+      add({ id: "stripe", name, status: "pass", message: `Key valid (${mode}, ${hook}, ${last})` });
+    }
+  }
+
   const mailer = ctx.services.mailer as Mailer | undefined;
   const smtp = await ctx.settings.get("smtp");
   if (smtp.enabled && mailer) {

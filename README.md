@@ -153,7 +153,8 @@ See [docs/importing.md](docs/importing.md).
 
 Payroll, inventory, sales tax calculation, and multi-currency are out of scope for now. Bank feeds
 through Plaid need your own Plaid account, and Plaid's pricing applies; file import is free and
-works everywhere.
+works everywhere. Online invoice payments go through your own Stripe account; Stripe refunds,
+disputes, and payout matching aren't handled automatically yet.
 
 ## Documentation
 
@@ -161,6 +162,7 @@ works everywhere.
 |---|---|
 | Deploying (Docker, Fly.io, Railway, Render, Coolify, systemd) | [docs/deployment.md](docs/deployment.md) |
 | Bank feeds | [docs/plaid.md](docs/plaid.md) |
+| Online invoice payments (Stripe) | [docs/stripe.md](docs/stripe.md) |
 | Importing from other products | [docs/importing.md](docs/importing.md) |
 | Attachments and backups in S3-compatible storage | [docs/object-storage.md](docs/object-storage.md) |
 | Export format | [docs/export-format.md](docs/export-format.md) |

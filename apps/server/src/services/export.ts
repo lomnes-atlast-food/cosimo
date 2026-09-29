@@ -30,6 +30,7 @@ export const EXPORT_FORMAT_VERSION = 1;
 const SECRET_COLUMNS: [string, string, InValue][] = [
   ["bank_connections", "access_token_enc", ""],
   ["org_settings", "plaid_secret_enc", null],
+  ["org_settings", "payment_credentials_enc", null],
 ];
 const SKIP_TABLES = new Set(["_cosimo_migrations"]);
 

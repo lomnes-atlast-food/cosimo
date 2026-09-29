@@ -11,8 +11,11 @@ export interface JobDef {
   name: string;
   /** "org" jobs run for each active org; "instance" jobs once. */
   scope: "org" | "instance";
-  /** Given the last successful start time (or null), is the job due now? */
-  due(now: Date, last: Date | null, ctx: AppContext): boolean;
+  /**
+   * Given the last successful start time (or null), is the job due now? Org jobs also get the org,
+   * for schedules that depend on its settings.
+   */
+  due(now: Date, last: Date | null, ctx: AppContext, orgId?: string | null): boolean | Promise<boolean>;
   run(ctx: AppContext, orgId: string | null): Promise<string | undefined>;
 }
 
@@ -105,7 +108,7 @@ export class Scheduler {
         for (const j of jobs) {
           const targets = j.scope === "org" ? (await this.ctx.orgs.list()).map((o) => o.id) : [null];
           for (const orgId of targets) {
-            if (!j.due(now, await this.lastRun(j.name, orgId), this.ctx)) continue;
+            if (!(await j.due(now, await this.lastRun(j.name, orgId), this.ctx, orgId))) continue;
             await this.runJob(j, orgId);
           }
         }

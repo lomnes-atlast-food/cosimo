@@ -37,6 +37,17 @@ export const orgSettings = sqliteTable(
     plaidEnv: text("plaid_env"),
     plaidClientId: text("plaid_client_id"),
     plaidSecretEnc: text("plaid_secret_enc"),
+    /** Online invoice payments: `off`, `manual_link` (a pasted URL per invoice), or `stripe`. */
+    paymentProvider: text("payment_provider", { enum: ["off", "manual_link", "stripe"] })
+      .notNull()
+      .default("off"),
+    /** Encrypted JSON of the provider's secrets (Stripe: secret key, webhook secret and endpoint ID). */
+    paymentCredentialsEnc: text("payment_credentials_enc"),
+    /** Provider options, validated per provider (Stripe: methods, account name, livemode). */
+    paymentOptionsJson: text("payment_options_json"),
+    paymentClearingAccountId: text("payment_clearing_account_id"),
+    paymentFeeAccountId: text("payment_fee_account_id"),
+    onlinePayDefault: integer("online_pay_default", { mode: "boolean" }).notNull().default(false),
     createdAt: text("created_at").notNull().default(now),
   },
   (t) => [check("org_settings_singleton", sql`${t.id} = 1`)],
@@ -85,7 +96,9 @@ export const journalEntries = sqliteTable(
     reversesEntryId: text("reverses_entry_id"),
     reversedByEntryId: text("reversed_by_entry_id"),
     createdBy: text("created_by"),
-    createdByActor: text("created_by_actor", { enum: ["user", "api_token", "mcp", "rule", "system"] })
+    createdByActor: text("created_by_actor", {
+      enum: ["user", "api_token", "mcp", "rule", "system", "integration"],
+    })
       .notNull()
       .default("user"),
     createdAt: text("created_at").notNull().default(now),
@@ -186,8 +199,25 @@ export const invoices = sqliteTable(
     sentAt: text("sent_at"),
     lastReminderAt: text("last_reminder_at"),
     voidedAt: text("voided_at"),
+    onlinePayEnabled: integer("online_pay_enabled", { mode: "boolean" }).notNull().default(false),
+    manualPayUrl: text("manual_pay_url"),
+    /**
+     * The pay link is derived from the master key, the invoice, and this version (0 = no link yet);
+     * only the SHA-256 of the token is stored, for lookup. Rotating bumps the version.
+     */
+    payTokenVersion: integer("pay_token_version").notNull().default(0),
+    payTokenHash: text("pay_token_hash"),
+    paySessionId: text("pay_session_id"),
+    paySessionAmount: integer("pay_session_amount"),
+    paySessionExpiresAt: text("pay_session_expires_at"),
+    onlinePayStatus: text("online_pay_status", { enum: ["processing"] }),
+    payLinkOpenedAt: text("pay_link_opened_at"),
   },
-  (t) => [uniqueIndex("invoices_number_uq").on(t.number), index("invoices_customer_idx").on(t.customerId)],
+  (t) => [
+    uniqueIndex("invoices_number_uq").on(t.number),
+    index("invoices_customer_idx").on(t.customerId),
+    uniqueIndex("invoices_pay_token_hash_uq").on(t.payTokenHash),
+  ],
 );
 
 export const invoiceLines = sqliteTable(
@@ -289,6 +319,69 @@ export const paymentApplications = sqliteTable(
     primaryKey({ columns: [t.paymentId, t.documentType, t.documentId] }),
     index("payment_applications_doc_idx").on(t.documentType, t.documentId),
     check("payment_applications_amount_pos", sql`${t.amount} > 0`),
+  ],
+);
+
+// ---------------------------------------------------------------------------
+// Online payments (payment providers such as Stripe)
+// ---------------------------------------------------------------------------
+
+/** The provider's customer object for a contact, created on the first checkout. */
+export const providerCustomers = sqliteTable(
+  "provider_customers",
+  {
+    contactId: text("contact_id")
+      .notNull()
+      .references(() => contacts.id),
+    provider: text("provider").notNull(),
+    providerCustomerId: text("provider_customer_id").notNull(),
+    createdAt: text("created_at").notNull().default(now),
+  },
+  (t) => [primaryKey({ columns: [t.contactId, t.provider] })],
+);
+
+/** Every webhook event received, once (a redelivery hits the unique key and is ignored). */
+export const providerEvents = sqliteTable(
+  "provider_events",
+  {
+    id: text("id").primaryKey(),
+    provider: text("provider").notNull(),
+    eventId: text("event_id").notNull(),
+    type: text("type").notNull(),
+    receivedAt: text("received_at").notNull().default(now),
+    processedAt: text("processed_at"),
+    result: text("result", { enum: ["recorded", "ignored", "unhandled", "error"] }),
+    error: text("error"),
+  },
+  (t) => [
+    uniqueIndex("provider_events_event_uq").on(t.provider, t.eventId),
+    index("provider_events_pending_idx").on(t.processedAt),
+  ],
+);
+
+/**
+ * One row per provider payment recorded in the books. The unique (provider, payment) key is the
+ * idempotency guard: the webhook, polling, and the customer's return all record through it.
+ */
+export const providerPayments = sqliteTable(
+  "provider_payments",
+  {
+    provider: text("provider").notNull(),
+    providerPaymentId: text("provider_payment_id").notNull(),
+    paymentId: text("payment_id")
+      .notNull()
+      .references(() => payments.id),
+    invoiceId: text("invoice_id"),
+    gross: integer("gross").notNull(),
+    fee: integer("fee"),
+    feeEntryId: text("fee_entry_id"),
+    methodType: text("method_type"),
+    balanceTxnId: text("balance_txn_id"),
+    createdAt: text("created_at").notNull().default(now),
+  },
+  (t) => [
+    uniqueIndex("provider_payments_uq").on(t.provider, t.providerPaymentId),
+    index("provider_payments_invoice_idx").on(t.invoiceId),
   ],
 );
 
