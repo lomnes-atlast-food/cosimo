@@ -533,6 +533,7 @@ describe("MCP", () => {
       "propose_payment_date_change",
       "list_recurring_templates",
       "propose_recurring_template",
+      "sync_bank_feed",
     ])
       expect(names).toContain(n);
     for (const forbidden of ["approve", "reject", "void", "reverse", "delete", "lock"])

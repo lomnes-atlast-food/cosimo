@@ -41,6 +41,9 @@ Work one month at a time, oldest first.
 
 1. **See what's open.** Call `list_uncategorized_transactions` (page with `cursor`) and
    `list_pending_reviews`, so you don't propose something twice.
+   If a bank account's feed looks stale (`last_synced_at` well behind today, or `last_sync_status`
+   is `error`), call `sync_bank_feed` first. If its `connection_status` is `needs_reauth`, tell the
+   person to reconnect it in Cosimo; you can't.
 2. **Categorize.** For each transaction:
    - Match the payee against the profile's recurring items and the notes first.
    - Use `search_transactions` with the payee to see how earlier ones were categorized.

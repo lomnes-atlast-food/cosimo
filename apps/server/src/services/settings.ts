@@ -28,6 +28,10 @@ export interface PlaidSettings {
   webhook_url: string;
   /** OAuth redirect URI registered in the Plaid dashboard (needed by some institutions). */
   redirect_uri: string;
+  /** Minimum seconds between syncs an AI assistant asks for (`sync_bank_feed`). */
+  sync_cooldown_seconds: number;
+  /** Let `sync_bank_feed` call /transactions/refresh, which Plaid bills separately. */
+  refresh_enabled: boolean;
 }
 
 export interface LastBackup {
@@ -51,7 +55,16 @@ const DEFAULTS: InstanceSettingsShape = {
   last_backup: null,
   dynamic_client_registration: true,
   smtp: { enabled: false, host: "", port: 587, user: "", password: "", from: "", secure: false },
-  plaid: { enabled: false, env: "sandbox", client_id: "", secret: "", webhook_url: "", redirect_uri: "" },
+  plaid: {
+    enabled: false,
+    env: "sandbox",
+    client_id: "",
+    secret: "",
+    webhook_url: "",
+    redirect_uri: "",
+    sync_cooldown_seconds: 60,
+    refresh_enabled: false,
+  },
 };
 
 const SECRET_FIELDS: Record<string, string[]> = { smtp: ["password"], plaid: ["secret"] };

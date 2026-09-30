@@ -12,7 +12,15 @@ import type { AppContext } from "../context.ts";
 import { ApiError, badRequest, conflict, forbidden, notFound, unprocessable } from "../http/errors.ts";
 import type { ActorInfo } from "./actor.ts";
 import { appendAudit } from "./audit.ts";
-import { applyRulesTx, createBankAccountTx, pairImportedTransfersTx } from "./banking.ts";
+import { connectionMessage, isSyncing, syncStatusView, trackSync } from "./bank-sync.ts";
+import {
+  applyRulesTx,
+  type BankTxnView,
+  bankTxnView,
+  createBankAccountTx,
+  mustGetBankAccount,
+  pairImportedTransfersTx,
+} from "./banking.ts";
 import {
   type Jwk,
   type PlaidAccount,
@@ -24,6 +32,7 @@ import {
   REAUTH_CODES,
   type SyncPage,
 } from "./plaid-client.ts";
+import type { OrgHandle } from "./types.ts";
 
 type Reader = OrgDb | OrgTx;
 type ConnRow = typeof org.bankConnections.$inferSelect;
@@ -123,22 +132,6 @@ function assertCanManage(a: ActorInfo) {
 
 // ----------------------------------------------------------------------------- views
 
-const STATUS_HELP: Record<string, string> = {
-  ITEM_LOGIN_REQUIRED: "The bank needs you to sign in again.",
-  PENDING_EXPIRATION: "Access expires soon. Reconnect to keep transactions flowing.",
-  PENDING_DISCONNECT: "The bank will disconnect soon. Reconnect to keep transactions flowing.",
-  USER_PERMISSION_REVOKED: "Access was revoked at the bank. Reconnect to restore it.",
-  NETWORK_ERROR: "Plaid could not be reached. Cosimo will retry on the next sync.",
-};
-
-export function connectionMessage(c: ConnRow): string | null {
-  if (c.status === "active" && !c.errorCode) return null;
-  if (c.status === "disconnected") return "Disconnected. Transactions already imported are kept.";
-  if (c.errorCode && STATUS_HELP[c.errorCode]) return STATUS_HELP[c.errorCode]!;
-  if (c.status === "needs_reauth") return "The bank needs you to reconnect.";
-  return c.errorCode ? `Sync failed (${c.errorCode}). Cosimo will retry.` : null;
-}
-
 export async function listConnections(db: Reader) {
   const conns = await db.select().from(org.bankConnections).all();
   const accts = await db
@@ -157,11 +150,18 @@ function connectionView(c: ConnRow, accts: (typeof org.bankAccounts.$inferSelect
     status: c.status,
     error_code: c.errorCode,
     message: connectionMessage(c),
-    last_synced_at: c.lastSyncedAt,
+    ...syncStatusView(c),
     created_at: c.createdAt,
     accounts: accts
       .filter((a) => a.connectionId === c.id)
-      .map((a) => ({ id: a.id, name: a.name, mask: a.mask, kind: a.kind, is_active: a.isActive })),
+      .map((a) => ({
+        id: a.id,
+        name: a.name,
+        mask: a.mask,
+        kind: a.kind,
+        is_active: a.isActive,
+        provider_account_id: a.providerAccountId,
+      })),
   };
 }
 
@@ -185,7 +185,7 @@ export async function createLinkToken(
   ctx: AppContext,
   orgId: string,
   a: ActorInfo,
-  opts: { connectionId?: string | null } = {},
+  opts: { connectionId?: string | null; accountSelection?: boolean } = {},
 ) {
   assertCanManage(a);
   const h = await ctx.orgs.mustOpen(orgId);
@@ -206,6 +206,8 @@ export async function createLinkToken(
       webhook: await webhookUrl(ctx, orgId),
       redirectUri: p.redirect_uri || null,
       accessToken,
+      // Account selection only applies to update mode: adding accounts to an existing login.
+      accountSelection: Boolean(accessToken && opts.accountSelection),
     });
     return { link_token: r.link_token, expiration: r.expiration, update_mode: Boolean(accessToken) };
   } catch (e) {
@@ -228,6 +230,68 @@ function kindFor(a: PlaidAccount): "checking" | "savings" | "credit_card" | "oth
 /** Plaid products cover deposit and card accounts; loans and investments are skipped by default. */
 function defaultAction(a: PlaidAccount): "new" | "skip" {
   return a.type === "depository" || a.type === "credit" ? "new" : "skip";
+}
+
+/**
+ * Create or link a bank account for each Plaid account per the user's choices; an account with no
+ * choice gets `defaultFor`. Returns how many accounts were added or linked.
+ */
+async function applyAccountChoicesTx(
+  tx: OrgTx,
+  orgId: string,
+  a: ActorInfo,
+  connId: string,
+  plaidAccounts: PlaidAccount[],
+  choices: AccountChoice[],
+  defaultFor: (a: PlaidAccount) => "new" | "skip",
+) {
+  const byId = new Map(choices.map((c) => [c.account_id, c]));
+  let n = 0;
+  for (const pa of plaidAccounts) {
+    const choice: AccountChoice = byId.get(pa.account_id) ?? {
+      account_id: pa.account_id,
+      action: defaultFor(pa),
+    };
+    if (choice.action === "skip") continue;
+    n++;
+    if (choice.action === "link") {
+      const ba = await tx
+        .select()
+        .from(org.bankAccounts)
+        .where(eq(org.bankAccounts.id, choice.bank_account_id))
+        .get();
+      if (!ba) throw notFound("Bank account");
+      if (ba.connectionId) {
+        const other = await tx
+          .select()
+          .from(org.bankConnections)
+          .where(eq(org.bankConnections.id, ba.connectionId))
+          .get();
+        if (other && other.status !== "disconnected")
+          throw conflict(`${ba.name} is already connected to a bank feed.`, "already_linked");
+      }
+      await tx
+        .update(org.bankAccounts)
+        .set({ connectionId: connId, providerAccountId: pa.account_id, mask: pa.mask ?? ba.mask })
+        .where(eq(org.bankAccounts.id, ba.id));
+      await appendAudit(tx, orgId, a, {
+        action: "bank_account.connect",
+        targetType: "bank_account",
+        targetId: ba.id,
+        after: { connection_id: connId },
+      });
+      continue;
+    }
+    await createBankAccountTx(tx, orgId, a, {
+      name: (choice.name || pa.name || pa.official_name || "Bank account").slice(0, 200),
+      kind: kindFor(pa),
+      mask: pa.mask ?? null,
+      ledger_account_id: choice.ledger_account_id ?? null,
+      connection_id: connId,
+      provider_account_id: pa.account_id,
+    });
+  }
+  return n;
 }
 
 /**
@@ -255,8 +319,6 @@ export async function exchangePublicToken(
   const institutionName = institutionId
     ? await client.institutionName(institutionId).catch(() => null)
     : null;
-  const choices = new Map((input.accounts ?? []).map((c) => [c.account_id, c]));
-
   const connId = await h.write(async (tx) => {
     const existing = await tx
       .select()
@@ -285,49 +347,7 @@ export async function exchangePublicToken(
       targetId: id,
       after: { provider: "plaid", institution_name: institutionName, accounts: accounts.length },
     });
-    for (const pa of accounts) {
-      const choice: AccountChoice = choices.get(pa.account_id) ?? {
-        account_id: pa.account_id,
-        action: defaultAction(pa),
-      };
-      if (choice.action === "skip") continue;
-      if (choice.action === "link") {
-        const ba = await tx
-          .select()
-          .from(org.bankAccounts)
-          .where(eq(org.bankAccounts.id, choice.bank_account_id))
-          .get();
-        if (!ba) throw notFound("Bank account");
-        if (ba.connectionId) {
-          const other = await tx
-            .select()
-            .from(org.bankConnections)
-            .where(eq(org.bankConnections.id, ba.connectionId))
-            .get();
-          if (other && other.status !== "disconnected")
-            throw conflict(`${ba.name} is already connected to a bank feed.`, "already_linked");
-        }
-        await tx
-          .update(org.bankAccounts)
-          .set({ connectionId: id, providerAccountId: pa.account_id, mask: pa.mask ?? ba.mask })
-          .where(eq(org.bankAccounts.id, ba.id));
-        await appendAudit(tx, orgId, a, {
-          action: "bank_account.connect",
-          targetType: "bank_account",
-          targetId: ba.id,
-          after: { connection_id: id },
-        });
-        continue;
-      }
-      await createBankAccountTx(tx, orgId, a, {
-        name: (choice.name || pa.name || pa.official_name || "Bank account").slice(0, 200),
-        kind: kindFor(pa),
-        mask: pa.mask ?? null,
-        ledger_account_id: choice.ledger_account_id ?? null,
-        connection_id: id,
-        provider_account_id: pa.account_id,
-      });
-    }
+    await applyAccountChoicesTx(tx, orgId, a, id, accounts, input.accounts ?? [], defaultAction);
     return id;
   });
 
@@ -349,7 +369,7 @@ export async function markReconnected(ctx: AppContext, orgId: string, a: ActorIn
     if (c.status === "disconnected") throw conflict("This connection was removed.", "invalid_state");
     await tx
       .update(org.bankConnections)
-      .set({ status: "active", errorCode: null })
+      .set({ status: "active", errorCode: null, errorMessage: null })
       .where(eq(org.bankConnections.id, connectionId));
     await appendAudit(tx, orgId, a, {
       action: "bank_connection.reauth",
@@ -357,6 +377,99 @@ export async function markReconnected(ctx: AppContext, orgId: string, a: ActorIn
       targetId: connectionId,
       before: { status: c.status, error_code: c.errorCode },
       after: { status: "active" },
+    });
+  });
+  let sync: SyncSummary | null = null;
+  try {
+    sync = await syncConnection(ctx, orgId, connectionId, { userId: a.userId });
+  } catch {
+    // stored on the connection
+  }
+  return { connection: await getConnection(h.db, connectionId), sync };
+}
+
+/** An active connection's access token, for calls an owner makes about its accounts. */
+async function liveToken(ctx: AppContext, db: Reader, connectionId: string) {
+  const c = await mustConnection(db, connectionId);
+  if (c.status === "disconnected") throw conflict("This connection was removed.", "invalid_state");
+  const token = ctx.secrets.reveal(c.accessTokenEnc);
+  if (!token) throw unprocessable("Plaid is not set up for this organization.", "plaid_not_configured");
+  return token;
+}
+
+async function linkedProviderIds(db: Reader, connectionId: string) {
+  const rows = await db
+    .select({ p: org.bankAccounts.providerAccountId })
+    .from(org.bankAccounts)
+    .where(eq(org.bankAccounts.connectionId, connectionId))
+    .all();
+  return new Set(rows.map((r) => r.p).filter((p): p is string => Boolean(p)));
+}
+
+/** Plaid accounts at this login that no bank account in Cosimo is linked to yet (#12). */
+export async function availableAccounts(ctx: AppContext, orgId: string, a: ActorInfo, connectionId: string) {
+  assertCanManage(a);
+  const h = await ctx.orgs.mustOpen(orgId);
+  const client = await mustClient(ctx, h.db);
+  const token = await liveToken(ctx, h.db, connectionId);
+  let accounts: PlaidAccount[];
+  try {
+    ({ accounts } = await client.accountsGet(token));
+  } catch (e) {
+    toApiError(e);
+  }
+  const linked = await linkedProviderIds(h.db, connectionId);
+  return accounts
+    .filter((x) => !linked.has(x.account_id))
+    .map((x) => ({
+      account_id: x.account_id,
+      name: x.name,
+      mask: x.mask ?? null,
+      type: x.type,
+      subtype: x.subtype ?? null,
+    }));
+}
+
+/**
+ * Add accounts to an existing connection after Link update mode with account selection (#12).
+ * Only accounts not already linked are eligible, and an account with no choice is skipped: the
+ * owner picked explicitly. Clears the new-accounts flag, then syncs.
+ */
+export async function addAccounts(
+  ctx: AppContext,
+  orgId: string,
+  a: ActorInfo,
+  connectionId: string,
+  choices: AccountChoice[],
+) {
+  assertCanManage(a);
+  const h = await ctx.orgs.mustOpen(orgId);
+  let accounts: PlaidAccount[] = [];
+  // With nothing chosen this only clears the flag, so it doesn't need Plaid.
+  if (choices.length) {
+    const client = await mustClient(ctx, h.db);
+    const token = await liveToken(ctx, h.db, connectionId);
+    try {
+      ({ accounts } = await client.accountsGet(token));
+    } catch (e) {
+      toApiError(e);
+    }
+  }
+  await h.write(async (tx) => {
+    const c = await mustConnection(tx, connectionId);
+    if (c.status === "disconnected") throw conflict("This connection was removed.", "invalid_state");
+    const linked = await linkedProviderIds(tx, connectionId);
+    const eligible = accounts.filter((x) => !linked.has(x.account_id));
+    const added = await applyAccountChoicesTx(tx, orgId, a, connectionId, eligible, choices, () => "skip");
+    await tx
+      .update(org.bankConnections)
+      .set({ newAccountsAvailable: false })
+      .where(eq(org.bankConnections.id, connectionId));
+    await appendAudit(tx, orgId, a, {
+      action: "bank_connection.add_accounts",
+      targetType: "bank_connection",
+      targetId: connectionId,
+      after: { accounts: added },
     });
   });
   let sync: SyncSummary | null = null;
@@ -389,7 +502,13 @@ export async function disconnect(ctx: AppContext, orgId: string, a: ActorInfo, c
   await h.write(async (tx) => {
     await tx
       .update(org.bankConnections)
-      .set({ status: "disconnected", accessTokenEnc: "", syncCursor: null, errorCode: null })
+      .set({
+        status: "disconnected",
+        accessTokenEnc: "",
+        syncCursor: null,
+        errorCode: null,
+        errorMessage: null,
+      })
       .where(eq(org.bankConnections.id, connectionId));
     await appendAudit(tx, orgId, a, {
       action: "bank_connection.disconnect",
@@ -411,9 +530,15 @@ export interface SyncSummary {
   skipped: number;
   transfers_paired: number;
   rules_applied: number;
+  /** Rows this sync inserted, pending ones included, in insert order. */
+  transaction_ids: string[];
 }
 
-const inFlight = new Map<string, Promise<SyncSummary>>();
+export interface SyncOpts {
+  userId?: string | null;
+  /** Who asked for this sync. When set, every completed or failed sync is audited as them. */
+  actor?: ActorInfo;
+}
 
 /** Plaid sign is money-out positive; ours is money-in positive. Amounts have two decimals. */
 export function plaidCents(amount: number): number {
@@ -436,14 +561,9 @@ export function syncConnection(
   ctx: AppContext,
   orgId: string,
   connectionId: string,
-  opts: { userId?: string | null } = {},
+  opts: SyncOpts = {},
 ): Promise<SyncSummary> {
-  const key = `${orgId}:${connectionId}`;
-  const running = inFlight.get(key);
-  if (running) return running;
-  const p = runSync(ctx, orgId, connectionId, opts).finally(() => inFlight.delete(key));
-  inFlight.set(key, p);
-  return p;
+  return trackSync(connectionId, () => runSync(ctx, orgId, connectionId, opts));
 }
 
 async function fetchAll(client: PlaidApi, token: string, cursor: string | null) {
@@ -471,7 +591,7 @@ async function runSync(
   ctx: AppContext,
   orgId: string,
   connectionId: string,
-  opts: { userId?: string | null },
+  opts: SyncOpts,
 ): Promise<SyncSummary> {
   const h = await ctx.orgs.mustOpen(orgId);
   const c = await mustConnection(h.db, connectionId);
@@ -486,15 +606,12 @@ async function runSync(
     fetched = await fetchAll(plaidClient(creds), token, c.syncCursor);
   } catch (e) {
     if (e instanceof PlaidError) {
-      await h.write((tx) =>
-        tx
-          .update(org.bankConnections)
-          .set({ status: REAUTH_CODES.has(e.code) ? "needs_reauth" : "error", errorCode: e.code })
-          .where(eq(org.bankConnections.id, connectionId)),
-      );
+      await recordFailure(h, orgId, connectionId, e, opts.actor);
       ctx.logger.warn("plaid sync failed", { org: orgId, connection: connectionId, code: e.code });
     }
-    throw e instanceof PlaidError ? new ApiError(502, "plaid_error", `Plaid: ${e.message} (${e.code})`) : e;
+    throw e instanceof PlaidError
+      ? new ApiError(502, "plaid_error", `Plaid: ${e.message} (${e.code})`, { plaid_error_code: e.code })
+      : e;
   }
 
   const added = fetched.pages.flatMap((p) => p.added);
@@ -521,6 +638,7 @@ async function runSync(
       skipped: 0,
       transfers_paired: 0,
       rules_applied: 0,
+      transaction_ids: [],
     };
 
     // Removals first: a pending row replaced by its posted version is removed in the same sync.
@@ -598,6 +716,7 @@ async function runSync(
         .returning({ id: org.bankTransactions.id });
       if (!res.length) continue;
       summary.added++;
+      summary.transaction_ids.push(id);
       if (!t.pending) newIds.push(id);
     }
     for (const [bankAccountId, batchId] of batches) {
@@ -646,24 +765,62 @@ async function runSync(
     summary.transfers_paired = await pairImportedTransfersTx(tx, orgId, newIds);
     summary.rules_applied = (await applyRulesTx(tx, orgId, newIds)).applied;
 
+    const now = new Date().toISOString();
     await tx
       .update(org.bankConnections)
       .set({
         syncCursor: fetched.cursor,
-        lastSyncedAt: new Date().toISOString(),
+        lastSyncedAt: now,
+        lastSyncAttemptAt: now,
+        lastSyncAdded: summary.added,
+        lastSyncModified: summary.modified,
+        lastSyncRemoved: summary.removed,
         status: "active",
         errorCode: null,
+        errorMessage: null,
       })
       .where(eq(org.bankConnections.id, connectionId));
-    if (summary.added || summary.modified || summary.removed) {
-      await appendAudit(tx, orgId, systemActor(opts.userId), {
+    // Someone asked for this sync: record it even when nothing changed. Background syncs are
+    // recorded only when they changed something.
+    if (opts.actor || summary.added || summary.modified || summary.removed) {
+      const { transaction_ids: _ids, ...counts } = summary;
+      await appendAudit(tx, orgId, opts.actor ?? systemActor(opts.userId), {
         action: "bank_connection.sync",
         targetType: "bank_connection",
         targetId: connectionId,
-        after: { ...summary },
+        after: counts,
       });
     }
     return summary;
+  });
+}
+
+/** Store a failed sync or refresh on the connection, audited when someone asked for it. */
+async function recordFailure(
+  h: OrgHandle,
+  orgId: string,
+  connectionId: string,
+  e: PlaidError,
+  actor?: ActorInfo,
+) {
+  const status = REAUTH_CODES.has(e.code) ? "needs_reauth" : "error";
+  await h.write(async (tx) => {
+    await tx
+      .update(org.bankConnections)
+      .set({
+        status,
+        errorCode: e.code,
+        errorMessage: e.message.slice(0, 500),
+        lastSyncAttemptAt: new Date().toISOString(),
+      })
+      .where(eq(org.bankConnections.id, connectionId));
+    if (actor)
+      await appendAudit(tx, orgId, actor, {
+        action: "bank_connection.sync_failed",
+        targetType: "bank_connection",
+        targetId: connectionId,
+        after: { status, error_code: e.code },
+      });
   });
 }
 
@@ -718,6 +875,204 @@ export async function syncAll(ctx: AppContext, orgId: string) {
     }
   }
   return { synced, failed, skipped };
+}
+
+// ----------------------------------------------------------------------------- assistant sync
+
+export type AssistantSyncStatus =
+  | "synced"
+  | "cooldown"
+  | "in_progress"
+  | "needs_reauth"
+  | "error"
+  | "disconnected";
+
+const REFRESH_NOTE =
+  "Plaid is checking the bank for newer transactions. They arrive asynchronously: a webhook-triggered sync or a later sync_bank_feed call picks them up.";
+
+/** New rows listed in one result; a first sync can bring back two years of history. */
+const MAX_TXNS = 200;
+
+const REAUTH_NOTE = "A person must reconnect it in Cosimo (Banking → Accounts). You can't do this.";
+
+/**
+ * Sync bank feeds for an AI assistant (the `sync_bank_feed` MCP tool): one connection, the one
+ * behind a bank account, or every connection that isn't disconnected. Connections waiting on a
+ * person, already syncing, or synced within the cooldown are reported without calling Plaid.
+ */
+export async function syncForAssistant(
+  ctx: AppContext,
+  orgId: string,
+  actor: ActorInfo,
+  input: { bankAccountId?: string; connectionId?: string; forceRefresh?: boolean },
+) {
+  if (input.bankAccountId && input.connectionId)
+    throw badRequest("Pass bank_account_id or connection_id, not both.");
+  const h = await ctx.orgs.mustOpen(orgId);
+  let targets: ConnRow[];
+  if (input.bankAccountId) {
+    const ba = await mustGetBankAccount(h.db, input.bankAccountId);
+    if (!ba.connectionId)
+      throw unprocessable("This account has no bank feed; import a statement instead.", "not_connected");
+    targets = [await mustConnection(h.db, ba.connectionId)];
+  } else if (input.connectionId) {
+    targets = [await mustConnection(h.db, input.connectionId)];
+  } else {
+    targets = (await h.db.select().from(org.bankConnections).all())
+      .filter((c) => c.status !== "disconnected")
+      .sort((a, b) => a.createdAt.localeCompare(b.createdAt));
+  }
+  const creds = await plaidCredentials(ctx, h.db);
+  if (!creds)
+    throw unprocessable(
+      "Plaid is not set up. An instance admin can add Plaid keys under Admin → Settings, or an owner can add org-level keys.",
+      "plaid_not_configured",
+    );
+  const p = await ctx.settings.get("plaid");
+  const accts = await h.db
+    .select()
+    .from(org.bankAccounts)
+    .where(isNotNull(org.bankAccounts.connectionId))
+    .all();
+
+  const results = [];
+  for (const c of targets) {
+    const r = await syncOneForAssistant(ctx, h, orgId, actor, c, {
+      forceRefresh: Boolean(input.forceRefresh),
+      cooldownSeconds: p.sync_cooldown_seconds,
+      refreshEnabled: p.refresh_enabled,
+      client: plaidClient(creds),
+    });
+    const fresh = await mustConnection(h.db, c.id);
+    const ids = r.summary?.transaction_ids ?? [];
+    results.push({
+      connection_id: c.id,
+      institution_name: c.institutionName,
+      bank_accounts: accts
+        .filter((x) => x.connectionId === c.id)
+        .map((x) => ({ id: x.id, name: x.name, mask: x.mask })),
+      status: r.status,
+      added: r.summary?.added ?? null,
+      modified: r.summary?.modified ?? null,
+      removed: r.summary?.removed ?? null,
+      message: r.message,
+      retry_after_seconds: r.retryAfter ?? null,
+      refresh: r.refresh,
+      refresh_error: r.refreshError ?? null,
+      ...syncStatusView(fresh),
+      transactions: r.summary ? await txnsById(h.db, ids.slice(0, MAX_TXNS)) : [],
+      transactions_omitted: Math.max(0, ids.length - MAX_TXNS),
+    });
+  }
+  return { connections: results };
+}
+
+interface OneResult {
+  status: AssistantSyncStatus;
+  message: string | null;
+  refresh: "requested" | "failed" | "not_enabled" | null;
+  refreshError?: string;
+  retryAfter?: number;
+  summary?: SyncSummary;
+}
+
+async function syncOneForAssistant(
+  ctx: AppContext,
+  h: OrgHandle,
+  orgId: string,
+  actor: ActorInfo,
+  c: ConnRow,
+  o: { forceRefresh: boolean; cooldownSeconds: number; refreshEnabled: boolean; client: PlaidApi },
+): Promise<OneResult> {
+  if (c.status === "disconnected")
+    return { status: "disconnected", message: connectionMessage(c), refresh: null };
+  if (c.status === "needs_reauth")
+    return {
+      status: "needs_reauth",
+      message: `${connectionMessage(c) ?? "The bank needs you to reconnect."} ${REAUTH_NOTE}`,
+      refresh: null,
+    };
+  if (isSyncing(c.id))
+    return {
+      status: "in_progress",
+      message: "A sync of this connection is already running. Check again shortly.",
+      refresh: null,
+    };
+  const last = c.lastSyncAttemptAt ?? c.lastSyncedAt;
+  if (last && o.cooldownSeconds > 0) {
+    const wait = o.cooldownSeconds * 1000 - (Date.now() - Date.parse(last));
+    if (wait > 0) {
+      const retryAfter = Math.ceil(wait / 1000);
+      return {
+        status: "cooldown",
+        message: `This connection synced moments ago. Try again in ${retryAfter} seconds.`,
+        refresh: null,
+        retryAfter,
+      };
+    }
+  }
+
+  let refresh: OneResult["refresh"] = null;
+  let refreshError: string | undefined;
+  if (o.forceRefresh && !o.refreshEnabled) refresh = "not_enabled";
+  else if (o.forceRefresh) {
+    try {
+      await o.client.transactionsRefresh(ctx.secrets.reveal(c.accessTokenEnc) ?? "");
+      refresh = "requested";
+    } catch (e) {
+      if (!(e instanceof PlaidError)) throw e;
+      refresh = "failed";
+      refreshError = e.code;
+      // The login itself is broken: the sync would fail the same way.
+      if (REAUTH_CODES.has(e.code)) {
+        await recordFailure(h, orgId, c.id, e, actor);
+        const now = await mustConnection(h.db, c.id);
+        return {
+          status: "needs_reauth",
+          message: `${connectionMessage(now) ?? "The bank needs you to reconnect."} ${REAUTH_NOTE}`,
+          refresh,
+          refreshError,
+        };
+      }
+    }
+  }
+
+  try {
+    const summary = await syncConnection(ctx, orgId, c.id, { userId: actor.userId, actor });
+    const counts = `${summary.added} new, ${summary.modified} changed, ${summary.removed} removed.`;
+    const notes = [
+      summary.added || summary.modified || summary.removed ? `Synced: ${counts}` : "Synced: nothing new.",
+    ];
+    if (refresh === "requested") notes.push(REFRESH_NOTE);
+    if (refresh === "not_enabled")
+      notes.push("force_refresh is not enabled on this instance; this sync used what Plaid already had.");
+    if (refresh === "failed") notes.push(`Plaid refused the refresh (${refreshError}); the sync still ran.`);
+    return { status: "synced", message: notes.join(" "), refresh, refreshError, summary };
+  } catch (e) {
+    if (!(e instanceof ApiError)) throw e;
+    const now = await mustConnection(h.db, c.id);
+    if (now.status === "needs_reauth")
+      return {
+        status: "needs_reauth",
+        message: `${connectionMessage(now) ?? "The bank needs you to reconnect."} ${REAUTH_NOTE}`,
+        refresh,
+        refreshError,
+      };
+    return { status: "error", message: e.message, refresh, refreshError };
+  }
+}
+
+/** The rows a sync inserted, in its order, as the Categorize view shows them. */
+async function txnsById(db: Reader, ids: string[]): Promise<BankTxnView[]> {
+  if (!ids.length) return [];
+  const rows = await db
+    .select({ t: org.bankTransactions, entryStatus: org.journalEntries.status })
+    .from(org.bankTransactions)
+    .leftJoin(org.journalEntries, eq(org.journalEntries.id, org.bankTransactions.matchedEntryId))
+    .where(inArray(org.bankTransactions.id, ids))
+    .all();
+  const byId = new Map(rows.map((r) => [r.t.id, bankTxnView(r.t, r.entryStatus)]));
+  return ids.map((id) => byId.get(id)).filter((x): x is BankTxnView => Boolean(x));
 }
 
 // ----------------------------------------------------------------------------- webhooks
@@ -845,7 +1200,10 @@ export async function handleWebhook(
   if (!c) return none;
   const setStatus = (status: ConnRow["status"], errorCode: string | null) =>
     h.write((tx) =>
-      tx.update(org.bankConnections).set({ status, errorCode }).where(eq(org.bankConnections.id, c.id)),
+      tx
+        .update(org.bankConnections)
+        .set({ status, errorCode, errorMessage: null })
+        .where(eq(org.bankConnections.id, c.id)),
     );
   const sync = () =>
     syncConnection(ctx, orgId, c.id).catch((e) => {
@@ -872,6 +1230,15 @@ export async function handleWebhook(
       case "LOGIN_REPAIRED":
         await setStatus("active", null);
         return { action: "sync", done: sync() };
+      case "NEW_ACCOUNTS_AVAILABLE":
+        // Never added automatically: an owner picks them through Link (Add accounts).
+        await h.write((tx) =>
+          tx
+            .update(org.bankConnections)
+            .set({ newAccountsAvailable: true })
+            .where(eq(org.bankConnections.id, c.id)),
+        );
+        return { action: "status", done: Promise.resolve() };
     }
   }
   return none;

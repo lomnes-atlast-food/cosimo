@@ -58,6 +58,8 @@ export interface PendingLink {
   orgId: string;
   token: string;
   connectionId: string | null;
+  /** What to do after Link succeeds; with a connection and no mode, it's a reconnect. */
+  mode?: "connect" | "reconnect" | "add_accounts";
 }
 const PENDING_KEY = "cosimo.plaid.link";
 

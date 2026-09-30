@@ -3918,6 +3918,8 @@ export interface paths {
                             secret?: string;
                             webhook_url?: "" | string;
                             redirect_uri?: "" | string;
+                            sync_cooldown_seconds?: number;
+                            refresh_enabled?: boolean;
                         };
                     };
                 };
@@ -15185,6 +15187,8 @@ export interface paths {
                     "application/json": {
                         /** @example 01J9Z3K5Q7W8X9Y0A1B2C3D4E5 */
                         connection_id?: string | null;
+                        /** @description With connection_id: let the user pick accounts to add to this bank login. */
+                        account_selection?: boolean;
                     };
                 };
             };
@@ -15826,6 +15830,244 @@ export interface paths {
                 cookie?: never;
             };
             requestBody?: never;
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            connection: components["schemas"]["BankConnection"];
+                            sync: components["schemas"]["SyncSummary"];
+                        };
+                    };
+                };
+                /** @description Invalid request */
+                400: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+                /** @description Not authenticated */
+                401: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+                /** @description Forbidden */
+                403: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+                /** @description Not found */
+                404: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+                /** @description Conflict */
+                409: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+                /** @description Rule or invariant violation */
+                422: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+                /** @description Rate limited */
+                429: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/orgs/{orgId}/bank-connections/{connectionId}/available-accounts": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Plaid accounts at this bank login that aren't linked to a bank account yet (owner) */
+        get: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    orgId: string;
+                    connectionId: string;
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            data: components["schemas"]["AvailablePlaidAccount"][];
+                        };
+                    };
+                };
+                /** @description Invalid request */
+                400: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+                /** @description Not authenticated */
+                401: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+                /** @description Forbidden */
+                403: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+                /** @description Not found */
+                404: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+                /** @description Conflict */
+                409: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+                /** @description Rule or invariant violation */
+                422: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+                /** @description Rate limited */
+                429: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+            };
+        };
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/orgs/{orgId}/bank-connections/{connectionId}/accounts": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Add accounts to a bank login after Link account selection, then sync (owner)
+         * @description Only accounts not already linked are considered, and an account left out of `accounts` is skipped. Clears `new_accounts_available`, even when `accounts` is empty.
+         */
+        post: {
+            parameters: {
+                query?: never;
+                header?: {
+                    /** @description Makes a retry safe: the same key and body replay the first response. */
+                    "Idempotency-Key"?: string;
+                };
+                path: {
+                    orgId: string;
+                    connectionId: string;
+                };
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": {
+                        accounts: ({
+                            account_id: string;
+                            /** @enum {string} */
+                            action: "new";
+                            /** @example 01J9Z3K5Q7W8X9Y0A1B2C3D4E5 */
+                            ledger_account_id?: string | null;
+                            name?: string | null;
+                        } | {
+                            account_id: string;
+                            /** @enum {string} */
+                            action: "link";
+                            /** @example 01J9Z3K5Q7W8X9Y0A1B2C3D4E5 */
+                            bank_account_id: string;
+                        } | {
+                            account_id: string;
+                            /** @enum {string} */
+                            action: "skip";
+                        })[];
+                    };
+                };
+            };
             responses: {
                 /** @description OK */
                 200: {
@@ -19326,6 +19568,8 @@ export interface components {
                 client_id: string;
                 webhook_url: string;
                 redirect_uri: string;
+                sync_cooldown_seconds: number;
+                refresh_enabled: boolean;
                 secret_set: boolean;
             };
             warnings: string[];
@@ -19508,6 +19752,22 @@ export interface components {
              */
             pending_amount: number;
             last_transaction_date: string | null;
+            /** @description When the last sync finished, whether it worked or not. Null with no bank feed. */
+            last_synced_at: string | null;
+            /** @description When the last sync that worked finished. */
+            last_successful_sync_at: string | null;
+            /** @enum {string|null} */
+            last_sync_status: "never" | "in_progress" | "success" | "error" | null;
+            /** @description `<Plaid error code>: <message>`; null when the connection has no error. */
+            last_sync_error: string | null;
+            /** @description Counts from the last successful sync. */
+            last_sync_added: number | null;
+            last_sync_modified: number | null;
+            last_sync_removed: number | null;
+            /** @enum {string|null} */
+            connection_status: "healthy" | "needs_reauth" | "error" | "disconnected" | null;
+            /** @description Plaid reported accounts at this bank login that aren't in Cosimo yet. */
+            new_accounts_available: boolean | null;
         };
         BankTransaction: {
             id: string;
@@ -20206,7 +20466,22 @@ export interface components {
             error_code: string | null;
             /** @description Plain-language status for people; null when healthy. */
             message: string | null;
+            /** @description When the last sync finished, whether it worked or not. Null with no bank feed. */
             last_synced_at: string | null;
+            /** @description When the last sync that worked finished. */
+            last_successful_sync_at: string | null;
+            /** @enum {string|null} */
+            last_sync_status: "never" | "in_progress" | "success" | "error" | null;
+            /** @description `<Plaid error code>: <message>`; null when the connection has no error. */
+            last_sync_error: string | null;
+            /** @description Counts from the last successful sync. */
+            last_sync_added: number | null;
+            last_sync_modified: number | null;
+            last_sync_removed: number | null;
+            /** @enum {string|null} */
+            connection_status: "healthy" | "needs_reauth" | "error" | "disconnected" | null;
+            /** @description Plaid reported accounts at this bank login that aren't in Cosimo yet. */
+            new_accounts_available: boolean | null;
             created_at: string;
             accounts: {
                 id: string;
@@ -20215,6 +20490,8 @@ export interface components {
                 /** @enum {string} */
                 kind: "checking" | "savings" | "credit_card" | "other";
                 is_active: boolean;
+                /** @description Plaid's account ID. */
+                provider_account_id: string | null;
             }[];
         };
         SyncSummary: {
@@ -20224,7 +20501,16 @@ export interface components {
             skipped: number;
             transfers_paired: number;
             rules_applied: number;
+            /** @description Rows this sync added, pending ones included. */
+            transaction_ids: string[];
         } | null;
+        AvailablePlaidAccount: {
+            account_id: string;
+            name: string;
+            mask: string | null;
+            type: string;
+            subtype: string | null;
+        };
         OnlinePaymentSettings: {
             /** @enum {string} */
             provider: "off" | "manual_link" | "stripe";
@@ -20513,6 +20799,22 @@ export interface components {
                     balance: number;
                     unreviewed: number;
                     pending: number;
+                    /** @description When the last sync finished, whether it worked or not. Null with no bank feed. */
+                    last_synced_at: string | null;
+                    /** @description When the last sync that worked finished. */
+                    last_successful_sync_at: string | null;
+                    /** @enum {string|null} */
+                    last_sync_status: "never" | "in_progress" | "success" | "error" | null;
+                    /** @description `<Plaid error code>: <message>`; null when the connection has no error. */
+                    last_sync_error: string | null;
+                    /** @description Counts from the last successful sync. */
+                    last_sync_added: number | null;
+                    last_sync_modified: number | null;
+                    last_sync_removed: number | null;
+                    /** @enum {string|null} */
+                    connection_status: "healthy" | "needs_reauth" | "error" | "disconnected" | null;
+                    /** @description Plaid reported accounts at this bank login that aren't in Cosimo yet. */
+                    new_accounts_available: boolean | null;
                 }[];
             };
             credit_cards: {
@@ -20534,6 +20836,22 @@ export interface components {
                     balance: number;
                     unreviewed: number;
                     pending: number;
+                    /** @description When the last sync finished, whether it worked or not. Null with no bank feed. */
+                    last_synced_at: string | null;
+                    /** @description When the last sync that worked finished. */
+                    last_successful_sync_at: string | null;
+                    /** @enum {string|null} */
+                    last_sync_status: "never" | "in_progress" | "success" | "error" | null;
+                    /** @description `<Plaid error code>: <message>`; null when the connection has no error. */
+                    last_sync_error: string | null;
+                    /** @description Counts from the last successful sync. */
+                    last_sync_added: number | null;
+                    last_sync_modified: number | null;
+                    last_sync_removed: number | null;
+                    /** @enum {string|null} */
+                    connection_status: "healthy" | "needs_reauth" | "error" | "disconnected" | null;
+                    /** @description Plaid reported accounts at this bank login that aren't in Cosimo yet. */
+                    new_accounts_available: boolean | null;
                 }[];
             };
             month: {
@@ -20648,7 +20966,22 @@ export interface components {
                 institution_name: string | null;
                 status: string;
                 error_code: string | null;
+                /** @description When the last sync finished, whether it worked or not. Null with no bank feed. */
                 last_synced_at: string | null;
+                /** @description When the last sync that worked finished. */
+                last_successful_sync_at: string | null;
+                /** @enum {string|null} */
+                last_sync_status: "never" | "in_progress" | "success" | "error" | null;
+                /** @description `<Plaid error code>: <message>`; null when the connection has no error. */
+                last_sync_error: string | null;
+                /** @description Counts from the last successful sync. */
+                last_sync_added: number | null;
+                last_sync_modified: number | null;
+                last_sync_removed: number | null;
+                /** @enum {string|null} */
+                connection_status: "healthy" | "needs_reauth" | "error" | "disconnected" | null;
+                /** @description Plaid reported accounts at this bank login that aren't in Cosimo yet. */
+                new_accounts_available: boolean | null;
             }[];
         };
     };

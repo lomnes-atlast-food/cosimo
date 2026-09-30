@@ -287,7 +287,9 @@ function DashboardBody({ d, orgId }: { d: Dashboard; orgId: string }) {
                       <div>
                         <div className="font-medium">{c.institution_name ?? "Bank connection"}</div>
                         <div className="text-xs text-zinc-500">
-                          {c.last_synced_at ? `Last synced ${fmtDateTime(c.last_synced_at)}` : "Never synced"}
+                          {c.last_successful_sync_at
+                            ? `Last synced ${fmtDateTime(c.last_successful_sync_at)}`
+                            : "Never synced"}
                           {c.error_code ? ` · ${c.error_code}` : ""}
                         </div>
                       </div>

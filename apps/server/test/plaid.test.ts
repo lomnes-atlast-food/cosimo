@@ -57,6 +57,11 @@ class FakePlaid implements PlaidApi {
   failSync: PlaidError | null = null;
   mutateOnce = false;
   keys = new Map<string, Jwk>();
+  syncCalls = 0;
+  refreshCalls = 0;
+  failRefresh: PlaidError | null = null;
+  /** While set, syncs wait on it: a sync that is still running. */
+  gate: Promise<void> | null = null;
 
   newItem(accounts: PlaidAccount[]) {
     const n = this.items.size + 1;
@@ -87,6 +92,8 @@ class FakePlaid implements PlaidApi {
   }
   async transactionsSync(token: string, cursor: string | null): Promise<SyncPage> {
     const item = this.item(token);
+    this.syncCalls++;
+    if (this.gate) await this.gate;
     if (this.failSync) throw this.failSync;
     const start = cursor ? Number(cursor) : 0;
     if (this.mutateOnce && start > 0) {
@@ -107,6 +114,11 @@ class FakePlaid implements PlaidApi {
       next_cursor: String(end),
       has_more: end < item.events.length,
     };
+  }
+  async transactionsRefresh(token: string) {
+    this.item(token);
+    this.refreshCalls++;
+    if (this.failRefresh) throw this.failRefresh;
   }
   async itemRemove(token: string) {
     this.removed.push(this.item(token).itemId);
@@ -693,5 +705,414 @@ describe(`Plaid key checks on save (${DB_MODE})`, () => {
     expect(bad.body.error.message).toContain("rejected these keys for Production");
     const after = await admin.json("GET", "/api/v1/admin/settings");
     expect(after.body).toMatchObject({ dynamic_client_registration: true, plaid: { env: "sandbox" } });
+  });
+});
+
+describe(`bank feed sync status and sync_bank_feed (${DB_MODE})`, () => {
+  let syncOrg: string;
+  let item: FakeItem;
+  let connId: string;
+  let chk: string;
+  let cashBox: string;
+  let token: string;
+  const sbase = () => `/api/v1/orgs/${syncOrg}`;
+
+  async function mcpCall(tok: string, name: string, args: Record<string, unknown> = {}) {
+    const res = await env.app.request("/mcp", {
+      method: "POST",
+      headers: {
+        accept: "application/json, text/event-stream",
+        authorization: `Bearer ${tok}`,
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({
+        jsonrpc: "2.0",
+        id: 1,
+        method: "tools/call",
+        params: { name, arguments: args },
+      }),
+    });
+    expect(res.status).toBe(200);
+    return (await res.json()).result as {
+      isError: boolean;
+      structuredContent?: any;
+      content: { text: string }[];
+    };
+  }
+  const syncFeed = async (args: Record<string, unknown> = {}) => {
+    const r = await mcpCall(token, "sync_bank_feed", args);
+    expect(r.isError).toBe(false);
+    return r.structuredContent.connections as any[];
+  };
+  const account = async (id: string) =>
+    ((await owner.json("GET", `${sbase()}/bank-accounts`)).body.data as any[]).find((a) => a.id === id);
+  const connection = async () => (await owner.json("GET", `${sbase()}/bank-connections/${connId}`)).body;
+  const setPlaid = (patch: Record<string, unknown>) => env.ctx.settings.set("plaid", patch);
+  const auditRows = async (action: string) => {
+    const h = await env.ctx.orgs.mustOpen(syncOrg);
+    return (
+      await h.client.execute({
+        sql: "select actor, after_json from audit_log where action = ? and target_id = ? order by seq",
+        args: [action, connId],
+      })
+    ).rows;
+  };
+
+  test("setup: a connected checking account and a statement-only account", async () => {
+    await setPlaid({
+      enabled: true,
+      env: "sandbox",
+      client_id: "cid-instance",
+      secret: "instance-secret-value",
+      webhook_url: "",
+      sync_cooldown_seconds: 0,
+      refresh_enabled: false,
+    });
+    syncOrg = await createOrg(env, owner, "Sync Co");
+    const n = fake.newItem([
+      { account_id: "s-chk", name: "Sync Checking", mask: "4242", type: "depository", subtype: "checking" },
+    ]);
+    item = n.item;
+    item.add({ transaction_id: "s1", account_id: "s-chk", amount: 12, name: "LUNCH" });
+    const r = await owner.json("POST", `${sbase()}/plaid/exchange`, { public_token: n.publicToken });
+    expect(r.status).toBe(201);
+    connId = r.body.connection.id;
+    expect(r.body.sync.transaction_ids).toHaveLength(1);
+    chk = r.body.connection.accounts[0].id;
+    expect(r.body.connection.accounts[0].provider_account_id).toBe("s-chk");
+    cashBox = (await owner.json("POST", `${sbase()}/bank-accounts`, { name: "Cash box", kind: "checking" }))
+      .body.id;
+    const t = await owner.json("POST", "/api/v1/tokens", { org_id: syncOrg, name: "ai", role: "bookkeeper" });
+    token = t.body.token;
+  });
+
+  test("an account with no bank feed has null sync fields", async () => {
+    expect(await account(cashBox)).toMatchObject({
+      last_synced_at: null,
+      last_successful_sync_at: null,
+      last_sync_status: null,
+      last_sync_error: null,
+      last_sync_added: null,
+      connection_status: null,
+      new_accounts_available: null,
+    });
+  });
+
+  test("status: never synced, then a success with counts", async () => {
+    const h = await env.ctx.orgs.mustOpen(syncOrg);
+    await h.write((tx) =>
+      tx
+        .update(org.bankConnections)
+        .set({ lastSyncedAt: null, lastSyncAttemptAt: null, lastSyncAdded: null })
+        .where(eq(org.bankConnections.id, connId)),
+    );
+    expect(await account(chk)).toMatchObject({
+      last_synced_at: null,
+      last_sync_status: "never",
+      connection_status: "healthy",
+    });
+
+    item.add({ transaction_id: "s2", account_id: "s-chk", amount: 3, name: "SNACK" });
+    item.add({ transaction_id: "s3", account_id: "s-chk", amount: 4, name: "TEA" });
+    expect((await owner.json("POST", `${sbase()}/bank-connections/${connId}/sync`, {})).status).toBe(200);
+    for (const v of [await account(chk), await connection()]) {
+      expect(v).toMatchObject({
+        last_sync_status: "success",
+        last_sync_error: null,
+        last_sync_added: 2,
+        last_sync_modified: 0,
+        last_sync_removed: 0,
+        connection_status: "healthy",
+        new_accounts_available: false,
+      });
+      expect(v.last_synced_at).toBeString();
+      expect(v.last_synced_at).toBe(v.last_successful_sync_at);
+    }
+    const dash = (await owner.json("GET", `${sbase()}/dashboard`)).body;
+    expect(dash.cash.accounts.find((a: any) => a.id === chk)).toMatchObject({ last_sync_status: "success" });
+  });
+
+  test("status: a Plaid error keeps the last success and reports the error", async () => {
+    const before = await connection();
+    fake.failSync = new PlaidError("INTERNAL_SERVER_ERROR", "API_ERROR", "Plaid had a problem", 500);
+    expect((await owner.json("POST", `${sbase()}/bank-connections/${connId}/sync`, {})).status).toBe(502);
+    fake.failSync = null;
+    for (const v of [await account(chk), await connection()]) {
+      expect(v).toMatchObject({
+        last_sync_status: "error",
+        last_sync_error: "INTERNAL_SERVER_ERROR: Plaid had a problem",
+        last_successful_sync_at: before.last_successful_sync_at,
+        last_sync_added: 2,
+        connection_status: "error",
+      });
+      expect(v.last_synced_at > v.last_successful_sync_at).toBe(true);
+    }
+  });
+
+  test("status: needs_reauth", async () => {
+    fake.failSync = new PlaidError(
+      "ITEM_LOGIN_REQUIRED",
+      "ITEM_ERROR",
+      "the login details have changed",
+      400,
+    );
+    expect((await owner.json("POST", `${sbase()}/bank-connections/${connId}/sync`, {})).status).toBe(502);
+    fake.failSync = null;
+    expect(await account(chk)).toMatchObject({
+      connection_status: "needs_reauth",
+      last_sync_status: "error",
+      last_sync_error: "ITEM_LOGIN_REQUIRED: the login details have changed",
+    });
+    const re = await owner.json("POST", `${sbase()}/bank-connections/${connId}/reconnected`, {});
+    expect(re.body.connection).toMatchObject({
+      connection_status: "healthy",
+      last_sync_status: "success",
+      last_sync_error: null,
+    });
+  });
+
+  test("status: in_progress while a sync runs; sync_bank_feed doesn't wait or start another", async () => {
+    let release!: () => void;
+    fake.gate = new Promise((r) => {
+      release = r;
+    });
+    const calls = fake.syncCalls;
+    const running = syncConnection(env.ctx, syncOrg, connId);
+    while (fake.syncCalls === calls) await Bun.sleep(1);
+    expect((await account(chk)).last_sync_status).toBe("in_progress");
+    expect((await connection()).last_sync_status).toBe("in_progress");
+    const [r] = await syncFeed({ connection_id: connId });
+    expect(r).toMatchObject({ status: "in_progress", last_sync_status: "in_progress" });
+    expect(fake.syncCalls).toBe(calls + 1);
+    fake.gate = null;
+    release();
+    await running;
+    expect((await account(chk)).last_sync_status).toBe("success");
+  });
+
+  test("sync_bank_feed: new rows come back with their rule suggestion, audited as mcp", async () => {
+    const expense = ((await owner.json("GET", `${sbase()}/accounts`)).body.data as any[]).find(
+      (a) => a.type === "expense",
+    );
+    const rule = await owner.json("POST", `${sbase()}/rules`, {
+      name: "Coffee",
+      conditions: { description_contains: "coffee" },
+      actions: { account_id: expense.id },
+    });
+    expect(rule.status).toBe(201);
+    item.add({ transaction_id: "s4", account_id: "s-chk", amount: 4.5, name: "COFFEE SHOP" });
+    const audits = (await auditRows("bank_connection.sync")).length;
+    const [r] = await syncFeed({ bank_account_id: chk });
+    expect(r).toMatchObject({
+      connection_id: connId,
+      institution_name: "First Platypus Bank",
+      bank_accounts: [{ id: chk, name: "Sync Checking", mask: "4242" }],
+      status: "synced",
+      added: 1,
+      refresh: null,
+      last_sync_status: "success",
+      last_sync_added: 1,
+      connection_status: "healthy",
+    });
+    expect(r.transactions).toHaveLength(1);
+    expect(r.transactions[0]).toMatchObject({
+      bank_account_id: chk,
+      description: "COFFEE SHOP",
+      amount: -450,
+      is_pending: false,
+      suggestion: { source: "rule", rule_id: rule.body.rule.id },
+    });
+    const rows = await auditRows("bank_connection.sync");
+    expect(rows.length).toBe(audits + 1);
+    expect(rows.at(-1)!.actor).toBe("mcp");
+  });
+
+  test("sync_bank_feed: nothing new is still a sync, and still audited", async () => {
+    const audits = (await auditRows("bank_connection.sync")).length;
+    const [r] = await syncFeed();
+    expect(r).toMatchObject({ connection_id: connId, status: "synced", added: 0, transactions: [] });
+    expect(r.message).toContain("nothing new");
+    expect((await auditRows("bank_connection.sync")).length).toBe(audits + 1);
+  });
+
+  test("sync_bank_feed: a Plaid error", async () => {
+    fake.failSync = new PlaidError("INTERNAL_SERVER_ERROR", "API_ERROR", "Plaid had a problem", 500);
+    const [r] = await syncFeed({ connection_id: connId });
+    fake.failSync = null;
+    expect(r).toMatchObject({
+      status: "error",
+      last_sync_status: "error",
+      connection_status: "error",
+      last_sync_error: "INTERNAL_SERVER_ERROR: Plaid had a problem",
+      transactions: [],
+    });
+    const failed = await auditRows("bank_connection.sync_failed");
+    expect(failed.at(-1)).toMatchObject({ actor: "mcp" });
+    expect(JSON.parse(String(failed.at(-1)!.after_json))).toMatchObject({
+      error_code: "INTERNAL_SERVER_ERROR",
+    });
+  });
+
+  test("sync_bank_feed: needs_reauth can't be fixed by the assistant and shows in listings", async () => {
+    fake.failSync = new PlaidError(
+      "ITEM_LOGIN_REQUIRED",
+      "ITEM_ERROR",
+      "the login details have changed",
+      400,
+    );
+    const [first] = await syncFeed({ connection_id: connId });
+    expect(first).toMatchObject({ status: "needs_reauth", connection_status: "needs_reauth" });
+    expect(first.message).toContain("You can't do this");
+    const calls = fake.syncCalls;
+    const [again] = await syncFeed();
+    expect(again).toMatchObject({ status: "needs_reauth" });
+    expect(fake.syncCalls).toBe(calls);
+    const list = await mcpCall(token, "list_uncategorized_transactions");
+    expect(list.structuredContent.bank_accounts.find((a: any) => a.id === chk)).toMatchObject({
+      connection_status: "needs_reauth",
+      last_sync_status: "error",
+    });
+    expect(
+      list.structuredContent.bank_accounts.find((a: any) => a.id === cashBox).connection_status,
+    ).toBeNull();
+    fake.failSync = null;
+    expect((await owner.json("POST", `${sbase()}/bank-connections/${connId}/reconnected`, {})).status).toBe(
+      200,
+    );
+  });
+
+  test("sync_bank_feed: cooldown answers without calling Plaid", async () => {
+    await setPlaid({ sync_cooldown_seconds: 300 });
+    const calls = fake.syncCalls;
+    const [r] = await syncFeed({ connection_id: connId });
+    await setPlaid({ sync_cooldown_seconds: 0 });
+    expect(r).toMatchObject({ status: "cooldown", added: null, transactions: [] });
+    expect(r.retry_after_seconds).toBeGreaterThan(0);
+    expect(r.retry_after_seconds).toBeLessThanOrEqual(300);
+    expect(fake.syncCalls).toBe(calls);
+  });
+
+  test("sync_bank_feed: force_refresh only when the instance allows it", async () => {
+    let [r] = await syncFeed({ force_refresh: true });
+    expect(r).toMatchObject({ status: "synced", refresh: "not_enabled" });
+    expect(fake.refreshCalls).toBe(0);
+
+    await setPlaid({ refresh_enabled: true });
+    [r] = await syncFeed({ force_refresh: true });
+    expect(r).toMatchObject({ status: "synced", refresh: "requested" });
+    expect(r.message).toContain("asynchronously");
+    expect(fake.refreshCalls).toBe(1);
+
+    fake.failRefresh = new PlaidError("PRODUCT_NOT_READY", "ITEM_ERROR", "not ready", 400);
+    [r] = await syncFeed({ force_refresh: true });
+    fake.failRefresh = null;
+    expect(r).toMatchObject({ status: "synced", refresh: "failed", refresh_error: "PRODUCT_NOT_READY" });
+    await setPlaid({ refresh_enabled: false });
+  });
+
+  test("sync_bank_feed: viewers are refused; propose-only tokens may sync; bad targets are explained", async () => {
+    const viewer = await owner.json("POST", "/api/v1/tokens", { org_id: syncOrg, name: "v", role: "viewer" });
+    const denied = await mcpCall(viewer.body.token, "sync_bank_feed");
+    expect(denied.isError).toBe(true);
+
+    const po = await owner.json("POST", "/api/v1/tokens", {
+      org_id: syncOrg,
+      name: "po",
+      role: "bookkeeper",
+      propose_only: true,
+    });
+    const ok = await mcpCall(po.body.token, "sync_bank_feed", { connection_id: connId });
+    expect(ok.isError).toBe(false);
+    expect(ok.structuredContent.connections[0].status).toBe("synced");
+
+    const none = await mcpCall(token, "sync_bank_feed", { bank_account_id: cashBox });
+    expect(none.isError).toBe(true);
+    expect(none.content[0]!.text).toContain("import a statement");
+  });
+
+  test("#12: NEW_ACCOUNTS_AVAILABLE flags the connection and leaves it active", async () => {
+    clearWebhookKeys();
+    const body = JSON.stringify({
+      webhook_type: "ITEM",
+      webhook_code: "NEW_ACCOUNTS_AVAILABLE",
+      item_id: item.itemId,
+    });
+    const res = await handleWebhook(env.ctx, syncOrg, body, await sign(body));
+    expect(res.action).toBe("status");
+    expect(await connection()).toMatchObject({ status: "active", new_accounts_available: true });
+    expect((await account(chk)).new_accounts_available).toBe(true);
+  });
+
+  test("#12: a link token with account_selection asks Plaid for account selection in update mode", async () => {
+    const r = await owner.json("POST", `${sbase()}/plaid/link-token`, {
+      connection_id: connId,
+      account_selection: true,
+    });
+    expect(r.body.update_mode).toBe(true);
+    expect(fake.linkRequests.at(-1)).toMatchObject({ accessToken: item.accessToken, accountSelection: true });
+    await owner.json("POST", `${sbase()}/plaid/link-token`, { account_selection: true });
+    expect(fake.linkRequests.at(-1)!.accountSelection).toBe(false);
+  });
+
+  test("#12: owners list unlinked accounts and add the ones they pick", async () => {
+    (item.accounts as PlaidAccount[]).push(
+      { account_id: "s-sav", name: "Sync Savings", mask: "5151", type: "depository", subtype: "savings" },
+      { account_id: "s-cc", name: "Sync Card", mask: "6161", type: "credit", subtype: "credit card" },
+    );
+    item.add({ transaction_id: "s5", account_id: "s-sav", amount: -1.25, name: "INTEREST" });
+
+    const bk = await login(env, "sync-bk@example.com");
+    await addMember(env, syncOrg, bk.userId, "bookkeeper");
+    expect((await bk.json("GET", `${sbase()}/bank-connections/${connId}/available-accounts`)).status).toBe(
+      403,
+    );
+    expect(
+      (await bk.json("POST", `${sbase()}/bank-connections/${connId}/accounts`, { accounts: [] })).status,
+    ).toBe(403);
+
+    const avail = await owner.json("GET", `${sbase()}/bank-connections/${connId}/available-accounts`);
+    expect(avail.status).toBe(200);
+    expect(avail.body.data.map((a: any) => a.account_id)).toEqual(["s-sav", "s-cc"]);
+    expect(avail.body.data[0]).toMatchObject({ name: "Sync Savings", mask: "5151", type: "depository" });
+
+    // Only the savings account is picked; the card is skipped, and the already-linked checking is ignored.
+    const r = await owner.json("POST", `${sbase()}/bank-connections/${connId}/accounts`, {
+      accounts: [
+        { account_id: "s-sav", action: "new" },
+        { account_id: "s-chk", action: "new" },
+      ],
+    });
+    expect(r.status).toBe(200);
+    expect(r.body.connection.new_accounts_available).toBe(false);
+    expect(r.body.connection.accounts.map((a: any) => a.provider_account_id).sort()).toEqual([
+      "s-chk",
+      "s-sav",
+    ]);
+    expect(r.body.sync.added).toBe(1);
+    const sav = r.body.connection.accounts.find((a: any) => a.provider_account_id === "s-sav").id;
+    expect(
+      (
+        await owner.json("GET", `${sbase()}/bank-transactions?bank_account_id=${sav}&status=all`)
+      ).body.data.map((t: any) => t.description),
+    ).toEqual(["INTEREST"]);
+    expect(
+      (await owner.json("GET", `${sbase()}/bank-connections/${connId}/available-accounts`)).body.data.map(
+        (a: any) => a.account_id,
+      ),
+    ).toEqual(["s-cc"]);
+  });
+
+  test("#12: an empty pick clears the flag", async () => {
+    const h = await env.ctx.orgs.mustOpen(syncOrg);
+    await h.write((tx) =>
+      tx
+        .update(org.bankConnections)
+        .set({ newAccountsAvailable: true })
+        .where(eq(org.bankConnections.id, connId)),
+    );
+    const r = await owner.json("POST", `${sbase()}/bank-connections/${connId}/accounts`, { accounts: [] });
+    expect(r.status).toBe(200);
+    expect(r.body.connection.new_accounts_available).toBe(false);
+    expect((await auditRows("bank_connection.add_accounts")).length).toBe(2);
   });
 });

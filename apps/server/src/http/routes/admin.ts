@@ -40,6 +40,8 @@ const SettingsSchema = z
       client_id: z.string(),
       webhook_url: z.string(),
       redirect_uri: z.string(),
+      sync_cooldown_seconds: z.number().int(),
+      refresh_enabled: z.boolean(),
       secret_set: z.boolean(),
     }),
     warnings: z.array(z.string()),
@@ -248,6 +250,8 @@ export function adminRoutes() {
         client_id: v.plaid.client_id,
         webhook_url: v.plaid.webhook_url,
         redirect_uri: v.plaid.redirect_uri,
+        sync_cooldown_seconds: v.plaid.sync_cooldown_seconds,
+        refresh_enabled: v.plaid.refresh_enabled,
         secret_set: v.plaid.secret_set,
       },
       warnings,
@@ -300,6 +304,8 @@ export function adminRoutes() {
                 secret: z.string().trim(),
                 webhook_url: z.union([z.literal(""), z.url({ protocol: /^https$/ })]),
                 redirect_uri: z.union([z.literal(""), z.url({ protocol: /^https?$/ })]),
+                sync_cooldown_seconds: z.number().int().min(0).max(86_400),
+                refresh_enabled: z.boolean(),
               })
               .partial()
               .optional(),

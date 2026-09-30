@@ -11,6 +11,7 @@ import { and, asc, desc, eq, gte, inArray, isNull, lte, ne, type SQL, sql } from
 import { conflict, forbidden, notFound, unprocessable } from "../http/errors.ts";
 import type { ActorInfo } from "./actor.ts";
 import { appendAudit } from "./audit.ts";
+import { type SyncStatusView, syncStatusView } from "./bank-sync.ts";
 import {
   accountMap,
   mustGetEntry,
@@ -56,7 +57,8 @@ export const RULE_ACTOR: ActorInfo = { actor: "rule", role: "bookkeeper", userId
 
 // ----------------------------------------------------------------------------- bank accounts
 
-export interface BankAccountView {
+/** A bank account with its feed's sync status (all null for an account with no bank feed). */
+export interface BankAccountView extends SyncStatusView {
   id: string;
   name: string;
   kind: BankAccountRow["kind"];
@@ -108,6 +110,7 @@ export async function listBankAccounts(db: Reader): Promise<BankAccountView[]> {
     .all();
   const cBy = new Map(counts.map((c) => [c.id, c]));
   const types = await accountMap(db);
+  const conns = new Map((await db.select().from(org.bankConnections).all()).map((c) => [c.id, c]));
   return rows.map((r) => {
     const raw = balBy.get(r.ledgerAccountId) ?? 0;
     const t = types.get(r.ledgerAccountId)?.type;
@@ -126,6 +129,7 @@ export async function listBankAccounts(db: Reader): Promise<BankAccountView[]> {
       pending: Number(c?.pending ?? 0),
       pending_amount: Number(c?.pendingAmount ?? 0),
       last_transaction_date: c?.last ?? null,
+      ...syncStatusView(r.connectionId ? conns.get(r.connectionId) : null),
     };
   });
 }

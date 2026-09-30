@@ -32,7 +32,9 @@ Pick one:
   and `plaid_secret` in the answers file).
 - **Admin → Settings → Plaid**: turn on bank feeds and enter the keys. The secret is write-only.
 - **Environment variables** (they override stored values): `COSIMO_PLAID_ENABLED=true`,
-  `COSIMO_PLAID_ENV`, `COSIMO_PLAID_CLIENT_ID`, `COSIMO_PLAID_SECRET`.
+  `COSIMO_PLAID_ENV`, `COSIMO_PLAID_CLIENT_ID`, `COSIMO_PLAID_SECRET`,
+  `COSIMO_PLAID_SYNC_COOLDOWN_SECONDS`, and `COSIMO_PLAID_REFRESH_ENABLED` (see [AI assistants and
+  syncing](#ai-assistants-and-syncing)).
 - **Per organization**: an org owner can use a different Plaid account under **Settings → Bank
   feeds**. Org keys override the instance keys for that org only.
 
@@ -72,6 +74,29 @@ The first sync starts right away. New transactions appear in **Banking → Categ
   SHA-256, at most 5 minutes old), and unsigned or altered requests are rejected. If your public URL
   differs from `server.public_url`, set it under **Admin → Settings → Plaid → Public URL for
   webhooks**.
+
+### AI assistants and syncing
+
+An AI assistant connected over MCP can start a sync with the `sync_bank_feed` tool (Owner or
+Bookkeeper connections only), and every bank account it reads shows when its feed last synced and
+whether that worked. Two settings under **Admin → Settings → Plaid** control this:
+
+- **Minimum seconds between assistant-requested syncs** (`sync_cooldown_seconds`, default 60). An
+  assistant's sync of a connection that finished a sync, from any source, more recently than this
+  is answered from the stored status without calling Plaid. **Sync now**, webhooks, and polling
+  aren't limited.
+- **Allow AI assistants to ask Plaid for a fresh pull** (`refresh_enabled`, default off). With it
+  on, `sync_bank_feed` with `force_refresh` also calls Plaid's `/transactions/refresh`, which asks the
+  bank for new activity right away. Plaid bills this separately. What it finds arrives through a
+  webhook-triggered sync or a later sync.
+
+## Adding accounts
+
+When you open a new account at a bank that's already connected, Plaid tells Cosimo that new accounts
+are available, and the connection shows **New accounts are available at this bank**. Cosimo never
+adds them on its own. As an owner, click **Add accounts**, choose the accounts in Plaid, and then
+choose what to do with each one, as when connecting. Accounts you leave out aren't imported. You can
+use **Add accounts** at any time, not only after that notice.
 
 ## Reconnecting
 
