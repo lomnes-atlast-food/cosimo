@@ -320,6 +320,36 @@ function InstanceSettings() {
               />
             )}
           </Field>
+          <label className="flex items-center gap-2 text-sm sm:col-span-2">
+            <input
+              type="checkbox"
+              checked={s.plaid.refresh_enabled}
+              onChange={(e) => set({ plaid: { ...s.plaid, refresh_enabled: e.target.checked } })}
+            />
+            Allow AI assistants to ask Plaid for a fresh pull (/transactions/refresh, billed separately by
+            Plaid)
+          </label>
+          <Field
+            label="Minimum seconds between assistant-requested syncs"
+            hint="Syncs from the app, webhooks, and polling aren't limited."
+          >
+            {(id) => (
+              <Input
+                id={id}
+                type="number"
+                min={0}
+                value={s.plaid.sync_cooldown_seconds}
+                onChange={(e) =>
+                  set({
+                    plaid: {
+                      ...s.plaid,
+                      sync_cooldown_seconds: Math.max(0, Math.round(Number(e.target.value) || 0)),
+                    },
+                  })
+                }
+              />
+            )}
+          </Field>
         </div>
       </Card>
       <ErrorText error={save.error} />

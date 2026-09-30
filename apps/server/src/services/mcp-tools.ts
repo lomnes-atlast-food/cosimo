@@ -5,10 +5,10 @@
  * Writes go through the review policy like any other writer; for the `mcp` actor the default is
  * review, and OAuth grants are always propose-only. Every write tool that touches the books takes
  * a `rationale` and returns the review item ID and status. Corrections to posted entries (reverse,
- * replace, and a payment's date) are proposals like any other write. Notes and contacts don't touch
- * the books, so they apply directly and are recorded in the audit log. Recurring templates are
- * proposed too, and nothing runs until a person approves. There is no tool to approve, reject, void,
- * delete, or move lock dates.
+ * replace, and a payment's date) are proposals like any other write. Notes, contacts, and bank feed
+ * syncs don't touch the books, so they apply directly and are recorded in the audit log (rules a sync
+ * runs still go through the review policy). Recurring templates are proposed too, and nothing runs
+ * until a person approves. There is no tool to approve, reject, void, delete, or move lock dates.
  */
 import type { LineInput } from "@cosimo/core";
 import { org } from "@cosimo/db";
@@ -45,6 +45,7 @@ import { getEntry, listEntries, reverseEntryTx, submitEntryTx } from "./ledger.t
 import { appendNoteTx } from "./notes.ts";
 import { payLinker } from "./online-payments.ts";
 import { proposePaymentRedateTx } from "./payment-redate-review.ts";
+import { syncForAssistant } from "./plaid.ts";
 import {
   inputOf,
   listTemplates,
@@ -249,7 +250,7 @@ tool({
   name: "list_uncategorized_transactions",
   title: "Bank transactions needing categorization",
   description:
-    "Bank and card transactions that are not yet categorized, newest first: what to work through in the monthly close. Leaves out transactions still pending at the bank (they show up here once posted) and ones already waiting in the review queue (see list_pending_reviews); `pending` gives the count and total of the pending ones. Amounts are integer cents: positive is money in, negative is money out. Pass next_cursor back as cursor for more. To find a specific transaction, already categorized or not, use search_transactions instead.",
+    "Bank and card transactions that are not yet categorized, newest first: what to work through in the monthly close. Leaves out transactions still pending at the bank (they show up here once posted) and ones already waiting in the review queue (see list_pending_reviews); `pending` gives the count and total of the pending ones. Amounts are integer cents: positive is money in, negative is money out. Pass next_cursor back as cursor for more. To find a specific transaction, already categorized or not, use search_transactions instead. Each bank account in `bank_accounts` carries its feed's sync status. If a transaction you expect is missing, check each bank account's `last_synced_at` / `last_sync_status` / `connection_status`, and call sync_bank_feed to fetch now.",
   input: z.object({
     bank_account_id: z.string().optional(),
     limit: z.number().int().min(1).max(200).default(50),
@@ -271,7 +272,7 @@ tool({
   name: "search_transactions",
   title: "Search bank transactions",
   description:
-    "Search bank and card transactions (the bank feed, not the ledger) by text (description or payee), date range, account, and status. For only what still needs a category, use list_uncategorized_transactions instead; for journal entries once posted, use list_entries or get_entry.",
+    "Search bank and card transactions (the bank feed, not the ledger) by text (description or payee), date range, account, and status. For only what still needs a category, use list_uncategorized_transactions instead; for journal entries once posted, use list_entries or get_entry. If a transaction you expect is missing, check each bank account's `last_synced_at` / `last_sync_status` / `connection_status`, and call sync_bank_feed to fetch now.",
   input: z.object({
     query: z.string().optional(),
     from: IsoDate.optional(),
@@ -290,6 +291,30 @@ tool({
       status: i.status as never,
       limit: i.limit,
       cursor: i.cursor,
+    });
+  },
+});
+
+tool({
+  name: "sync_bank_feed",
+  title: "Sync bank feeds now",
+  description:
+    "Fetch new, changed, and removed transactions from the bank now (Plaid bank feeds), for one bank account (`bank_account_id`), one connection (`connection_id`), or, with neither, every connected bank. Applies right away; it is not a proposal and does not go to the review queue. Rules run exactly as in a scheduled sync, under the same review policy: their categorizations go to the review queue unless a person set the rule to post automatically. Each result has a `status`: `synced` (with counts and the new rows in `transactions`, each with any rule or history `suggestion`), `cooldown` (synced moments ago; retry after `retry_after_seconds`), `in_progress`, `error`, `needs_reauth`, or `disconnected`. `needs_reauth` means the bank login must be renewed: only a person can do that in Cosimo, so tell them; you can't fix it. `force_refresh` also asks Plaid to check the bank for newer transactions; Plaid bills that separately, so it only works when the instance allows it (otherwise `refresh` is `not_enabled` and the sync still runs), and what it finds arrives later, through a webhook-triggered sync or another call. An account without a bank feed can't be synced; import a statement instead.",
+  write: true,
+  input: z.object({
+    bank_account_id: z.string().optional().describe("Sync the bank feed behind this bank account."),
+    connection_id: z.string().optional().describe("Sync this bank connection."),
+    force_refresh: z
+      .boolean()
+      .default(false)
+      .describe("Also ask Plaid to check the bank now (billed by Plaid; may be disabled)."),
+  }),
+  async run(t, i) {
+    requireWriter(t);
+    return syncForAssistant(t.ctx, t.scope.id, t.scope.actor, {
+      bankAccountId: i.bank_account_id,
+      connectionId: i.connection_id,
+      forceRefresh: i.force_refresh,
     });
   },
 });
@@ -510,7 +535,7 @@ tool({
   name: "get_cash_snapshot",
   title: "Cash and business snapshot",
   description:
-    "One overview: cash and card balances, this month's and year-to-date income/expense, review-queue and uncategorized-transaction counts, overdue invoices, and bills overdue or due soon. Good for a quick 'how are we doing' check; for a full P&L or balance sheet use run_report, and for one account's balance use get_account_balances.",
+    "One overview: cash and card balances, this month's and year-to-date income/expense, review-queue and uncategorized-transaction counts, overdue invoices, and bills overdue or due soon. Each account and bank connection carries its feed's sync status (`last_synced_at`, `last_successful_sync_at`, `last_sync_status`, `last_sync_error`, `connection_status`); a stale or failing feed means recent transactions may be missing. Good for a quick 'how are we doing' check; for a full P&L or balance sheet use run_report, and for one account's balance use get_account_balances.",
   input: z.object({ as_of: IsoDate.optional().describe("Defaults to today") }),
   async run(t, i) {
     return dashboard(t.scope.handle.db, t.scope.id, i.as_of);

@@ -538,8 +538,19 @@ export const bankConnections = sqliteTable("bank_connections", {
     .notNull()
     .default("active"),
   errorCode: text("error_code"),
+  /** Plaid's message from the last failed sync; cleared with `errorCode`. */
+  errorMessage: text("error_message"),
   syncCursor: text("sync_cursor"),
+  /** Last successful sync. */
   lastSyncedAt: text("last_synced_at"),
+  /** Last completed sync, successful or not. */
+  lastSyncAttemptAt: text("last_sync_attempt_at"),
+  /** Counts from the last successful sync. */
+  lastSyncAdded: integer("last_sync_added"),
+  lastSyncModified: integer("last_sync_modified"),
+  lastSyncRemoved: integer("last_sync_removed"),
+  /** Plaid reported accounts at this login that aren't linked yet (NEW_ACCOUNTS_AVAILABLE). */
+  newAccountsAvailable: integer("new_accounts_available", { mode: "boolean" }).notNull().default(false),
   createdAt: text("created_at").notNull().default(now),
 });
 

@@ -32,8 +32,8 @@ Read:
 | `list_orgs` | The organization and the connection's role |
 | `get_account_balances` | Chart of accounts with balances as of a date |
 | `run_report` | Any report (P&L, balance sheet, trial balance, cash flow, tax lines, general ledger, AR/AP aging, 1099) |
-| `get_cash_snapshot` | Cash and card balances, month/YTD P&L, review and categorize counts, overdue invoices, bills due soon |
-| `list_uncategorized_transactions`, `search_transactions` | Bank and card transactions |
+| `get_cash_snapshot` | Cash and card balances, month/YTD P&L, review and categorize counts, overdue invoices, bills due soon, and each bank feed's sync status |
+| `list_uncategorized_transactions`, `search_transactions` | Bank and card transactions; `list_uncategorized_transactions` also lists the bank accounts with their feed's sync status |
 | `get_entry`, `list_entries` | Journal entries, with account and contact names filled in and whether each has an attachment |
 | `list_contacts` | Customers and vendors; pass `include_archived` to see archived ones too |
 | `list_invoices`, `list_bills`, `list_bill_payments` | Invoices to customers (with the online pay link and whether a bank payment is processing), bills from vendors, and payments sent to vendors |
@@ -42,6 +42,14 @@ Read:
 
 `list_uncategorized_transactions` leaves out transactions still pending at the bank: they aren't
 categorizable yet and don't count toward a closed month.
+
+Every bank account (and bank connection in `get_cash_snapshot`) carries its feed's sync status, so
+an assistant can tell "no new transactions" from "the feed isn't working":
+`last_synced_at` (the last sync that finished, whether it worked or not), `last_successful_sync_at`,
+`last_sync_status` (`never`, `in_progress`, `success`, or `error`), `last_sync_error`, the last
+successful sync's `last_sync_added` / `_modified` / `_removed` counts, `connection_status`
+(`healthy`, `needs_reauth`, `error`, or `disconnected`), and `new_accounts_available`. Accounts
+without a bank feed have `null` in every one of these.
 
 Resources: `org://profile` (the business profile) and `org://notes` (bookkeeping notes). Edit both
 under Settings → Business profile.
@@ -69,6 +77,7 @@ Apply directly, without review, and recorded in the audit log:
 |---|---|
 | `create_contact`, `update_contact` | Adds, edits, archives, or unarchives a customer or vendor (contacts don't touch the books) |
 | `append_note` | Adds a dated note attributed to the assistant (notes don't touch the books) |
+| `sync_bank_feed` | Fetches new transactions from Plaid now, for one bank account, one connection, or all of them. Rules run as in a scheduled sync, under the same review policies. It returns the new rows, with any rule suggestion. A connection synced within the last minute answers `cooldown` without calling Plaid (Admin → Settings → Plaid sets the interval). `force_refresh` also calls Plaid's `/transactions/refresh`, which Plaid bills separately, only when an instance admin allows it. A connection that needs reconnecting is reported as `needs_reauth`: only a person can fix that. Needs Owner or Bookkeeper |
 
 There are no tools to approve, reject, void, delete, or change lock dates. OAuth access
 tokens can only read through the REST API, so an assistant can't reach those actions there either. Owners can auto-approve some

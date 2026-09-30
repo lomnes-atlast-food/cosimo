@@ -1,6 +1,8 @@
 /** Plaid bank feeds API (SPEC §7.1): status, Link, connections, sync, reauth, and webhooks. */
 import { createRoute } from "@hono/zod-openapi";
 import {
+  addAccounts,
+  availableAccounts,
   createLinkToken,
   disconnect,
   exchangePublicToken,
@@ -16,6 +18,28 @@ import { bearerSecurity, errorResponses, Id, json, jsonBody, newRouter, OrgParam
 
 const tags = ["Bank feeds"];
 
+/** Sync status of a bank feed, shared by connections, bank accounts, and the dashboard. */
+export const SyncStatusFields = {
+  last_synced_at: z
+    .string()
+    .nullable()
+    .describe("When the last sync finished, whether it worked or not. Null with no bank feed."),
+  last_successful_sync_at: z.string().nullable().describe("When the last sync that worked finished."),
+  last_sync_status: z.enum(["never", "in_progress", "success", "error"]).nullable(),
+  last_sync_error: z
+    .string()
+    .nullable()
+    .describe("`<Plaid error code>: <message>`; null when the connection has no error."),
+  last_sync_added: z.number().int().nullable().describe("Counts from the last successful sync."),
+  last_sync_modified: z.number().int().nullable(),
+  last_sync_removed: z.number().int().nullable(),
+  connection_status: z.enum(["healthy", "needs_reauth", "error", "disconnected"]).nullable(),
+  new_accounts_available: z
+    .boolean()
+    .nullable()
+    .describe("Plaid reported accounts at this bank login that aren't in Cosimo yet."),
+};
+
 const ConnectionSchema = z
   .object({
     id: z.string(),
@@ -24,7 +48,7 @@ const ConnectionSchema = z
     status: z.enum(["active", "needs_reauth", "error", "disconnected"]),
     error_code: z.string().nullable(),
     message: z.string().nullable().describe("Plain-language status for people; null when healthy."),
-    last_synced_at: z.string().nullable(),
+    ...SyncStatusFields,
     created_at: z.string(),
     accounts: z.array(
       z.object({
@@ -33,6 +57,7 @@ const ConnectionSchema = z
         mask: z.string().nullable(),
         kind: z.enum(["checking", "savings", "credit_card", "other"]),
         is_active: z.boolean(),
+        provider_account_id: z.string().nullable().describe("Plaid's account ID."),
       }),
     ),
   })
@@ -46,6 +71,7 @@ const SyncSummarySchema = z
     skipped: z.number().int(),
     transfers_paired: z.number().int(),
     rules_applied: z.number().int(),
+    transaction_ids: z.array(z.string()).describe("Rows this sync added, pending ones included."),
   })
   .openapi("SyncSummary");
 
@@ -105,7 +131,18 @@ export function plaidRoutes() {
       security: bearerSecurity,
       request: {
         params: OrgParams,
-        body: { ...jsonBody(z.object({ connection_id: Id.nullable().optional() })), required: false },
+        body: {
+          ...jsonBody(
+            z.object({
+              connection_id: Id.nullable().optional(),
+              account_selection: z
+                .boolean()
+                .optional()
+                .describe("With connection_id: let the user pick accounts to add to this bank login."),
+            }),
+          ),
+          required: false,
+        },
       },
       responses: {
         200: json(
@@ -120,7 +157,10 @@ export function plaidRoutes() {
       const o = requireOwner(c);
       const b = c.req.valid("json") ?? {};
       return c.json(
-        await createLinkToken(c.get("ctx"), o.id, o.actor, { connectionId: b.connection_id }),
+        await createLinkToken(c.get("ctx"), o.id, o.actor, {
+          connectionId: b.connection_id,
+          accountSelection: b.account_selection,
+        }),
         200,
       );
     },
@@ -220,6 +260,73 @@ export function plaidRoutes() {
       const o = requireOwner(c);
       return c.json(
         await markReconnected(c.get("ctx"), o.id, o.actor, c.req.valid("param").connectionId),
+        200,
+      );
+    },
+  );
+
+  r.openapi(
+    createRoute({
+      method: "get",
+      path: "/orgs/{orgId}/bank-connections/{connectionId}/available-accounts",
+      tags,
+      summary: "Plaid accounts at this bank login that aren't linked to a bank account yet (owner)",
+      security: bearerSecurity,
+      request: { params: ConnParams },
+      responses: {
+        200: json(
+          z.object({
+            data: z.array(
+              z
+                .object({
+                  account_id: z.string(),
+                  name: z.string(),
+                  mask: z.string().nullable(),
+                  type: z.string(),
+                  subtype: z.string().nullable(),
+                })
+                .openapi("AvailablePlaidAccount"),
+            ),
+          }),
+        ),
+        ...errorResponses,
+      },
+    }),
+    async (c) => {
+      const o = requireOwner(c);
+      const data = await availableAccounts(c.get("ctx"), o.id, o.actor, c.req.valid("param").connectionId);
+      return c.json({ data }, 200);
+    },
+  );
+
+  r.openapi(
+    createRoute({
+      method: "post",
+      path: "/orgs/{orgId}/bank-connections/{connectionId}/accounts",
+      tags,
+      summary: "Add accounts to a bank login after Link account selection, then sync (owner)",
+      description:
+        "Only accounts not already linked are considered, and an account left out of `accounts` is skipped. Clears `new_accounts_available`, even when `accounts` is empty.",
+      security: bearerSecurity,
+      request: {
+        params: ConnParams,
+        body: jsonBody(z.object({ accounts: z.array(AccountChoiceSchema).max(100) })),
+      },
+      responses: {
+        200: json(z.object({ connection: ConnectionSchema, sync: SyncSummarySchema.nullable() })),
+        ...errorResponses,
+      },
+    }),
+    async (c) => {
+      const o = requireOwner(c);
+      return c.json(
+        await addAccounts(
+          c.get("ctx"),
+          o.id,
+          o.actor,
+          c.req.valid("param").connectionId,
+          c.req.valid("json").accounts,
+        ),
         200,
       );
     },

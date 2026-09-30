@@ -50,6 +50,8 @@ export interface LinkTokenRequest {
   redirectUri?: string | null;
   /** Update mode (reauthentication) for an existing item. */
   accessToken?: string | null;
+  /** With `accessToken`: let the user pick accounts to add to the item (new accounts available). */
+  accountSelection?: boolean;
 }
 
 export interface Jwk {
@@ -70,6 +72,8 @@ export interface PlaidApi {
   accountsGet(accessToken: string): Promise<{ accounts: PlaidAccount[]; institution_id: string | null }>;
   institutionName(institutionId: string): Promise<string | null>;
   transactionsSync(accessToken: string, cursor: string | null): Promise<SyncPage>;
+  /** Ask Plaid to check the bank for new transactions now; results arrive through later syncs. */
+  transactionsRefresh(accessToken: string): Promise<void>;
   itemRemove(accessToken: string): Promise<void>;
   itemWebhookUpdate(accessToken: string, webhook: string): Promise<void>;
   webhookVerificationKey(keyId: string): Promise<Jwk>;
@@ -156,8 +160,10 @@ export class HttpPlaid implements PlaidApi {
     };
     if (r.webhook) body.webhook = r.webhook;
     if (r.redirectUri) body.redirect_uri = r.redirectUri;
-    if (r.accessToken) body.access_token = r.accessToken;
-    else {
+    if (r.accessToken) {
+      body.access_token = r.accessToken;
+      if (r.accountSelection) body.update = { account_selection_enabled: true };
+    } else {
       body.products = ["transactions"];
       body.transactions = { days_requested: 730 };
     }
@@ -190,6 +196,10 @@ export class HttpPlaid implements PlaidApi {
     const body: Record<string, unknown> = { access_token: accessToken, count: 500 };
     if (cursor) body.cursor = cursor;
     return this.call<SyncPage>("/transactions/sync", body);
+  }
+
+  async transactionsRefresh(accessToken: string) {
+    await this.call("/transactions/refresh", { access_token: accessToken });
   }
 
   async itemRemove(accessToken: string) {

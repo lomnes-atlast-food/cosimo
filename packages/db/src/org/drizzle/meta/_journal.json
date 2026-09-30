@@ -50,6 +50,13 @@
       "when": 1790900000000,
       "tag": "0006_provider_adjustments",
       "breakpoints": true
+    },
+    {
+      "idx": 7,
+      "version": "6",
+      "when": 1790734873058,
+      "tag": "0007_bank_sync_status",
+      "breakpoints": true
     }
   ]
 }

@@ -6,6 +6,7 @@
 import { org } from "@cosimo/db";
 import { addDays, diffDays, fiscalYearStart, today } from "@cosimo/shared";
 import { and, asc, count, eq, inArray, isNull, ne } from "drizzle-orm";
+import { type SyncStatusView, syncStatusView } from "./bank-sync.ts";
 import { listBankAccounts } from "./banking.ts";
 import { accountMap, settingsRow } from "./ledger.ts";
 import { runReport } from "./reports.ts";
@@ -15,7 +16,8 @@ type Reader = OrgHandle["db"];
 
 export const BILLS_DUE_SOON_DAYS = 7;
 
-export interface DashboardAccount {
+/** A cash or card account, with its bank feed's sync status (null fields when it has none). */
+export interface DashboardAccount extends SyncStatusView {
   id: string;
   name: string;
   kind: string;
@@ -62,13 +64,12 @@ export interface DashboardData {
     overdue: { count: number; total: number };
     due_soon: { count: number; total: number; days: number };
   };
-  bank_connections: {
+  bank_connections: ({
     id: string;
     institution_name: string | null;
     status: string;
     error_code: string | null;
-    last_synced_at: string | null;
-  }[];
+  } & SyncStatusView)[];
 }
 
 async function pnl(db: Reader, orgId: string, from: string, to: string, basis: "cash" | "accrual") {
@@ -100,6 +101,15 @@ export async function dashboard(db: Reader, orgId: string, asOf = today()): Prom
       balance: b.balance,
       unreviewed: b.unreviewed,
       pending: b.pending,
+      last_synced_at: b.last_synced_at,
+      last_successful_sync_at: b.last_successful_sync_at,
+      last_sync_status: b.last_sync_status,
+      last_sync_error: b.last_sync_error,
+      last_sync_added: b.last_sync_added,
+      last_sync_modified: b.last_sync_modified,
+      last_sync_removed: b.last_sync_removed,
+      connection_status: b.connection_status,
+      new_accounts_available: b.new_accounts_available,
     };
     const isLiability = b.kind === "credit_card" || types.get(b.ledger_account_id)?.type === "liability";
     (isLiability ? cards : cash).push(a);
@@ -196,7 +206,7 @@ export async function dashboard(db: Reader, orgId: string, asOf = today()): Prom
       institution_name: c.institutionName,
       status: c.status,
       error_code: c.errorCode,
-      last_synced_at: c.lastSyncedAt,
+      ...syncStatusView(c),
     })),
   };
 }

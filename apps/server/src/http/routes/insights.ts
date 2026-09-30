@@ -4,6 +4,7 @@ import { dashboard } from "../../services/dashboard.ts";
 import { buildYearEndPackage } from "../../services/year-end.ts";
 import { requireRole } from "../middleware.ts";
 import { bearerSecurity, Cents, errorResponses, IsoDate, json, newRouter, OrgParams, z } from "../openapi.ts";
+import { SyncStatusFields } from "./plaid.ts";
 
 const DashboardAccountSchema = z.object({
   id: z.string(),
@@ -14,6 +15,7 @@ const DashboardAccountSchema = z.object({
   balance: Cents.openapi({ description: "Normal sign: money in the account, or the amount owed on a card." }),
   unreviewed: z.number().int(),
   pending: z.number().int(),
+  ...SyncStatusFields,
 });
 
 const PnlSummarySchema = z.object({
@@ -62,7 +64,7 @@ export const DashboardSchema = z
         institution_name: z.string().nullable(),
         status: z.string(),
         error_code: z.string().nullable(),
-        last_synced_at: z.string().nullable(),
+        ...SyncStatusFields,
       }),
     ),
   })

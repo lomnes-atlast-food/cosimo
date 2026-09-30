@@ -60,6 +60,7 @@ import {
   z,
 } from "../openapi.ts";
 import { EntrySchema, submitView } from "./ledger.ts";
+import { SyncStatusFields } from "./plaid.ts";
 
 const BankAccountSchema = z
   .object({
@@ -76,6 +77,7 @@ const BankAccountSchema = z
     pending: z.number().int(),
     pending_amount: Cents,
     last_transaction_date: z.string().nullable(),
+    ...SyncStatusFields,
   })
   .openapi("BankAccount");
 
