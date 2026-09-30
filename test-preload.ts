@@ -7,7 +7,9 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-// Bun ignores `timeout` under [test] in bunfig.toml, so the default is set here.
+// Bun applies a preload's `setDefaultTimeout` only to the first test file and ignores `timeout`
+// in bunfig.toml, so the package.json test scripts pass `--timeout 30000`. This call still covers
+// a single-file `bun test <file>`.
 setDefaultTimeout(30_000);
 
 if (process.env.COSIMO_TEST_DB === "sqld" && !process.env.COSIMO_TEST_SQLD_URL) {
