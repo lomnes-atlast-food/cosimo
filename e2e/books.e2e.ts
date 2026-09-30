@@ -126,6 +126,27 @@ test("review queue shows threshold items and approval posts them", async ({ page
   await expect(page.getByText("Nothing waiting for review.")).toBeVisible();
 });
 
+test("an invoice over the threshold waits in the review queue and shows its lines", async ({ page }) => {
+  await signIn(page);
+  const base = orgBase(page);
+  await page.goto(`${base}/sales/invoices/new`);
+  await page.getByRole("combobox", { name: "Customer" }).fill("Initech");
+  await page.getByRole("option", { name: '+ New customer "Initech"' }).click();
+  await page.getByLabel("Line 1 description").fill("Annual retainer");
+  await page.getByLabel("Line 1 quantity").fill("1");
+  await page.getByLabel("Line 1 rate").fill("10000");
+  await page.getByRole("button", { name: "Save draft" }).click();
+  await page.getByRole("button", { name: "Mark as sent" }).click();
+  await expect(page.getByText(/Waiting in the review queue/)).toBeVisible();
+
+  // A held invoice used to crash the whole review page (#62).
+  await page.goto(`${base}/accounting/review`);
+  await expect(page.getByText(/Invoice .+ to Initech/)).toBeVisible();
+  await expect(page.getByText("Annual retainer · $10,000.00")).toBeVisible();
+  await page.getByRole("button", { name: "Approve", exact: true }).click();
+  await expect(page.getByText("Nothing waiting for review.")).toBeVisible();
+});
+
 test("create an invoice, mark it sent, and record full payment", async ({ page }) => {
   await signIn(page);
   const base = orgBase(page);

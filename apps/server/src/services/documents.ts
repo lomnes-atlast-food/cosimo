@@ -483,7 +483,8 @@ export async function finalizeInvoiceTx(
     },
     {
       forcePost: opts.forcePost,
-      reviewContext: { invoice: { id: inv.id, number: inv.number, customer: view.customer_name } },
+      // The review page renders the same shape as an invoice_draft item.
+      reviewContext: { invoice: view },
     },
   );
   await tx.update(org.invoices).set({ entryId: r.entry.id }).where(eq(org.invoices.id, inv.id));
@@ -826,7 +827,8 @@ export async function finalizeBillTx(
     },
     {
       forcePost: opts.forcePost,
-      reviewContext: { bill: { id: b.id, number: b.billNumber, vendor: view.vendor_name } },
+      // The review page renders the same shape as a bill_draft item.
+      reviewContext: { bill: view },
     },
   );
   await tx.update(org.bills).set({ entryId: r.entry.id }).where(eq(org.bills.id, b.id));

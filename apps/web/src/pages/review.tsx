@@ -217,19 +217,24 @@ function ReviewCard({
       fee: number;
     };
     rule?: { name: string; conditions: Record<string, unknown>; actions: Record<string, unknown> };
+    // Invoices and bills held over the threshold before #62 carry only a summary
+    // ({ id, number, customer | vendor }); the entry lines above show the amounts.
     invoice?: {
       number: string;
-      customer_name: string;
-      issue_date: string;
-      total: number;
-      lines: { description: string; amount: number }[];
+      customer_name?: string;
+      customer?: string;
+      issue_date?: string;
+      total?: number;
+      lines?: { description: string; amount: number }[];
     };
     bill?: {
-      bill_number: string | null;
-      vendor_name: string;
-      issue_date: string;
-      total: number;
-      lines: { description: string; amount: number }[];
+      bill_number?: string | null;
+      number?: string | null;
+      vendor_name?: string;
+      vendor?: string;
+      issue_date?: string;
+      total?: number;
+      lines?: { description: string; amount: number }[];
     };
     original?: Entry;
     replacement?: {
@@ -372,11 +377,13 @@ function ReviewCard({
           {payload.invoice && (
             <div className="text-sm">
               <p>
-                Invoice {payload.invoice.number} to <strong>{payload.invoice.customer_name}</strong>,{" "}
-                {fmtDate(payload.invoice.issue_date)} · {money(payload.invoice.total)}
+                Invoice {payload.invoice.number} to{" "}
+                <strong>{payload.invoice.customer_name ?? payload.invoice.customer}</strong>
+                {payload.invoice.issue_date && `, ${fmtDate(payload.invoice.issue_date)}`}
+                {payload.invoice.total != null && ` · ${money(payload.invoice.total)}`}
               </p>
               <ul className="mt-1 text-xs text-zinc-600 dark:text-zinc-400">
-                {payload.invoice.lines.map((l, i) => (
+                {(payload.invoice.lines ?? []).map((l, i) => (
                   <li key={`${i}-${l.description}`}>
                     {l.description} · {money(l.amount)}
                   </li>
@@ -390,12 +397,16 @@ function ReviewCard({
           {payload.bill && (
             <div className="text-sm">
               <p>
-                Bill{payload.bill.bill_number ? ` ${payload.bill.bill_number}` : ""} from{" "}
-                <strong>{payload.bill.vendor_name}</strong>, {fmtDate(payload.bill.issue_date)} ·{" "}
-                {money(payload.bill.total)}
+                Bill
+                {(payload.bill.bill_number ?? payload.bill.number)
+                  ? ` ${payload.bill.bill_number ?? payload.bill.number}`
+                  : ""}{" "}
+                from <strong>{payload.bill.vendor_name ?? payload.bill.vendor}</strong>
+                {payload.bill.issue_date && `, ${fmtDate(payload.bill.issue_date)}`}
+                {payload.bill.total != null && ` · ${money(payload.bill.total)}`}
               </p>
               <ul className="mt-1 text-xs text-zinc-600 dark:text-zinc-400">
-                {payload.bill.lines.map((l, i) => (
+                {(payload.bill.lines ?? []).map((l, i) => (
                   <li key={`${i}-${l.description}`}>
                     {l.description} · {money(l.amount)}
                   </li>

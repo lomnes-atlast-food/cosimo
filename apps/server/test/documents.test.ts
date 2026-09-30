@@ -227,6 +227,12 @@ describe(`invoices (${DB_MODE})`, () => {
     expect(f.body.status).toBe("pending_review");
     expect(f.body.invoice.status).toBe("draft");
     expect(f.body.invoice.entry_status).toBe("pending_review");
+    // The review page renders the held invoice like an invoice draft, lines included (#62).
+    const item = (await owner.json("GET", `${base()}/review/${f.body.review.review_item_id}`)).body;
+    expect(item.payload.invoice).toMatchObject({ number: big.number, total: 300_000 });
+    expect(item.payload.invoice.customer_name).toBeTruthy();
+    expect(item.payload.invoice.lines).toHaveLength(1);
+    expect(item.payload.entry.status).toBe("pending_review");
     expect((await owner.json("POST", `${base()}/invoices/${big.id}/send`, {})).body.emailed_to).toBeNull();
     await owner.json("POST", `${base()}/review/${f.body.review.review_item_id}/approve`, {});
     expect((await owner.json("GET", `${base()}/invoices/${big.id}`)).body.status).toBe("sent");
