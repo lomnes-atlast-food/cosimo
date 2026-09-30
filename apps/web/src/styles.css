@@ -1,6 +1,8 @@
 @import "tailwindcss";
 
 @custom-variant dark (&:where(.dark, .dark *));
+/* Touch devices: bigger targets, no viewport-width guessing. Mouse users see no change. */
+@custom-variant touch (@media (pointer: coarse));
 
 @theme {
   --font-sans:

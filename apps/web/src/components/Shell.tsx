@@ -59,13 +59,16 @@ export function navFor(orgId: string): NavGroup[] {
   ];
 }
 
-function ThemeToggle() {
+function ThemeToggle({ vertical }: { vertical?: boolean }) {
   const [t, setT] = useState<Theme>(getTheme());
   const next: Record<Theme, Theme> = { system: "light", light: "dark", dark: "system" };
   return (
     <button
       type="button"
-      className="rounded px-2 py-1 text-xs text-zinc-500 hover:bg-zinc-100 dark:hover:bg-zinc-800"
+      className={cx(
+        "rounded px-2 py-1 text-xs text-zinc-500 hover:bg-zinc-100 dark:hover:bg-zinc-800",
+        vertical ? "block w-full text-left text-sm touch:min-h-11" : "touch:min-h-11",
+      )}
       onClick={() => {
         const n = next[t];
         setTheme(n);
@@ -91,7 +94,7 @@ export function OrgSwitcher({ orgId }: { orgId: string }) {
         if (e.target.value === "__new") navigate({ to: "/orgs" });
         else navigate({ to: "/o/$orgId", params: { orgId: e.target.value } });
       }}
-      className="max-w-[14rem] truncate rounded-md border-0 bg-transparent py-1 pl-1 pr-7 text-sm font-semibold ring-1 ring-zinc-200 dark:ring-zinc-700"
+      className="min-w-0 max-w-[14rem] truncate rounded-md border-0 bg-transparent py-1 pl-1 pr-7 text-sm font-semibold touch:min-h-11 touch:text-base ring-1 ring-zinc-200 dark:ring-zinc-700"
     >
       {real.map((o) => (
         <option key={o.id} value={o.id}>
@@ -110,24 +113,22 @@ export function OrgSwitcher({ orgId }: { orgId: string }) {
   );
 }
 
-function UserMenu() {
+function UserMenu({ vertical }: { vertical?: boolean }) {
   const { data } = useSession();
   const update = useUpdateStatus();
   const qc = useQueryClient();
   const navigate = useNavigate();
+  const itemCls = cx(
+    "rounded px-2 py-1 text-zinc-600 hover:bg-zinc-100 dark:text-zinc-300 dark:hover:bg-zinc-800",
+    "flex items-center touch:min-h-11",
+  );
   return (
-    <div className="flex items-center gap-1 text-xs">
-      <Link
-        to="/account"
-        className="rounded px-2 py-1 text-zinc-600 hover:bg-zinc-100 dark:text-zinc-300 dark:hover:bg-zinc-800"
-      >
+    <div className={cx("flex gap-1", vertical ? "flex-col text-sm" : "items-center text-xs")}>
+      <Link to="/account" className={itemCls}>
         {data?.user?.name || data?.user?.email}
       </Link>
       {data?.user?.is_instance_admin && (
-        <Link
-          to="/admin"
-          className="relative rounded px-2 py-1 text-zinc-600 hover:bg-zinc-100 dark:text-zinc-300 dark:hover:bg-zinc-800"
-        >
+        <Link to="/admin" className={cx(itemCls, "relative")}>
           Admin
           {update.data?.status === "available" && (
             <span
@@ -141,7 +142,7 @@ function UserMenu() {
       )}
       <button
         type="button"
-        className="rounded px-2 py-1 text-zinc-600 hover:bg-zinc-100 dark:text-zinc-300 dark:hover:bg-zinc-800"
+        className={cx(itemCls, vertical && "text-left")}
         onClick={async () => {
           await api.POST("/api/v1/auth/logout");
           qc.clear();
@@ -157,7 +158,20 @@ function UserMenu() {
 export function Shell({ orgId, children }: { orgId: string; children: ReactNode }) {
   const [open, setOpen] = useState(false);
   const path = useRouterState({ select: (s) => s.location.pathname });
-  useEffect(() => setOpen(false), []);
+  // Close the drawer after navigating, on Escape, and keep the page behind it from scrolling.
+  // biome-ignore lint/correctness/useExhaustiveDependencies: path is the trigger, not a value used inside
+  useEffect(() => setOpen(false), [path]);
+  useEffect(() => {
+    if (!open) return;
+    const onKey = (e: KeyboardEvent) => e.key === "Escape" && setOpen(false);
+    window.addEventListener("keydown", onKey);
+    const prev = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+    return () => {
+      window.removeEventListener("keydown", onKey);
+      document.body.style.overflow = prev;
+    };
+  }, [open]);
   const groups = navFor(orgId);
   const nav = (
     <nav className="space-y-4 p-3" aria-label="Main">
@@ -177,7 +191,7 @@ export function Shell({ orgId, children }: { orgId: string; children: ReactNode 
                   <Link
                     to={it.to}
                     className={cx(
-                      "block rounded-md px-2 py-1.5 text-sm",
+                      "block rounded-md px-2 py-1.5 text-sm touch:py-2.5",
                       active
                         ? "bg-brand-50 font-medium text-brand-700 dark:bg-zinc-800 dark:text-gold-400"
                         : "text-zinc-700 hover:bg-zinc-100 dark:text-zinc-300 dark:hover:bg-zinc-800",
@@ -210,28 +224,38 @@ export function Shell({ orgId, children }: { orgId: string; children: ReactNode 
             className="absolute inset-0 bg-black/40"
             onClick={() => setOpen(false)}
           />
-          <div className="absolute inset-y-0 left-0 w-64 overflow-y-auto bg-white dark:bg-zinc-900">
+          <div className="absolute inset-y-0 left-0 flex w-64 flex-col overflow-y-auto bg-white pb-[env(safe-area-inset-bottom)] pt-[env(safe-area-inset-top)] dark:bg-zinc-900">
+            <div className="flex h-14 shrink-0 items-center gap-2 border-b border-zinc-200 px-4 dark:border-zinc-800">
+              <img src="/favicon.svg" alt="" className="h-6 w-6" />
+              <span className="font-semibold tracking-tight">Cosimo</span>
+            </div>
             {nav}
+            <div className="mt-auto space-y-1 border-t border-zinc-200 p-3 dark:border-zinc-800">
+              <UserMenu vertical />
+              <ThemeToggle vertical />
+            </div>
           </div>
         </div>
       )}
       <div className="min-w-0">
-        <header className="sticky top-0 z-30 flex h-14 items-center gap-3 border-b border-zinc-200 bg-white/90 px-4 backdrop-blur dark:border-zinc-800 dark:bg-zinc-950/90">
+        <header className="sticky top-0 z-30 flex min-h-14 items-center gap-3 border-b border-zinc-200 bg-white/90 px-4 pt-[env(safe-area-inset-top)] backdrop-blur dark:border-zinc-800 dark:bg-zinc-950/90">
           <button
             type="button"
-            className="rounded p-1.5 lg:hidden"
+            className="rounded p-1.5 touch:min-h-11 touch:min-w-11 lg:hidden"
             aria-label="Open menu"
             onClick={() => setOpen(true)}
           >
             ☰
           </button>
           <OrgSwitcher orgId={orgId} />
-          <div className="ml-auto flex items-center gap-1">
+          <div className="ml-auto hidden items-center gap-1 lg:flex">
             <ThemeToggle />
             <UserMenu />
           </div>
         </header>
-        <main className="mx-auto max-w-6xl px-4 py-6">{children}</main>
+        <main className="mx-auto max-w-6xl px-4 py-6 pb-[max(1.5rem,env(safe-area-inset-bottom))]">
+          {children}
+        </main>
       </div>
     </div>
   );
@@ -240,17 +264,19 @@ export function Shell({ orgId, children }: { orgId: string; children: ReactNode 
 export function PlainShell({ children }: { children: ReactNode }) {
   return (
     <div className="min-h-dvh bg-zinc-50 dark:bg-zinc-950">
-      <header className="flex h-14 items-center gap-2 border-b border-zinc-200 bg-white px-4 dark:border-zinc-800 dark:bg-zinc-900">
+      <header className="flex min-h-14 flex-wrap items-center gap-x-2 border-b border-zinc-200 bg-white px-4 pt-[env(safe-area-inset-top)] dark:border-zinc-800 dark:bg-zinc-900">
         <Link to="/" className="flex items-center gap-2">
           <img src="/favicon.svg" alt="" className="h-6 w-6" />
           <span className="font-semibold tracking-tight">Cosimo</span>
         </Link>
-        <div className="ml-auto flex items-center gap-1">
+        <div className="ml-auto flex flex-wrap items-center gap-1">
           <ThemeToggle />
           <UserMenu />
         </div>
       </header>
-      <main className="mx-auto max-w-4xl px-4 py-6">{children}</main>
+      <main className="mx-auto max-w-4xl px-4 py-6 pb-[max(1.5rem,env(safe-area-inset-bottom))]">
+        {children}
+      </main>
     </div>
   );
 }

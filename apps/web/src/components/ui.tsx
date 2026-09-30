@@ -38,7 +38,9 @@ export function Button({
       disabled={rest.disabled || loading}
       className={cx(
         "inline-flex items-center justify-center gap-1.5 rounded-md font-medium transition-colors disabled:cursor-not-allowed",
-        size === "sm" ? "px-2.5 py-1 text-xs" : "px-3.5 py-2 text-sm",
+        size === "sm"
+          ? "px-2.5 py-1 text-xs touch:min-h-11 touch:px-3 touch:text-sm"
+          : "px-3.5 py-2 text-sm touch:min-h-11",
         VARIANTS[variant],
         className,
       )}
@@ -50,7 +52,7 @@ export function Button({
 }
 
 export const inputCls =
-  "block w-full rounded-md border-0 bg-white px-3 py-2 text-sm text-zinc-900 ring-1 ring-inset ring-zinc-300 placeholder:text-zinc-400 focus:ring-2 focus:ring-inset focus:ring-brand-500 dark:bg-zinc-900 dark:text-zinc-100 dark:ring-zinc-700";
+  "block w-full rounded-md border-0 bg-white px-3 py-2 text-sm touch:min-h-11 touch:text-base text-zinc-900 ring-1 ring-inset ring-zinc-300 placeholder:text-zinc-400 focus:ring-2 focus:ring-inset focus:ring-brand-500 dark:bg-zinc-900 dark:text-zinc-100 dark:ring-zinc-700";
 
 /**
  * inputCls plus the caller's classes. A width in `className` (w-32, w-auto) replaces the default
@@ -242,7 +244,7 @@ export function GroupToggle({ open, label, onClick }: { open: boolean; label: st
       onClick={onClick}
       aria-expanded={open}
       aria-label={`${open ? "Collapse" : "Expand"} ${label}`}
-      className="-ml-1 mr-1 inline-flex h-5 w-5 shrink-0 items-center justify-center rounded align-text-bottom text-zinc-400 hover:bg-zinc-100 hover:text-zinc-700 print:hidden dark:hover:bg-zinc-800 dark:hover:text-zinc-200"
+      className="-ml-1 mr-1 inline-flex h-5 w-5 touch:h-9 touch:w-9 shrink-0 items-center justify-center rounded align-text-bottom text-zinc-400 hover:bg-zinc-100 hover:text-zinc-700 print:hidden dark:hover:bg-zinc-800 dark:hover:text-zinc-200"
     >
       <svg
         aria-hidden="true"
@@ -363,7 +365,7 @@ export function Tabs<T extends string>({
           aria-selected={value === t.value}
           onClick={() => onChange(t.value)}
           className={cx(
-            "-mb-px whitespace-nowrap border-b-2 px-3 py-2 text-sm",
+            "-mb-px whitespace-nowrap border-b-2 px-3 py-2 text-sm touch:min-h-11",
             value === t.value
               ? "border-brand-600 font-medium text-brand-700 dark:border-gold-400 dark:text-gold-400"
               : "border-transparent text-zinc-500 hover:text-zinc-800 dark:hover:text-zinc-200",
@@ -395,7 +397,7 @@ export function FilterPills<T extends string>({
           aria-pressed={value === o.value}
           onClick={() => onChange(o.value)}
           className={cx(
-            "rounded-full px-3 py-1 text-sm whitespace-nowrap transition-colors",
+            "rounded-full px-3 py-1 text-sm whitespace-nowrap transition-colors touch:min-h-11",
             value === o.value
               ? "bg-brand-50 font-medium text-brand-700 dark:bg-zinc-800 dark:text-gold-400"
               : "text-zinc-500 hover:bg-zinc-100 hover:text-zinc-800 dark:hover:bg-zinc-800 dark:hover:text-zinc-200",

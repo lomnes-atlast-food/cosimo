@@ -2,6 +2,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link, useNavigate, useParams, useRouterState } from "@tanstack/react-router";
 import { useState } from "react";
 import { api, rawFetch, unwrap } from "../api/client";
+import { Attachments } from "../components/Attachments";
 import { RecurringList } from "../components/recurring";
 import {
   Alert,
@@ -253,7 +254,6 @@ function BillEditor({ bill, onDone }: { bill: Bill | null; onDone: (id: string, 
               id={id}
               type="file"
               accept="application/pdf,image/*"
-              capture="environment"
               onChange={(e) => setFile(e.target.files?.[0] ?? null)}
               className="block w-full text-sm file:mr-3 file:rounded-md file:border-0 file:bg-zinc-100 file:px-3 file:py-2 dark:file:bg-zinc-800"
             />
@@ -324,15 +324,6 @@ export function BillPage() {
     queryFn: () =>
       unwrap(api.GET("/api/v1/orgs/{orgId}/bills/{billId}", { params: { path: { orgId, billId } } })),
   });
-  const files = useQuery({
-    queryKey: ["attachments", orgId, "bill", billId],
-    queryFn: () =>
-      unwrap(
-        api.GET("/api/v1/orgs/{orgId}/attachments", {
-          params: { path: { orgId }, query: { target_type: "bill", target_id: billId } },
-        }),
-      ).then((r) => r.data),
-  });
   const accounts = useAccounts(orgId);
   const refresh = () =>
     Promise.all(
@@ -348,16 +339,6 @@ export function BillPage() {
           body: {},
         }),
       ),
-    onSuccess: refresh,
-  });
-  const upload = useMutation({
-    mutationFn: async (f: File) => {
-      const form = new FormData();
-      form.append("file", f);
-      form.append("target_type", "bill");
-      form.append("target_id", billId);
-      await rawFetch(`/api/v1/orgs/${orgId}/attachments`, { method: "POST", body: form });
-    },
     onSuccess: refresh,
   });
   if (q.isLoading) return <Loading />;
@@ -417,7 +398,7 @@ export function BillPage() {
             This bill is waiting in the review queue and does not affect the books yet.
           </Alert>
         )}
-        <ErrorText error={voidIt.error ?? upload.error} />
+        <ErrorText error={voidIt.error} />
         <Card>
           <Table>
             <thead>
@@ -446,42 +427,8 @@ export function BillPage() {
             <dd className="text-right font-semibold num">{money(b.balance_due)}</dd>
           </dl>
         </Card>
-        <Card
-          title="Attachments"
-          actions={
-            canWrite && (
-              <label className="cursor-pointer text-sm text-brand-700 hover:underline dark:text-gold-400">
-                Add file
-                <input
-                  type="file"
-                  className="sr-only"
-                  accept="application/pdf,image/*"
-                  capture="environment"
-                  onChange={(e) => e.target.files?.[0] && upload.mutate(e.target.files[0])}
-                />
-              </label>
-            )
-          }
-        >
-          {!files.data?.length ? (
-            <p className="text-sm text-zinc-500">No files.</p>
-          ) : (
-            <ul className="space-y-1 text-sm">
-              {files.data.map((f) => (
-                <li key={f.id}>
-                  <a
-                    href={`/api/v1/orgs/${orgId}/attachments/${f.id}`}
-                    target="_blank"
-                    rel="noreferrer"
-                    className="underline"
-                  >
-                    {f.filename}
-                  </a>{" "}
-                  <span className="text-zinc-500">({Math.ceil(f.size_bytes / 1024)} KB)</span>
-                </li>
-              ))}
-            </ul>
-          )}
+        <Card title="Attachments">
+          <Attachments targetType="bill" targetId={billId} label="Add file" />
         </Card>
         {canWrite && b.status !== "void" && b.status !== "draft" && (
           <Button
