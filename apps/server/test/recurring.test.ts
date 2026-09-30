@@ -193,7 +193,9 @@ describe(`recurring templates (${DB_MODE})`, () => {
     const b = await docOf(big.id);
     expect(b.status).toBe("draft");
     expect(b.entry_status).toBe("pending_review");
-    expect((await pendingReviews(o)).some((r) => r.amount === 250_000)).toBe(true);
+    const held = (await pendingReviews(o)).find((r) => r.amount === 250_000);
+    expect(held?.payload.bill).toMatchObject({ vendor_name: expect.any(String), total: 250_000 });
+    expect(held?.payload.bill.lines).toHaveLength(1);
   });
 
   test("a posted entry follows review policies for the system actor", async () => {
