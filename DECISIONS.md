@@ -6,7 +6,7 @@ Choices made during the build. SPEC.md is the source of truth for requirements; 
 
 | Topic | Decision |
 |---|---|
-| Repo | `github.com/steve-lomnes/cosimo`, **private**. It will be made public later, so never commit secrets. Keep history clean from day one. |
+| Repo | `github.com/steve-lomnes/cosimo`, public (private during the build, made public in September 2026). Never commit secrets. |
 | License | MIT, copyright 2026 Stephen Lomnes |
 | Scope | All 8 phases of SPEC §16, in order. Commit and push after each phase. Anything left unfinished goes into an issue with a spec reference. |
 | Domain / install URL | Install from GitHub Releases of `steve-lomnes/cosimo` (`install.sh`/`install.ps1` as release assets); a short `get.` domain is a future option, not required. Base URLs live in one constant file (`packages/shared/src/distribution.ts`, mirrored as variables at the top of the scripts). |
