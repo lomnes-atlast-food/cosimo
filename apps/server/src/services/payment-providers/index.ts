@@ -38,6 +38,10 @@ export interface StripeOptions {
   setup_check: StoredSetupCheck | null;
   /** WEBHOOK_EVENTS_VERSION the registered endpoint was last set to (1 before the field existed). */
   webhook_events_version: number;
+  /** Where refunds are debited (Refunds and Allowances); set on save or the first refund. */
+  refund_account_id: string | null;
+  /** Where disputed amounts are debited (Chargebacks); set on save or the first dispute. */
+  chargeback_account_id: string | null;
 }
 
 const isMethod = (m: unknown): m is PaymentMethodType =>
@@ -69,6 +73,8 @@ export function stripeOptions(s: Pick<SettingsRow, "paymentOptionsJson">): Strip
           }
         : null,
     webhook_events_version: typeof o.webhook_events_version === "number" ? o.webhook_events_version : 1,
+    refund_account_id: typeof o.refund_account_id === "string" ? o.refund_account_id : null,
+    chargeback_account_id: typeof o.chargeback_account_id === "string" ? o.chargeback_account_id : null,
   };
 }
 

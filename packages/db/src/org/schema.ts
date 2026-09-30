@@ -341,6 +341,9 @@ export const providerCustomers = sqliteTable(
     provider: text("provider").notNull(),
     providerCustomerId: text("provider_customer_id").notNull(),
     createdAt: text("created_at").notNull().default(now),
+    /** Funds the provider holds for the customer that aren't applied to a payment (Stripe: bank transfers). */
+    cashBalance: integer("cash_balance"),
+    cashBalanceCheckedAt: text("cash_balance_checked_at"),
   },
   (t) => [primaryKey({ columns: [t.contactId, t.provider] })],
 );
@@ -387,6 +390,61 @@ export const providerPayments = sqliteTable(
   (t) => [
     uniqueIndex("provider_payments_uq").on(t.provider, t.providerPaymentId),
     index("provider_payments_invoice_idx").on(t.invoiceId),
+  ],
+);
+
+/**
+ * One row per money movement the provider makes against a recorded payment: a refund, or a dispute
+ * withdrawing or reinstating funds. The unique (provider, object) key is the idempotency guard, so
+ * the webhook, polling, and the backfill propose each entry at most once. A rejected entry keeps its
+ * row, so the movement isn't proposed again.
+ */
+export const providerAdjustments = sqliteTable(
+  "provider_adjustments",
+  {
+    provider: text("provider").notNull(),
+    /** Stripe: the refund ID, or the dispute's balance transaction ID. */
+    providerObjectId: text("provider_object_id").notNull(),
+    kind: text("kind", { enum: ["refund", "dispute_withdrawal", "dispute_reinstatement"] }).notNull(),
+    providerPaymentId: text("provider_payment_id").notNull(),
+    paymentId: text("payment_id")
+      .notNull()
+      .references(() => payments.id),
+    invoiceId: text("invoice_id"),
+    /** Positive cents: refunded, withdrawn, or reinstated. */
+    amount: integer("amount").notNull(),
+    /** The provider's dispute fee: positive when charged, negative when returned, else 0. */
+    fee: integer("fee").notNull().default(0),
+    entryId: text("entry_id"),
+    /** YYYY-MM-DD. */
+    occurredOn: text("occurred_on").notNull(),
+    createdAt: text("created_at").notNull().default(now),
+  },
+  (t) => [
+    uniqueIndex("provider_adjustments_uq").on(t.provider, t.providerObjectId),
+    index("provider_adjustments_payment_idx").on(t.provider, t.providerPaymentId),
+    index("provider_adjustments_invoice_idx").on(t.invoiceId),
+  ],
+);
+
+/** Payouts from the provider to the bank, suggested as matches for bank deposits on Categorize. */
+export const providerPayouts = sqliteTable(
+  "provider_payouts",
+  {
+    provider: text("provider").notNull(),
+    payoutId: text("payout_id").notNull(),
+    amount: integer("amount").notNull(),
+    /** YYYY-MM-DD. */
+    arrivalDate: text("arrival_date").notNull(),
+    status: text("status").notNull(),
+    /** Set when the owner accepts the suggestion: the deposit and its transfer entry. */
+    bankTxnId: text("bank_txn_id"),
+    entryId: text("entry_id"),
+    createdAt: text("created_at").notNull().default(now),
+  },
+  (t) => [
+    uniqueIndex("provider_payouts_uq").on(t.provider, t.payoutId),
+    index("provider_payouts_amount_idx").on(t.amount),
   ],
 );
 

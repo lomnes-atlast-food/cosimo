@@ -259,7 +259,11 @@ function TxnRow({
               </span>
             )}
             {t.status === "new" && !t.review_item_id && sugTransfer && (
-              <span>Suggested transfer: {sugTransfer.name}</span>
+              <span>
+                {sug?.source === "payout" && sug.payout_arrival_date
+                  ? `Stripe payout ${fmtDate(sug.payout_arrival_date)}: transfer from ${sugTransfer.name}`
+                  : `Suggested transfer: ${sugTransfer.name}`}
+              </span>
             )}
             {t.status === "matched" && <Badge tone="blue">Matched</Badge>}
             {t.status === "categorized" && <Badge tone="green">Categorized</Badge>}

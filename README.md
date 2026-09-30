@@ -153,8 +153,7 @@ See [docs/importing.md](docs/importing.md).
 
 Payroll, inventory, sales tax calculation, and multi-currency are out of scope for now. Bank feeds
 through Plaid need your own Plaid account, and Plaid's pricing applies; file import is free and
-works everywhere. Online invoice payments go through your own Stripe account; Stripe refunds,
-disputes, and payout matching aren't handled automatically yet.
+works everywhere. Online invoice payments go through your own Stripe account.
 
 ## Documentation
 

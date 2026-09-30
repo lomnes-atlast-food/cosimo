@@ -259,13 +259,16 @@ export interface BankTxnView {
 }
 
 export interface Suggestion {
-  source: "rule" | "history";
+  source: "rule" | "history" | "payout";
   account_id?: string | null;
   transfer_account_id?: string | null;
   contact_id?: string | null;
   memo?: string | null;
   rule_id?: string | null;
   rule_name?: string | null;
+  /** A payment provider's payout this deposit matches (`source: "payout"`); linked when accepted. */
+  payout_id?: string | null;
+  payout_arrival_date?: string | null;
 }
 
 export function bankTxnView(t: BankTxnRow, entryStatus: string | null = null): BankTxnView {
@@ -584,6 +587,8 @@ export async function transferTx(
     },
   );
   await linkResult(tx, counterpart ? [t.id, counterpart.id] : [t.id], r, { ruleId: opts.ruleId ?? null });
+  const sug = t.suggestionJson ? (JSON.parse(t.suggestionJson) as Suggestion) : null;
+  if (sug?.payout_id) await linkPayoutTx(tx, sug.payout_id, t, input.account_id, r.entry.id);
   return { ...r, counterpartId: counterpart?.id ?? null };
 }
 
@@ -743,6 +748,10 @@ export async function uncategorizeTx(
     .update(org.bankTransactions)
     .set({ status: "new", matchedEntryId: null, reviewItemId: null, ruleId: null })
     .where(inArray(org.bankTransactions.id, ids));
+  await tx
+    .update(org.providerPayouts)
+    .set({ bankTxnId: null, entryId: null })
+    .where(inArray(org.providerPayouts.bankTxnId, ids));
   await appendAudit(tx, orgId, a, {
     action: "bank_transaction.undo",
     targetType: "bank_transaction",
@@ -826,7 +835,7 @@ export async function applyRulesTx(tx: OrgTx, orgId: string, txnIds: string[]) {
       payee: t.payee,
     });
     if (!rule) {
-      const sug = await historySuggestion(tx, t);
+      const sug = (await payoutSuggestion(tx, t)) ?? (await historySuggestion(tx, t));
       if (sug) {
         await tx
           .update(org.bankTransactions)
@@ -896,6 +905,120 @@ export async function applyRulesTx(tx: OrgTx, orgId: string, txnIds: string[]) {
     else out.proposed++;
   }
   return out;
+}
+
+// ----------------------------------------------------------------------------- provider payouts
+
+/** A deposit shows up from a day before the payout's arrival date to three days after it. */
+const PAYOUT_EARLY_DAYS = 1;
+const PAYOUT_LATE_DAYS = 3;
+
+/** A payout already suggested for another transaction still to categorize. */
+const payoutSuggestedElsewhere = (txnId: string) =>
+  sql`exists (select 1 from bank_transactions b where b.status = 'new' and b.id <> ${txnId} and json_extract(b.suggestion_json, '$.payout_id') = ${org.providerPayouts.payoutId})`;
+
+function payoutSuggestionFor(p: typeof org.providerPayouts.$inferSelect, clearing: string): Suggestion {
+  return {
+    source: "payout",
+    transfer_account_id: clearing,
+    memo: `Stripe payout ${p.arrivalDate}`,
+    payout_id: p.payoutId,
+    payout_arrival_date: p.arrivalDate,
+  };
+}
+
+/**
+ * A deposit that matches a paid payout not yet linked to a bank transaction: same amount, arriving
+ * within the window. Suggests a transfer from the clearing account; nothing posts until accepted.
+ */
+export async function payoutSuggestion(tx: Reader, t: BankTxnRow): Promise<Suggestion | null> {
+  if (t.amount <= 0) return null;
+  const clearing = (await settingsRow(tx)).paymentClearingAccountId;
+  if (!clearing) return null;
+  const rows = await tx
+    .select()
+    .from(org.providerPayouts)
+    .where(
+      and(
+        eq(org.providerPayouts.amount, t.amount),
+        eq(org.providerPayouts.status, "paid"),
+        isNull(org.providerPayouts.bankTxnId),
+        gte(org.providerPayouts.arrivalDate, addDays(t.date, -PAYOUT_LATE_DAYS)),
+        lte(org.providerPayouts.arrivalDate, addDays(t.date, PAYOUT_EARLY_DAYS)),
+        sql`not ${payoutSuggestedElsewhere(t.id)}`,
+      ),
+    )
+    .all();
+  const dist = (d: string) => Math.abs(Date.parse(d) - Date.parse(t.date));
+  const best = rows.sort((x, y) => dist(x.arrivalDate) - dist(y.arrivalDate))[0];
+  return best ? payoutSuggestionFor(best, clearing) : null;
+}
+
+/**
+ * A payout that arrived after its deposit was imported: suggest it on the closest matching
+ * transaction still to categorize that no rule has claimed. Returns the transaction, or null.
+ */
+export async function suggestPayoutMatchesTx(tx: OrgTx, payoutId: string): Promise<string | null> {
+  const p = await tx
+    .select()
+    .from(org.providerPayouts)
+    .where(eq(org.providerPayouts.payoutId, payoutId))
+    .get();
+  const clearing = (await settingsRow(tx)).paymentClearingAccountId;
+  if (!p || !clearing || p.status !== "paid" || p.bankTxnId || p.amount <= 0) return null;
+  const already = await tx
+    .select({ id: org.bankTransactions.id })
+    .from(org.bankTransactions)
+    .where(
+      and(
+        eq(org.bankTransactions.status, "new"),
+        sql`json_extract(${org.bankTransactions.suggestionJson}, '$.payout_id') = ${p.payoutId}`,
+      ),
+    )
+    .get();
+  if (already) return already.id;
+  const rows = await tx
+    .select()
+    .from(org.bankTransactions)
+    .where(
+      and(
+        eq(org.bankTransactions.status, "new"),
+        eq(org.bankTransactions.amount, p.amount),
+        eq(org.bankTransactions.isPending, false),
+        isNull(org.bankTransactions.reviewItemId),
+        isNull(org.bankTransactions.matchedEntryId),
+        gte(org.bankTransactions.date, addDays(p.arrivalDate, -PAYOUT_EARLY_DAYS)),
+        lte(org.bankTransactions.date, addDays(p.arrivalDate, PAYOUT_LATE_DAYS)),
+        sql`(${org.bankTransactions.suggestionJson} is null or json_extract(${org.bankTransactions.suggestionJson}, '$.source') = 'history')`,
+      ),
+    )
+    .all();
+  const dist = (d: string) => Math.abs(Date.parse(d) - Date.parse(p.arrivalDate));
+  const best = rows.sort((x, y) => dist(x.date) - dist(y.date) || x.id.localeCompare(y.id))[0];
+  if (!best) return null;
+  await tx
+    .update(org.bankTransactions)
+    .set({ suggestionJson: JSON.stringify(payoutSuggestionFor(p, clearing)) })
+    .where(eq(org.bankTransactions.id, best.id));
+  return best.id;
+}
+
+/**
+ * The owner accepted a payout suggestion as a transfer: link the payout to the deposit and its
+ * entry, when the transfer came from the clearing account for the payout's amount.
+ */
+async function linkPayoutTx(tx: OrgTx, payoutId: string, t: BankTxnRow, accountId: string, entryId: string) {
+  if (accountId !== (await settingsRow(tx)).paymentClearingAccountId) return;
+  await tx
+    .update(org.providerPayouts)
+    .set({ bankTxnId: t.id, entryId })
+    .where(
+      and(
+        eq(org.providerPayouts.payoutId, payoutId),
+        eq(org.providerPayouts.amount, t.amount),
+        isNull(org.providerPayouts.bankTxnId),
+      ),
+    );
 }
 
 /** Auto-link newly imported transactions to transfer entries already recorded from the other side. */

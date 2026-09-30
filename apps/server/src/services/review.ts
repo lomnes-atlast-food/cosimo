@@ -274,6 +274,11 @@ const entryHandler: ReviewHandler = {
       .update(org.bankTransactions)
       .set({ status: "new", matchedEntryId: null, reviewItemId: null })
       .where(eq(org.bankTransactions.matchedEntryId, item.itemId));
+    // A rejected payout transfer leaves the payout to match again.
+    await tx
+      .update(org.providerPayouts)
+      .set({ bankTxnId: null, entryId: null })
+      .where(eq(org.providerPayouts.entryId, item.itemId));
     await finishReviewTx(tx, orgId, a, item, "rejected", note);
   },
 };

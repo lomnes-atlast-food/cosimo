@@ -152,6 +152,7 @@ export async function invoiceView(db: Reader, inv: InvoiceRow, link?: PayLinker)
     .all();
   const customer = await db.select().from(org.contacts).where(eq(org.contacts.id, inv.customerId)).get();
   const es = await entryStatus(db, inv.entryId);
+  const online = await onlineAdjustments(db, inv.id);
   return {
     id: inv.id,
     number: inv.number,
@@ -184,6 +185,7 @@ export async function invoiceView(db: Reader, inv: InvoiceRow, link?: PayLinker)
     pay_error: inv.payError,
     pay_error_at: inv.payErrorAt,
     manual_pay_url: inv.manualPayUrl,
+    ...online,
     lines: lines.map((l) => ({
       id: l.id,
       description: l.description,
@@ -195,6 +197,32 @@ export async function invoiceView(db: Reader, inv: InvoiceRow, link?: PayLinker)
   };
 }
 export type InvoiceView = Awaited<ReturnType<typeof invoiceView>>;
+
+/**
+ * Refunds and disputes of the invoice's online payments, by the state of their entries: posted
+ * amounts (disputes net of funds returned), whether one waits for review, and whether one was
+ * rejected (the owner books that one by hand).
+ */
+async function onlineAdjustments(db: Reader, invoiceId: string) {
+  const rows = await db
+    .select({
+      kind: org.providerAdjustments.kind,
+      amount: org.providerAdjustments.amount,
+      status: org.journalEntries.status,
+    })
+    .from(org.providerAdjustments)
+    .leftJoin(org.journalEntries, eq(org.journalEntries.id, org.providerAdjustments.entryId))
+    .where(eq(org.providerAdjustments.invoiceId, invoiceId))
+    .all();
+  const posted = rows.filter((r) => r.status === "posted");
+  const sum = (kind: string) => posted.filter((r) => r.kind === kind).reduce((a, r) => a + r.amount, 0);
+  return {
+    online_refunded: sum("refund"),
+    online_disputed: sum("dispute_withdrawal") - sum("dispute_reinstatement"),
+    refund_pending_review: rows.some((r) => r.status === "pending_review"),
+    refund_rejected: rows.some((r) => r.status === "rejected"),
+  };
+}
 
 export async function mustGetInvoice(db: Reader, id: string) {
   const i = await db.select().from(org.invoices).where(eq(org.invoices.id, id)).get();

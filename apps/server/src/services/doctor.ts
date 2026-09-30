@@ -15,7 +15,13 @@ import { type BackupBucket, type BucketObject, backupBucket } from "./backup.ts"
 import { verifyOrg } from "./chain.ts";
 import { settingsRow } from "./ledger.ts";
 import type { Mailer } from "./mailer.ts";
-import { lastPayError, paymentWebhookUrl, setupWarning, summarizeSetup } from "./online-payments.ts";
+import {
+  lastPayError,
+  paymentWebhookUrl,
+  setupWarning,
+  staleUnhandledEvents,
+  summarizeSetup,
+} from "./online-payments.ts";
 import { type StripeOptions, stripeOptions, stripeSecrets } from "./payment-providers/index.ts";
 import { stripeClient, WEBHOOK_EVENTS_VERSION } from "./payment-providers/stripe.ts";
 import { ProviderError, type SetupCheck } from "./payment-providers/types.ts";
@@ -338,6 +344,7 @@ async function serviceChecks(
     opts: StripeOptions;
     lastEvent: string | null;
     payError: Awaited<ReturnType<typeof lastPayError>>;
+    staleEvents: number;
   }[] = [];
   const payErrorSince = new Date(Date.now() - 30 * 86_400_000).toISOString();
   for (const o of await ctx.orgs.list()) {
@@ -359,6 +366,7 @@ async function serviceChecks(
         opts: stripeOptions(st),
         lastEvent: last?.at ?? null,
         payError: failed?.payErrorAt && failed.payErrorAt >= payErrorSince ? failed : null,
+        staleEvents: await staleUnhandledEvents(h.db),
       });
     } catch {
       // reported by the database checks
@@ -409,7 +417,11 @@ async function serviceChecks(
       !check?.missingEvents?.length
     )
       problems.push(
-        "The webhook endpoint Cosimo registered hasn't been updated with the newer events (charge.updated) yet; the payment check retries it, which needs Webhook Endpoints: Write.",
+        "The webhook endpoint Cosimo registered hasn't been updated with the newer events (charge.updated and the dispute events) yet; the payment check retries it, which needs Webhook Endpoints: Write.",
+      );
+    if (o.staleEvents)
+      problems.push(
+        `${o.staleEvents} refund, dispute, or payout event(s) arrived before Cosimo handled them and are too old to fetch from Stripe again; check the Stripe dashboard for refunds and disputes from then and book them by hand.`,
       );
     if (o.payError)
       problems.push(

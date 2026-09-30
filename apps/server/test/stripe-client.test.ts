@@ -71,8 +71,25 @@ describe("Stripe webhook signatures", () => {
       parseStripeEvent(JSON.stringify({ id: "e", type, data: { object: { id: "x" } } }));
     expect(ev("payment_intent.succeeded")).toMatchObject({ kind: "payment_intent", paymentIntentId: "x" });
     expect(ev("checkout.session.expired")).toMatchObject({ kind: "session" });
-    for (const t of ["charge.refunded", "charge.dispute.created", "payout.paid"])
-      expect(ev(t).kind).toBe("unhandled");
+    expect(ev("payout.paid")).toMatchObject({ kind: "payout", payoutId: "x" });
+    for (const t of [
+      "charge.dispute.created",
+      "charge.dispute.funds_withdrawn",
+      "charge.dispute.funds_reinstated",
+      "charge.dispute.closed",
+    ])
+      expect(ev(t)).toMatchObject({ kind: "dispute", disputeId: "x" });
+    // A refund names the charge; Cosimo needs its payment intent.
+    const refunded = (object: Record<string, unknown>) =>
+      parseStripeEvent(JSON.stringify({ id: "e", type: "charge.refunded", data: { object } }));
+    expect(refunded({ id: "ch_1", payment_intent: "pi_1" })).toMatchObject({
+      kind: "refund",
+      paymentIntentId: "pi_1",
+    });
+    expect(refunded({ id: "ch_1", payment_intent: { id: "pi_1" } })).toMatchObject({
+      paymentIntentId: "pi_1",
+    });
+    expect(refunded({ id: "ch_1", payment_intent: null }).kind).toBe("ignored");
     expect(ev("customer.created").kind).toBe("ignored");
   });
 
@@ -263,6 +280,9 @@ describe("HttpStripe requests", () => {
       const err = (status: number, code: string) =>
         new Response(JSON.stringify({ error: { message: `${code} on acct_1Example`, code } }), { status });
       if (init.method === "GET" && path === "/v1/events") return err(403, "more_permissions_required");
+      if (init.method === "GET" && path === "/v1/payouts") return err(403, "more_permissions_required");
+      // The cash balance probe reads a customer that doesn't exist: 404 means the key may read it.
+      if (path.endsWith("/cash_balance")) return err(404, "resource_missing");
       if (init.method === "POST" && path === "/v1/customers") return err(403, "more_permissions_required");
       if (init.method === "POST" && path === "/v1/checkout/sessions") return err(400, "parameter_unknown");
       if (init.method === "POST" && path === "/v1/webhook_endpoints") return err(500, "api_error");
@@ -295,6 +315,10 @@ describe("HttpStripe requests", () => {
     expect(byName["Checkout Sessions: Write"]).toMatchObject({ ok: true });
     expect(byName["Webhook Endpoints: Write"]).toMatchObject({ ok: null });
     expect(byName["Webhook Endpoints: Write"]!.detail).toStartWith("Couldn't check");
+    expect(byName["Refunds: Read"]).toMatchObject({ ok: true });
+    expect(byName["Disputes: Read"]).toMatchObject({ ok: true });
+    expect(byName["Payouts: Read"]).toMatchObject({ ok: false });
+    expect(byName["Cash balances: Read"]).toMatchObject({ ok: true });
     expect(r.methods.map((m) => [m.type, m.status])).toEqual([
       ["card", "active"],
       // Not reported by Stripe: unknown rather than a guess.
@@ -311,9 +335,94 @@ describe("HttpStripe requests", () => {
         ? new Response(JSON.stringify({ error: { message: "no" } }), { status: 403 })
         : new Response("{}")) as unknown as typeof fetch;
     const r2 = await new HttpStripe({ secretKey: KEY }, noAccount).checkSetup(["card"]);
+    // Without bank transfers there's no cash balance to read, so it isn't checked.
+    expect(r2.permissions.map((p) => p.name)).not.toContain("Cash balances: Read");
     expect(r2.methods[0]).toMatchObject({ type: "card", status: "unknown" });
     expect(r2.methods[0]!.detail).toContain("Account: Read");
     expect(r2.missingEvents).toBeNull();
+  });
+
+  test("reads refunds, dispute movements, payouts, and cash balances, following pages", async () => {
+    const calls: string[] = [];
+    const fetchImpl = (async (url: string) => {
+      const u = new URL(url);
+      calls.push(`${u.pathname}?${u.searchParams.toString()}`);
+      const json = (b: unknown) => new Response(JSON.stringify(b));
+      if (u.pathname === "/v1/refunds" && !u.searchParams.get("starting_after"))
+        return json({
+          has_more: true,
+          data: [
+            { id: "re_1", payment_intent: "pi_1", amount: 500, status: "succeeded", created: 1_773_100_800 },
+          ],
+        });
+      if (u.pathname === "/v1/refunds")
+        return json({
+          has_more: false,
+          data: [
+            {
+              id: "re_2",
+              payment_intent: { id: "pi_2" },
+              amount: 700,
+              status: "pending",
+              created: 1_773_100_800,
+            },
+          ],
+        });
+      if (u.pathname === "/v1/disputes/dp_1")
+        return json({
+          id: "dp_1",
+          payment_intent: "pi_1",
+          created: 1_773_100_800,
+          balance_transactions: [
+            { id: "txn_w", amount: -3_000, fee: 1_500, created: 1_773_100_800 },
+            { id: "txn_r", amount: 3_000, fee: -1_500, created: 1_778_371_200 },
+          ],
+        });
+      if (u.pathname === "/v1/payouts")
+        return json({
+          has_more: false,
+          data: [{ id: "po_1", amount: 4_852, arrival_date: 1_774_051_200, status: "paid" }],
+        });
+      if (u.pathname === "/v1/customers/cus_1/cash_balance")
+        return json({ object: "cash_balance", available: { usd: 12_500 }, customer: "cus_1" });
+      if (u.pathname === "/v1/customers/cus_2/cash_balance")
+        return json({ object: "cash_balance", available: null, customer: "cus_2" });
+      return json({});
+    }) as unknown as typeof fetch;
+    const stripe = new HttpStripe({ secretKey: KEY }, fetchImpl);
+    const since = new Date(1_773_000_000_000);
+    expect(await stripe.listRefunds({ since })).toEqual([
+      { id: "re_1", paymentIntentId: "pi_1", amount: 500, status: "succeeded", created: "2026-03-10" },
+      { id: "re_2", paymentIntentId: "pi_2", amount: 700, status: "pending", created: "2026-03-10" },
+    ]);
+    expect(calls[0]).toContain("created%5Bgte%5D=1773000000");
+    expect(calls[1]).toContain("starting_after=re_1");
+    expect(await stripe.getDispute("dp_1")).toEqual([
+      {
+        balanceTxnId: "txn_w",
+        disputeId: "dp_1",
+        paymentIntentId: "pi_1",
+        kind: "withdrawal",
+        amount: 3_000,
+        fee: 1_500,
+        created: "2026-03-10",
+      },
+      {
+        balanceTxnId: "txn_r",
+        disputeId: "dp_1",
+        paymentIntentId: "pi_1",
+        kind: "reinstatement",
+        amount: 3_000,
+        fee: -1_500,
+        created: "2026-05-10",
+      },
+    ]);
+    expect(await stripe.listPayouts({ since, status: "paid" })).toEqual([
+      { id: "po_1", amount: 4_852, arrivalDate: "2026-03-21", status: "paid" },
+    ]);
+    expect(calls.find((c) => c.startsWith("/v1/payouts"))).toContain("status=paid");
+    expect(await stripe.getCashBalance("cus_1", "USD")).toBe(12_500);
+    expect(await stripe.getCashBalance("cus_2", "USD")).toBe(0);
   });
 
   test("updates a webhook endpoint's events", async () => {

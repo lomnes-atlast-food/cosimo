@@ -563,6 +563,13 @@ function OnlinePayCard({
       unwrap(api.POST("/api/v1/orgs/{orgId}/invoices/{invoiceId}/rotate-pay-link", { params })),
     onSuccess: onChange,
   });
+  // Bank transfers Stripe couldn't apply to a payment (only for orgs that offer them).
+  const cash = useQuery({
+    queryKey: ["cash-balance", orgId, inv.id],
+    queryFn: () =>
+      unwrap(api.GET("/api/v1/orgs/{orgId}/invoices/{invoiceId}/online-pay/cash-balance", { params })),
+    enabled: canWrite && inv.status !== "draft",
+  });
   const copy = async () => {
     if (!inv.pay_url) return;
     await navigator.clipboard.writeText(inv.pay_url);
@@ -604,6 +611,33 @@ function OnlinePayCard({
                 ? "The balance due is under $0.50, Stripe's minimum for online payment, so the PDF and email leave out the pay link. Ask the customer to pay another way."
                 : "The pay link appears once the invoice is posted."}
           </p>
+        )}
+        {(inv.online_refunded > 0 || inv.online_disputed > 0) && (
+          <p className="text-zinc-600 dark:text-zinc-400">
+            {inv.online_refunded > 0 && `Refunded ${money(inv.online_refunded)} through Stripe. `}
+            {inv.online_disputed > 0 &&
+              `Stripe took back ${money(inv.online_disputed)} for a dispute (chargeback).`}
+          </p>
+        )}
+        {inv.refund_pending_review && (
+          <p className="text-zinc-600 dark:text-zinc-400">
+            A Stripe refund or dispute entry is waiting for review.{" "}
+            <Link to="/o/$orgId/accounting/review" params={{ orgId }} className="underline">
+              Open review queue
+            </Link>
+          </p>
+        )}
+        {inv.refund_rejected && (
+          <p className="text-amber-700 dark:text-amber-400">
+            A Stripe refund or dispute entry was rejected, and Cosimo won't propose it again. Book it by hand
+            if the money did move.
+          </p>
+        )}
+        {cash.data?.amount != null && cash.data.amount > 0 && (
+          <Alert kind="warn">
+            Stripe holds {money(cash.data.amount)} from this customer that isn't applied to a payment. Stripe
+            returns unapplied bank transfers after 75 days; resolve it in Stripe.
+          </Alert>
         )}
         {inv.pay_error && (
           <Alert kind="warn">

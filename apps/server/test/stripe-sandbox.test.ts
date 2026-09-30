@@ -3,11 +3,15 @@
  * (an sk_test_ or rk_test_ key) from the gitignored .env.local; CI runs only the mocked tests.
  * STRIPE_TEST_LIMITED_KEY, optional, is a restricted test key without Customers: Write, to confirm
  * how Stripe answers the setup check's write probes (#58).
+ *
+ * The refund, dispute, payout, and cash balance tests confirm the object shapes Cosimo relies on
+ * and can't check offline: a dispute's balance transactions (the sign of the amount and the fee)
+ * and the cash balance response.
  */
 import { describe, expect, test } from "bun:test";
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
-import { HttpStripe, WEBHOOK_EVENTS } from "../src/services/payment-providers/stripe.ts";
+import { formEncode, HttpStripe, WEBHOOK_EVENTS } from "../src/services/payment-providers/stripe.ts";
 
 // Bun does not read .env.local under `bun test`; load it here (values never override the shell).
 const envFile = join(import.meta.dir, "../../../.env.local");
@@ -97,5 +101,77 @@ describe.skipIf(!enabled)("Stripe test mode (live)", () => {
     } finally {
       await stripe.deleteWebhook(w.id);
     }
+  });
+
+  /** A request the provider interface doesn't make: creating test payments, refunds. */
+  async function raw(path: string, body: Record<string, unknown>) {
+    const res = await fetch(`https://api.stripe.com${path}`, {
+      method: "POST",
+      headers: {
+        authorization: `Bearer ${key}`,
+        "content-type": "application/x-www-form-urlencoded",
+        "stripe-version": "2024-06-20",
+      },
+      body: formEncode(body),
+    });
+    const data = (await res.json()) as Record<string, any>;
+    if (!res.ok) throw new Error(`Stripe ${res.status}: ${data.error?.message}`);
+    return data;
+  }
+  const pay = (paymentMethod: string, amount: number) =>
+    raw("/v1/payment_intents", {
+      amount,
+      currency: "usd",
+      payment_method: paymentMethod,
+      confirm: true,
+      automatic_payment_methods: { enabled: true, allow_redirects: "never" },
+    });
+
+  test("a partial refund is listed for its payment with its amount and status", async () => {
+    const pi = await pay("pm_card_visa", 1_000);
+    await raw("/v1/refunds", { payment_intent: pi.id, amount: 300 });
+    const refunds = await stripe.getRefundsForPayment(pi.id);
+    expect(refunds).toHaveLength(1);
+    expect(refunds[0]).toMatchObject({ paymentIntentId: pi.id, amount: 300, status: "succeeded" });
+    const recent = await stripe.listRefunds({ since: new Date(Date.now() - 3_600_000) });
+    expect(recent.some((r) => r.id === refunds[0]!.id)).toBe(true);
+  });
+
+  test("a disputed payment's balance transaction takes the amount (negative) and charges the fee (positive)", async () => {
+    // Stripe opens a dispute on this test card's charge right away.
+    const pi = await pay("pm_card_createDispute", 1_000);
+    let movements: Awaited<ReturnType<typeof stripe.listDisputes>> = [];
+    for (let i = 0; i < 20 && !movements.length; i++) {
+      await Bun.sleep(1_000);
+      movements = (await stripe.listDisputes({ since: new Date(Date.now() - 3_600_000) })).filter(
+        (m) => m.paymentIntentId === pi.id,
+      );
+    }
+    expect(movements).toHaveLength(1);
+    expect(movements[0]).toMatchObject({ kind: "withdrawal", amount: 1_000 });
+    expect(movements[0]!.fee).toBeGreaterThan(0);
+    expect(await stripe.getDispute(movements[0]!.disputeId)).toEqual(movements);
+  });
+
+  test("payouts list, and a customer's cash balance reads as zero cents", async () => {
+    const payouts = await stripe.listPayouts({
+      since: new Date(Date.now() - 30 * 86_400_000),
+      status: "paid",
+    });
+    for (const p of payouts)
+      expect(p).toMatchObject({ status: "paid", arrivalDate: expect.stringMatching(/^\d{4}-/) });
+    const customerId = await stripe.ensureCustomer({
+      id: `sandbox-cash-${Date.now()}`,
+      name: "Sandbox Cash Customer",
+      email: null,
+    });
+    expect(await stripe.getCashBalance(customerId, "USD")).toBe(0);
+  });
+
+  test("setup check: the key can read refunds, disputes, payouts, and cash balances", async () => {
+    const r = await stripe.checkSetup(["card", "customer_balance"]);
+    const byName = Object.fromEntries(r.permissions.map((p) => [p.name, p.ok]));
+    for (const name of ["Refunds: Read", "Disputes: Read", "Payouts: Read", "Cash balances: Read"])
+      expect({ name, ok: byName[name] }).toEqual({ name, ok: true });
   });
 });

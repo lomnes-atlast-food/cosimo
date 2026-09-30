@@ -158,6 +158,20 @@ export const InvoiceSchema = z
       ),
     pay_error_at: z.string().nullable(),
     manual_pay_url: z.string().nullable().describe("A payment page URL entered by hand (payment link mode)."),
+    online_refunded: Cents.describe(
+      "Refunded through Stripe, from posted refund entries. The invoice stays paid; the refund reduces revenue.",
+    ),
+    online_disputed: Cents.describe(
+      "Taken back by Stripe for disputes (chargebacks), less funds returned, from posted dispute entries.",
+    ),
+    refund_pending_review: z
+      .boolean()
+      .describe("A Stripe refund or dispute entry for this invoice is waiting in the review queue."),
+    refund_rejected: z
+      .boolean()
+      .describe(
+        "A Stripe refund or dispute entry was rejected; Cosimo won't propose it again, so book it by hand.",
+      ),
     lines: z.array(
       z.object({
         id: z.string(),
