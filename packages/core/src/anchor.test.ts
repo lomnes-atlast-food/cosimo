@@ -218,3 +218,13 @@ describe("RFC 3161", () => {
     expect(() => tsaVerify(refused, ANCHOR_DIGEST)).toThrow(/refused \(status 2: bad\)/);
   });
 });
+
+describe("parsePemCertificates", () => {
+  test("splits a bundle and stays linear on repeated BEGIN lines", () => {
+    expect(parsePemCertificates(`${FREETSA_ROOT_PEM}\n${FREETSA_ROOT_PEM}`)).toHaveLength(2);
+    expect(parsePemCertificates(`junk\n-----BEGIN CERTIFICATE-----\n${FREETSA_ROOT_PEM}`)).toHaveLength(1);
+    const start = performance.now();
+    expect(parsePemCertificates("-----BEGIN CERTIFICATE-----".repeat(100_000))).toHaveLength(0);
+    expect(performance.now() - start).toBeLessThan(1000);
+  });
+});
