@@ -3,6 +3,8 @@
  * daily job, with catch-up, review rules, lock dates, the email outbox, and proposals.
  */
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
+import { org as dbOrg } from "@cosimo/db";
+import { eq } from "drizzle-orm";
 import { runRecurringTemplates } from "../src/jobs/document-jobs.ts";
 import type { Mailer, SentMail } from "../src/services/mailer.ts";
 import {
@@ -389,5 +391,62 @@ describe(`recurring templates (${DB_MODE})`, () => {
     const d = await detail(o, t.id);
     expect(d.runs.length).toBe(4);
     expect(new Set(d.runs.map((r: any) => r.doc_id)).size).toBe(4);
+  });
+
+  test("invoice terms and due days must agree; due days alone derive the terms", async () => {
+    const o = await freshOrg("Terms Co");
+    const withBody = (template: Record<string, unknown>) => {
+      const t = invoiceTemplate(o, 10_000, { run_mode: "draft" });
+      return { ...t, template: { ...t.template, ...template } };
+    };
+    const post = (template: Record<string, unknown>) =>
+      owner.json("POST", `${o.base}/recurring-templates`, withBody(template));
+    const clash = await post({ terms: "Net 30", due_days: 10 });
+    expect(clash.status).toBe(422);
+    expect(clash.body.error.code).toBe("terms_conflict");
+    expect((await post({ terms: "Due end of month", due_days: 10 })).body.error.code).toBe("terms_conflict");
+    expect((await post({ terms: "On due date" })).body.error.code).toBe("due_date_required");
+    expect((await post({ terms: "Net 15", due_days: 15 })).status).toBe(201);
+    expect((await post({ terms: "On due date", due_days: 12 })).status).toBe(201);
+    expect((await post({ terms: "2/10 Net 30", due_days: 30 })).status).toBe(201);
+
+    const o2 = await freshOrg("Due Days Co");
+    const t = await create(o2, {
+      ...invoiceTemplate(o2, 10_000, { run_mode: "draft" }),
+      schedule: { unit: "month", interval: 1, start_date: "2026-05-01", max_occurrences: 1 },
+      template: { lines: invoiceTemplate(o2, 10_000).template.lines, due_days: 5 },
+    });
+    await runRecurringTemplates(env.ctx, o2.id, "2026-05-01");
+    const d = await detail(o2, t.id);
+    const inv = (await owner.json("GET", `${o2.base}/invoices/${d.runs[0].doc_id}`)).body;
+    expect(inv).toMatchObject({ terms: "On due date", due_date: "2026-05-06" });
+  });
+
+  test("a template saved before terms were checked still runs; its due days win", async () => {
+    const o = await freshOrg("Legacy Terms Co");
+    const t = await create(o, {
+      ...invoiceTemplate(o, 10_000, { run_mode: "draft" }),
+      schedule: { unit: "month", interval: 1, start_date: "2026-05-01", max_occurrences: 1 },
+      template: { lines: invoiceTemplate(o, 10_000).template.lines, due_days: 10 },
+    });
+    // Write the disagreeing terms straight to the row, as an older version could have saved them.
+    const h = await env.ctx.orgs.open(o.id);
+    if (!h) throw new Error("no org");
+    const row = await h.db
+      .select({ json: dbOrg.recurringTemplates.templateJson })
+      .from(dbOrg.recurringTemplates)
+      .where(eq(dbOrg.recurringTemplates.id, t.id))
+      .get();
+    const body = { ...JSON.parse(row!.json), terms: "Net 30" };
+    await h.write((tx) =>
+      tx
+        .update(dbOrg.recurringTemplates)
+        .set({ templateJson: JSON.stringify(body) })
+        .where(eq(dbOrg.recurringTemplates.id, t.id)),
+    );
+    await runRecurringTemplates(env.ctx, o.id, "2026-05-01");
+    const d = await detail(o, t.id);
+    const inv = (await owner.json("GET", `${o.base}/invoices/${d.runs[0].doc_id}`)).body;
+    expect(inv).toMatchObject({ terms: "Net 10", due_date: "2026-05-11" });
   });
 });

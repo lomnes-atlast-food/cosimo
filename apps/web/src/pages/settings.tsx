@@ -4,6 +4,7 @@ import { type ReactNode, useEffect, useState } from "react";
 import { ApiError, api, rawFetch, unwrap } from "../api/client";
 import type { components } from "../api/schema";
 import { AccountSelect } from "../components/AccountSelect";
+import { TermsSelect } from "../components/TermsSelect";
 import {
   Alert,
   Badge,
@@ -267,10 +268,11 @@ function General() {
             </Field>
             <Field label="Default terms">
               {(id) => (
-                <Input
+                <TermsSelect
                   id={id}
                   value={s.default_terms}
-                  onChange={(e) => set({ default_terms: e.target.value })}
+                  onChange={(v) => set({ default_terms: v })}
+                  allowOnDueDate={false}
                 />
               )}
             </Field>

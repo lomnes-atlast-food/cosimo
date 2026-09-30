@@ -2,6 +2,7 @@ import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { useState } from "react";
 import { api, unwrap } from "../api/client";
 import { AccountSelect } from "../components/AccountSelect";
+import { TermsSelect } from "../components/TermsSelect";
 import {
   Badge,
   Button,
@@ -124,6 +125,7 @@ export function ContactForm({
     tax_id_last4: contact?.tax_id_last4 ?? "",
     is_1099_vendor: contact?.is_1099_vendor ?? false,
     default_account_id: contact?.default_account_id ?? "",
+    default_terms: contact?.default_terms ?? "",
     notes: contact?.notes ?? "",
   });
   const set = (p: Partial<typeof f>) => setF({ ...f, ...p });
@@ -136,6 +138,7 @@ export function ContactForm({
     tax_id_last4: f.tax_id_last4 || null,
     is_1099_vendor: f.is_1099_vendor,
     default_account_id: f.default_account_id || null,
+    default_terms: f.kind === "vendor" ? null : f.default_terms || null,
     notes: f.notes || null,
   };
   const save = useMutation({
@@ -284,6 +287,23 @@ export function ContactForm({
             />
           )}
         </Field>
+        {f.kind !== "vendor" && (
+          <Field
+            label="Default invoice terms"
+            hint="Used for new invoices to this customer."
+            className="sm:col-span-2"
+          >
+            {(id) => (
+              <TermsSelect
+                id={id}
+                value={f.default_terms}
+                onChange={(v) => set({ default_terms: v })}
+                emptyLabel="Org default"
+                allowOnDueDate={false}
+              />
+            )}
+          </Field>
+        )}
         <Field label="Notes" className="sm:col-span-2">
           {(id) => (
             <Textarea id={id} rows={2} value={f.notes} onChange={(e) => set({ notes: e.target.value })} />

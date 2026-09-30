@@ -61,7 +61,7 @@ Propose (each takes a `rationale`, which you see in Review):
 | `categorize_transaction` | Posts the categorization entry |
 | `create_rule` | Activates the rule |
 | `create_manual_entry` | Posts the entry |
-| `create_invoice_draft` | Finalizes the invoice (you still decide when to send it) |
+| `create_invoice_draft` | Finalizes the invoice (you still decide when to send it). Takes optional `terms` and `due_date`: leave both out for the customer's, then the org's, default terms; a due date alone derives the terms; terms that disagree with the due date are rejected |
 | `create_bill_draft` | Posts the bill to Accounts Payable |
 | `propose_reversal` | Posts a reversal of a posted entry |
 | `propose_replacement` | Reverses a posted entry and posts the corrected one, together (one review item) |

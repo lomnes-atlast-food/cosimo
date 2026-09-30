@@ -1,10 +1,12 @@
+import { dueFromRule, isIsoDate, parseTerms, termsAgree, termsFromDates } from "@cosimo/shared";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link, useNavigate, useParams, useRouterState } from "@tanstack/react-router";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { api, download, unwrap } from "../api/client";
 import { AccountSelect } from "../components/AccountSelect";
 import { RecurringList } from "../components/recurring";
 import { SearchSelect } from "../components/SearchSelect";
+import { TermsSelect } from "../components/TermsSelect";
 import {
   Alert,
   Amount,
@@ -388,8 +390,35 @@ function InvoiceEditor({ invoice, onDone }: { invoice: Invoice | null; onDone: (
   const [customer, setCustomer] = useState(invoice?.customer_id ?? "");
   const [number, setNumber] = useState(invoice?.number ?? "");
   const [issue, setIssue] = useState(invoice?.issue_date ?? todayIso());
-  const [terms, setTerms] = useState(invoice?.terms ?? "");
+  // A draft saved before terms were checked may disagree with its due date; the due date wins.
+  const [terms, setTerms] = useState(() =>
+    invoice && !termsAgree(invoice.issue_date, invoice.terms, invoice.due_date)
+      ? termsFromDates(invoice.issue_date, invoice.due_date)
+      : (invoice?.terms ?? ""),
+  );
   const [due, setDue] = useState(invoice?.due_date ?? "");
+  // Terms and due date move together: a rule (Net 30) sets the due date; a hand-set due date
+  // picks the matching preset or "On due date". These are handlers, not effects, so they can't loop.
+  const seeded = useRef(Boolean(invoice));
+  const touched = useRef(Boolean(invoice));
+  const withRule = (t: string, issueDate: string) => {
+    const rule = parseTerms(t);
+    if (rule && rule !== "on_due_date" && isIsoDate(issueDate)) setDue(dueFromRule(issueDate, rule));
+  };
+  const changeTerms = (t: string) => {
+    touched.current = true;
+    setTerms(t);
+    withRule(t, issue);
+  };
+  const changeIssue = (d: string) => {
+    setIssue(d);
+    withRule(terms, d);
+  };
+  const changeDue = (d: string) => {
+    touched.current = true;
+    setDue(d);
+    if (isIsoDate(d) && isIsoDate(issue)) setTerms(termsFromDates(issue, d));
+  };
   const [memo, setMemo] = useState(invoice?.memo ?? "");
   const [onlinePay, setOnlinePay] = useState<boolean | null>(invoice?.online_payment_enabled ?? null);
   const [manualUrl, setManualUrl] = useState(invoice?.manual_pay_url ?? "");
@@ -403,9 +432,27 @@ function InvoiceEditor({ invoice, onDone }: { invoice: Invoice | null; onDone: (
       account_id: l.account_id,
     })) ?? [blankLine()],
   );
+  // A new invoice starts with the org's default terms, once, when they arrive.
   useEffect(() => {
-    if (!invoice && org.data && !terms) setTerms(org.data.settings.default_terms);
-  }, [org.data, invoice, terms]);
+    if (seeded.current || !org.data) return;
+    seeded.current = true;
+    if (touched.current) return;
+    const t = org.data.settings.default_terms;
+    setTerms(t);
+    withRule(t, issue);
+  });
+  const changeCustomer = (id: string) => {
+    setCustomer(id);
+    if (invoice || touched.current) return;
+    // Until terms are picked by hand, a customer's own default terms win over the org's.
+    const t = contacts.data?.find((c) => c.id === id)?.default_terms || org.data?.settings.default_terms;
+    if (t) {
+      setTerms(t);
+      withRule(t, issue);
+    }
+  };
+  const dueError =
+    isIsoDate(issue) && isIsoDate(due) && due < issue ? "The due date is before the invoice date." : null;
   const accounts = useAccounts(orgId);
   const cust = contacts.data?.find((c) => c.id === customer);
   const defaultIncome =
@@ -457,21 +504,17 @@ function InvoiceEditor({ invoice, onDone }: { invoice: Invoice | null; onDone: (
     >
       <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
         <Field label="Customer" className="sm:col-span-2">
-          {() => <ContactPicker kind="customer" value={customer} onChange={setCustomer} />}
+          {() => <ContactPicker kind="customer" value={customer} onChange={changeCustomer} />}
         </Field>
         <Field label="Invoice number" hint={invoice ? undefined : "Leave empty for the next number."}>
           {(id) => <Input id={id} value={number} onChange={(e) => setNumber(e.target.value)} />}
         </Field>
         <Field label="Date">
-          {(id) => <Input id={id} type="date" value={issue} onChange={(e) => setIssue(e.target.value)} />}
+          {(id) => <Input id={id} type="date" value={issue} onChange={(e) => changeIssue(e.target.value)} />}
         </Field>
-        <Field label="Terms">
-          {(id) => (
-            <Input id={id} value={terms} onChange={(e) => setTerms(e.target.value)} placeholder="Net 30" />
-          )}
-        </Field>
-        <Field label="Due date" hint="Empty: from the terms.">
-          {(id) => <Input id={id} type="date" value={due} onChange={(e) => setDue(e.target.value)} />}
+        <Field label="Terms">{(id) => <TermsSelect id={id} value={terms} onChange={changeTerms} />}</Field>
+        <Field label="Due date" error={dueError}>
+          {(id) => <Input id={id} type="date" value={due} onChange={(e) => changeDue(e.target.value)} />}
         </Field>
       </div>
       <LinesEditor
@@ -509,7 +552,7 @@ function InvoiceEditor({ invoice, onDone }: { invoice: Invoice | null; onDone: (
       )}
       {invalid && <Alert kind="error">Check the quantities and rates.</Alert>}
       <ErrorText error={save.error} />
-      <Button type="submit" loading={save.isPending} disabled={!customer || invalid}>
+      <Button type="submit" loading={save.isPending} disabled={!customer || invalid || dueError !== null}>
         Save draft
       </Button>
     </form>

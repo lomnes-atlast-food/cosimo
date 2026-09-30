@@ -81,6 +81,7 @@ const ContactSchema = z
     tax_id_last4: z.string().nullable(),
     is_1099_vendor: z.boolean(),
     default_account_id: z.string().nullable(),
+    default_terms: z.string().nullable(),
     notes: z.string().nullable(),
     created_at: z.string(),
     archived_at: z.string().nullable(),
@@ -95,6 +96,7 @@ const ContactInput = z.object({
   tax_id_last4: z.string().max(4).nullable().optional(),
   is_1099_vendor: z.boolean().optional(),
   default_account_id: Id.nullable().optional(),
+  default_terms: z.string().max(100).nullable().optional(),
   notes: z.string().max(5000).nullable().optional(),
 });
 

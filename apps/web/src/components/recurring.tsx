@@ -12,7 +12,7 @@ import {
   type Schedule,
   upcoming,
 } from "@cosimo/core";
-import { addMonths } from "@cosimo/shared";
+import { addMonths, parseTerms } from "@cosimo/shared";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link, useNavigate, useParams, useSearch } from "@tanstack/react-router";
 import { useEffect, useState } from "react";
@@ -29,6 +29,7 @@ import {
   toDraftLines,
 } from "../pages/entries";
 import { blankLine, ContactPicker, type EditLine, LinesEditor, lineCents } from "../pages/invoices";
+import { TermsSelect } from "./TermsSelect";
 import {
   Alert,
   Amount,
@@ -862,6 +863,17 @@ export function RecurringForm({ kind }: { kind: RecurringKind }) {
         })()
       : docLines.some((l) => lineCents(l, kind === "invoice") === null);
 
+  // A terms rule fixes the due days (Net 15 is 15; end of month has none); only "On due date" and
+  // custom terms leave them to the user.
+  const termsRule = kind === "invoice" ? parseTerms(terms) : null;
+  const derivedDays =
+    termsRule && termsRule !== "on_due_date"
+      ? termsRule.kind === "days"
+        ? String(termsRule.days)
+        : ""
+      : null;
+  const effectiveDueDays = derivedDays ?? dueDays;
+
   const buildBody = () => {
     const commonSchedule = {
       unit: schedule.unit,
@@ -881,7 +893,7 @@ export function RecurringForm({ kind }: { kind: RecurringKind }) {
         template: {
           memo: memo || null,
           terms: terms || null,
-          due_days: dueDays ? Number(dueDays) : null,
+          due_days: effectiveDueDays ? Number(effectiveDueDays) : null,
           lines: docLines
             .filter((l) => l.description || l.price)
             .map((l) => ({
@@ -1038,12 +1050,7 @@ export function RecurringForm({ kind }: { kind: RecurringKind }) {
               {kind === "invoice" && (
                 <Field label="Terms">
                   {(id) => (
-                    <Input
-                      id={id}
-                      value={terms}
-                      onChange={(e) => setTerms(e.target.value)}
-                      placeholder="Net 30"
-                    />
+                    <TermsSelect id={id} value={terms} onChange={setTerms} emptyLabel="Default terms" />
                   )}
                 </Field>
               )}
@@ -1054,13 +1061,24 @@ export function RecurringForm({ kind }: { kind: RecurringKind }) {
                   )}
                 </Field>
               )}
-              <Field label="Due days" hint="Days after the issue date.">
+              <Field
+                label="Due days"
+                hint={
+                  derivedDays !== null
+                    ? "Set by the terms."
+                    : kind === "invoice" && termsRule === "on_due_date"
+                      ? "Required: days after the issue date."
+                      : "Days after the issue date."
+                }
+              >
                 {(id) => (
                   <Input
                     id={id}
                     type="number"
                     min={0}
-                    value={dueDays}
+                    value={effectiveDueDays}
+                    disabled={derivedDays !== null}
+                    required={kind === "invoice" && termsRule === "on_due_date"}
                     onChange={(e) => setDueDays(e.target.value)}
                   />
                 )}

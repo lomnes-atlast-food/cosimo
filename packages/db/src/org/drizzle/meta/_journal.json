@@ -57,6 +57,13 @@
       "when": 1790734873058,
       "tag": "0007_bank_sync_status",
       "breakpoints": true
+    },
+    {
+      "idx": 8,
+      "version": "6",
+      "when": 1790740124752,
+      "tag": "0008_contact_default_terms",
+      "breakpoints": true
     }
   ]
 }

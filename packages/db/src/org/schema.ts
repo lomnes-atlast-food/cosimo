@@ -165,6 +165,7 @@ export const contacts = sqliteTable(
     taxIdLast4: text("tax_id_last4"),
     is1099Vendor: integer("is_1099_vendor", { mode: "boolean" }).notNull().default(false),
     defaultAccountId: text("default_account_id"),
+    defaultTerms: text("default_terms"),
     notes: text("notes"),
     createdAt: text("created_at").notNull().default(now),
     archivedAt: text("archived_at"),

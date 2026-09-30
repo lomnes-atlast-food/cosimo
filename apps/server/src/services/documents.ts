@@ -6,7 +6,15 @@
  * post/reject hooks at the bottom of this file.
  */
 import { newId, type OrgDb, type OrgTx, org } from "@cosimo/db";
-import { addDays, today } from "@cosimo/shared";
+import {
+  addDays,
+  dueFromRule,
+  parseTerms,
+  type TermRule,
+  termsAgree,
+  termsFromDates,
+  today,
+} from "@cosimo/shared";
 import { and, asc, desc, eq, gte, inArray, isNull, lte, type SQL, sql } from "drizzle-orm";
 import { conflict, forbidden, notFound, unprocessable } from "../http/errors.ts";
 import type { ActorInfo } from "./actor.ts";
@@ -42,12 +50,47 @@ export function lineAmount(quantityMilli: number, unitPrice: number): number {
   return sign * Math.floor((Math.abs(p) + 500) / 1000);
 }
 
-/** Due date from terms like "Net 30", "Due on receipt"; falls back to 30 days. */
-export function dueFromTerms(issue: string, terms: string | null | undefined): string {
-  const t = (terms ?? "").trim().toLowerCase();
-  if (/receipt|immediate/.test(t)) return issue;
-  const m = /net\s*(\d{1,3})/.exec(t);
-  return addDays(issue, m ? Number(m[1]) : 30);
+/**
+ * Settles an invoice's terms and due date so they agree (the due date is authoritative, the terms
+ * describe it). Both given: they must agree, else 422 `terms_conflict`. Due date only: the terms are
+ * derived from it. Terms only: a rule computes the due date; "On due date" needs one, and custom
+ * text falls back to 30 days. Neither: `fallback` terms (customer default, then org default).
+ */
+export function resolveTerms(o: {
+  issue: string;
+  terms?: string | null;
+  due?: string | null;
+  fallback: string;
+}): { terms: string; due: string } {
+  const { issue } = o;
+  const given = o.terms?.trim() || null;
+  let terms: string;
+  let due: string;
+  if (o.due) {
+    due = o.due;
+    if (given) {
+      terms = given;
+      if (!termsAgree(issue, terms, due)) {
+        const rule = parseTerms(terms) as TermRule;
+        throw unprocessable(
+          `${terms} puts the due date on ${dueFromRule(issue, rule)}, but the due date given is ${due}. Change one, or leave terms out and Cosimo sets them from the due date.`,
+          "terms_conflict",
+        );
+      }
+    } else terms = termsFromDates(issue, due);
+  } else {
+    terms = given ?? o.fallback;
+    let rule = parseTerms(terms);
+    if (rule === "on_due_date") {
+      if (given) throw unprocessable('"On due date" needs a due date.', "due_date_required");
+      terms = "Net 30"; // an "On due date" default can't supply a date
+      rule = parseTerms(terms);
+    }
+    due = addDays(issue, 30);
+    if (rule && rule !== "on_due_date") due = dueFromRule(issue, rule);
+  }
+  if (due < issue) throw unprocessable("The due date can't be before the invoice date.", "invalid_due_date");
+  return { terms, due };
 }
 
 function canReverseDocuments(a: ActorInfo) {
@@ -342,13 +385,18 @@ export async function createInvoiceTx(
     .get();
   if (clash) throw conflict(`Invoice number ${number} is already used.`, "duplicate_number");
   const id = newId();
-  const terms = input.terms ?? s.defaultTerms;
+  const { terms, due } = resolveTerms({
+    issue: input.issue_date,
+    terms: input.terms,
+    due: input.due_date,
+    fallback: customer.defaultTerms || s.defaultTerms,
+  });
   await tx.insert(org.invoices).values({
     id,
     number,
     customerId: customer.id,
     issueDate: input.issue_date,
-    dueDate: input.due_date ?? dueFromTerms(input.issue_date, terms),
+    dueDate: due,
     status: "draft",
     currency: s.baseCurrency,
     memo: input.memo ?? null,
@@ -408,13 +456,28 @@ export async function updateInvoiceTx(
     if (clash) throw conflict(`Invoice number ${input.number} is already used.`, "duplicate_number");
     patch.number = input.number.trim();
   }
+  const issue = input.issue_date ?? before.issueDate;
   if (input.issue_date) patch.issueDate = input.issue_date;
-  if (input.terms !== undefined) patch.terms = input.terms;
-  if (input.due_date !== undefined)
-    patch.dueDate =
-      input.due_date ?? dueFromTerms(input.issue_date ?? before.issueDate, input.terms ?? before.terms);
-  else if (input.terms !== undefined || input.issue_date)
-    patch.dueDate = dueFromTerms(input.issue_date ?? before.issueDate, input.terms ?? before.terms);
+  const givenTerms = input.terms?.trim() || null;
+  if (input.due_date) {
+    // A due date is authoritative: terms in the same patch must agree, otherwise they're derived.
+    const r = resolveTerms({ issue, terms: givenTerms, due: input.due_date, fallback: "Net 30" });
+    patch.terms = r.terms;
+    patch.dueDate = r.due;
+  } else {
+    const terms = givenTerms ?? before.terms;
+    const rule = parseTerms(terms);
+    const changed = input.due_date === null || givenTerms !== null || input.issue_date !== undefined;
+    if (givenTerms) patch.terms = givenTerms;
+    if (rule && rule !== "on_due_date" && changed) {
+      patch.dueDate = dueFromRule(issue, rule);
+    } else if (input.due_date === null && !rule) {
+      patch.dueDate = resolveTerms({ issue, terms, fallback: "Net 30" }).due;
+    }
+    const due = patch.dueDate ?? before.dueDate;
+    if (due < issue)
+      throw unprocessable("The due date can't be before the invoice date.", "invalid_due_date");
+  }
   if (input.memo !== undefined) patch.memo = input.memo;
   if (input.online_pay_enabled !== undefined) patch.onlinePayEnabled = input.online_pay_enabled;
   if (input.manual_pay_url !== undefined) patch.manualPayUrl = input.manual_pay_url;

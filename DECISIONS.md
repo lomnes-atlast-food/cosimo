@@ -386,3 +386,23 @@ Choices made during the build. SPEC.md is the source of truth for requirements; 
   isn't proposed again. Payouts are suggest-only on Categorize (a transfer from Stripe Clearing),
   because the owner already books payouts that way and a wrong automatic match would be worse than
   one click.
+- **Invoice terms describe the due date; conflicts are rejected** (#66): the due date is
+  authoritative (it drives aging, overdue status, and reminders) and the terms only describe it, as in
+  QuickBooks, Xero, and Zoho. A preset ("Net 30", "Due end of month") is a rule that computes the due
+  date; a due date given without terms derives the terms (the matching preset, else "On due date");
+  "On due date" needs a due date; a due date can't precede the issue date. Terms and a due date that
+  disagree are **rejected (422 `terms_conflict`), not warned about**, because an MCP agent can't
+  delete drafts or reject proposals, so a bad invoice would sit in the queue for a person to clean
+  up. Discount terms such as "2/10 Net 30" follow their net days. Other custom text ("Pay when paid")
+  is kept and never conflict-checked; without a due date it falls back to 30 days, as before. A
+  customer's `default_terms` come before the org default, which applies only when neither terms nor
+  a due date is given. Recurring templates get the same check on terms and `due_days` when saved; a
+  run doesn't re-check, so a template saved before this still runs, and its due days win over
+  disagreeing terms. The web form likewise re-derives the terms of an older draft that disagrees with
+  its due date, so saving it isn't blocked. Discount accounting is out of scope.
+  The shared rules live in `packages/shared/src/terms.ts`.
+- **Every MCP amount is labeled integer cents** (#67): zod's `.describe()` replaces a schema's
+  description, so `cents(extra)` builds the label into each amount field. Each tool declares
+  `money: boolean` (required, so a new tool can't skip it) and `tool()` appends one standard sentence
+  to the description when it's true; the server instructions say it too, and a `tools/list` test
+  checks both.

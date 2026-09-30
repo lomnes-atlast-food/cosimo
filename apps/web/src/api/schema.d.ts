@@ -10308,6 +10308,7 @@ export interface paths {
                         is_1099_vendor?: boolean;
                         /** @example 01J9Z3K5Q7W8X9Y0A1B2C3D4E5 */
                         default_account_id?: string | null;
+                        default_terms?: string | null;
                         notes?: string | null;
                     };
                 };
@@ -10521,6 +10522,7 @@ export interface paths {
                         is_1099_vendor?: boolean;
                         /** @example 01J9Z3K5Q7W8X9Y0A1B2C3D4E5 */
                         default_account_id?: string | null;
+                        default_terms?: string | null;
                         notes?: string | null;
                         archived?: boolean;
                     };
@@ -20017,6 +20019,7 @@ export interface components {
             tax_id_last4: string | null;
             is_1099_vendor: boolean;
             default_account_id: string | null;
+            default_terms: string | null;
             notes: string | null;
             created_at: string;
             archived_at: string | null;

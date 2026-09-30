@@ -52,5 +52,10 @@ export const orgMigrations: Migration[] = [
     "tag": "0007_bank_sync_status",
     "hash": "ccaac95536ce3dde1e176396754969b01745b211c7253a3d5eb985b7e64f07ae",
     "sql": "-- Bank feed sync status (#57): when the last sync attempt finished, its counts, and Plaid's error\n-- message; and a flag for new accounts Plaid reported at an existing login (#12).\n\nALTER TABLE `bank_connections` ADD `error_message` text;--> statement-breakpoint\nALTER TABLE `bank_connections` ADD `last_sync_attempt_at` text;--> statement-breakpoint\nALTER TABLE `bank_connections` ADD `last_sync_added` integer;--> statement-breakpoint\nALTER TABLE `bank_connections` ADD `last_sync_modified` integer;--> statement-breakpoint\nALTER TABLE `bank_connections` ADD `last_sync_removed` integer;--> statement-breakpoint\nALTER TABLE `bank_connections` ADD `new_accounts_available` integer DEFAULT false NOT NULL;"
+  },
+  {
+    "tag": "0008_contact_default_terms",
+    "hash": "74906f42fb540d1e1225af7c9427ba73d5e6688cab110f2d53ac4c97ac0e57a9",
+    "sql": "-- Per-customer default invoice terms (#66): used for new invoices before the org default.\n\nALTER TABLE `contacts` ADD `default_terms` text;\n"
   }
 ];

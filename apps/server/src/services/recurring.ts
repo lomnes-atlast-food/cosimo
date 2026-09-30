@@ -25,7 +25,7 @@ import {
   upcoming,
 } from "@cosimo/core";
 import { newId, type OrgDb, type OrgTx, org } from "@cosimo/db";
-import { addDays, isIsoDate, today } from "@cosimo/shared";
+import { addDays, isIsoDate, parseTerms, termsAgree, today } from "@cosimo/shared";
 import { and, asc, count, eq, inArray, like, lte, type SQL } from "drizzle-orm";
 import type { AppContext } from "../context.ts";
 import { ApiError, conflict, forbidden, fromDbError, notFound, unprocessable } from "../http/errors.ts";
@@ -367,12 +367,26 @@ function normalizeBody(kind: TemplateKind, b: TemplateBody): TemplateBody {
   };
 }
 
+/** An invoice template's terms and due days must agree, the way an invoice's terms and due date do. */
+function checkInvoiceTerms(b: TemplateBody) {
+  const rule = parseTerms(b.terms);
+  if (rule === "on_due_date") {
+    if (b.due_days == null) throw unprocessable('"On due date" needs the due days.', "due_date_required");
+  } else if (rule && b.due_days != null) {
+    if (rule.kind === "eom" || rule.days !== b.due_days)
+      throw unprocessable(
+        `${b.terms} doesn't match ${b.due_days} due days. Change one, or leave the due days out and Cosimo sets them from the terms.`,
+        "terms_conflict",
+      );
+  }
+}
+
 /**
  * Check a template against the books as they are now: the kind and run mode fit, the contact can
  * take this kind of document and isn't archived, the lines are valid, and the total is positive.
  * Runs call this again, so a contact archived or an account deactivated since shows as a run error.
  */
-export async function validateTemplateTx(tx: Reader, input: TemplateInput) {
+export async function validateTemplateTx(tx: Reader, input: TemplateInput, opts: { run?: boolean } = {}) {
   if (!input.name?.trim()) throw unprocessable("Give the template a name.", "invalid_template");
   if (input.run_mode === "post_and_send" && input.kind !== "invoice")
     throw unprocessable("Only invoice templates can email automatically.", "invalid_run_mode");
@@ -381,6 +395,8 @@ export async function validateTemplateTx(tx: Reader, input: TemplateInput) {
   validateSchedule(input.schedule);
   const body = normalizeBody(input.kind, input.template);
   if (!body.lines.length) throw unprocessable("Add at least one line.", "empty");
+  // Runs skip this: a template saved before the check existed still runs, with its terms settled below.
+  if (input.kind === "invoice" && !opts.run) checkInvoiceTerms(body);
   if (input.kind !== "entry" && !input.contact_id)
     throw unprocessable(
       input.kind === "invoice" ? "Choose the customer." : "Choose the vendor.",
@@ -653,7 +669,7 @@ export async function runOccurrenceTx(
     await advanceTx(tx, t, date);
     return { run: existing, created: false };
   }
-  const { body } = await validateTemplateTx(tx, inputOf(t));
+  const { body } = await validateTemplateTx(tx, inputOf(t), { run: true });
   const s = await settingsRow(tx);
   if (s.hardLockDate && date <= s.hardLockDate)
     throw unprocessable(
@@ -664,6 +680,10 @@ export async function runOccurrenceTx(
   const posts = t.runMode !== "draft";
   let docId: string;
   if (t.kind === "invoice") {
+    const due = body.due_days != null ? addDays(date, body.due_days) : null;
+    const terms = r(body.terms) ?? null;
+    // The due date wins over terms that disagree with it (templates saved before terms were checked).
+    const keepTerms = due ? termsAgree(date, terms, due) : parseTerms(terms) !== "on_due_date";
     const inv = await createInvoiceTx(
       tx,
       orgId,
@@ -671,8 +691,8 @@ export async function runOccurrenceTx(
       {
         customer_id: t.contactId!,
         issue_date: date,
-        due_date: body.due_days != null ? addDays(date, body.due_days) : null,
-        terms: r(body.terms) ?? null,
+        due_date: due,
+        terms: keepTerms ? terms : null,
         memo: r(body.memo) ?? null,
         lines: body.lines.map((l) => ({ ...l, description: r(l.description) ?? "Item" })),
       },
