@@ -17,6 +17,7 @@ export interface ContactInput {
   tax_id_last4?: string | null;
   is_1099_vendor?: boolean;
   default_account_id?: string | null;
+  default_terms?: string | null;
   notes?: string | null;
 }
 
@@ -31,6 +32,7 @@ export function contactView(c: ContactRow) {
     tax_id_last4: c.taxIdLast4,
     is_1099_vendor: c.is1099Vendor,
     default_account_id: c.defaultAccountId,
+    default_terms: c.defaultTerms,
     notes: c.notes,
     created_at: c.createdAt,
     archived_at: c.archivedAt,
@@ -83,6 +85,7 @@ export async function createContactTx(tx: OrgTx, orgId: string, a: ActorInfo, in
     taxIdLast4: input.tax_id_last4 ?? null,
     is1099Vendor: input.is_1099_vendor ?? false,
     defaultAccountId: input.default_account_id ?? null,
+    defaultTerms: input.default_terms?.trim() || null,
     notes: input.notes ?? null,
   });
   const c = await mustGetContact(tx, id);
@@ -113,6 +116,7 @@ export async function updateContactTx(
   if (input.tax_id_last4 !== undefined) patch.taxIdLast4 = input.tax_id_last4;
   if (input.is_1099_vendor !== undefined) patch.is1099Vendor = input.is_1099_vendor;
   if (input.default_account_id !== undefined) patch.defaultAccountId = input.default_account_id;
+  if (input.default_terms !== undefined) patch.defaultTerms = input.default_terms?.trim() || null;
   if (input.notes !== undefined) patch.notes = input.notes;
   if (input.archived !== undefined)
     patch.archivedAt = input.archived ? (before.archivedAt ?? new Date().toISOString()) : null;

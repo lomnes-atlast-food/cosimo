@@ -8,6 +8,7 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { createHash, randomBytes } from "node:crypto";
 import { newId, org } from "@cosimo/db";
+import { MONEY_NOTE } from "../src/services/mcp-tools.ts";
 import {
   addMember,
   anon,
@@ -502,6 +503,7 @@ describe("MCP", () => {
     expect((await mcp(token, "notifications/initialized", {}, null)).status).toBe(202);
     const tools = (await mcp(token, "tools/list")).body.result.tools as {
       name: string;
+      description: string;
       inputSchema: any;
       annotations: { readOnlyHint: boolean };
     }[];
@@ -540,6 +542,25 @@ describe("MCP", () => {
       expect(names.some((n) => n.includes(forbidden))).toBe(false);
     const entryTool = tools.find((t) => t.name === "create_manual_entry")!;
     expect(entryTool.inputSchema.required).toContain("rationale");
+    // Every amount is labeled as cents (#67): tools that carry money say so, and integer amount
+    // inputs describe themselves as cents, however deeply nested.
+    const moneyTools = tools.filter((t) => t.description.includes(MONEY_NOTE)).map((t) => t.name);
+    for (const n of ["get_cash_snapshot", "list_invoices", "list_bills", "create_manual_entry"])
+      expect(moneyTools).toContain(n);
+    for (const n of ["list_orgs", "list_contacts", "append_note"]) expect(moneyTools).not.toContain(n);
+    const unlabeled: string[] = [];
+    const walk = (path: string, node: any) => {
+      if (!node || typeof node !== "object") return;
+      for (const [k, v] of Object.entries<any>(node.properties ?? {})) {
+        const here = `${path}.${k}`;
+        if (v.type === "integer" && /amount|price|balance|total|cents|_min|_max|_eq/.test(k))
+          if (!/cents/.test(v.description ?? "")) unlabeled.push(here);
+        walk(here, v);
+      }
+      if (node.items) walk(`${path}[]`, node.items);
+    };
+    for (const t of tools) walk(t.name, t.inputSchema);
+    expect(unlabeled).toEqual([]);
     const billTool = tools.find((t) => t.name === "create_bill_draft")!;
     expect(billTool.annotations.readOnlyHint).toBe(false);
 
@@ -671,6 +692,34 @@ describe("MCP", () => {
     );
     const done = await owner.json("GET", `/api/v1/orgs/${orgId}/invoices/${a.structuredContent.invoice_id}`);
     expect(done.body.status).toBe("sent");
+
+    // Terms: a due date alone derives them; a conflicting pair is refused (#66).
+    const withDue = await call(token, "create_invoice_draft", {
+      customer_id: cust.body.id,
+      issue_date: "2026-05-01",
+      due_date: "2026-05-06",
+      lines: [{ description: "Rush job", quantity: 1, unit_price: 1000, account: "4000" }],
+      rationale: "Due in five days",
+    });
+    expect(withDue.structuredContent).toMatchObject({ terms: "On due date", due_date: "2026-05-06" });
+    const withTerms = await call(token, "create_invoice_draft", {
+      customer_id: cust.body.id,
+      issue_date: "2026-05-01",
+      terms: "Net 15",
+      lines: [{ description: "Job", quantity: 1, unit_price: 1000, account: "4000" }],
+      rationale: "Net 15 client",
+    });
+    expect(withTerms.structuredContent).toMatchObject({ terms: "Net 15", due_date: "2026-05-16" });
+    const clash = await call(token, "create_invoice_draft", {
+      customer_id: cust.body.id,
+      issue_date: "2026-05-01",
+      terms: "Net 30",
+      due_date: "2026-05-06",
+      lines: [{ description: "Job", quantity: 1, unit_price: 1000, account: "4000" }],
+      rationale: "Conflicting",
+    });
+    expect(clash.isError).toBe(true);
+    expect(clash.content[0]!.text).toContain("2026-05-31");
 
     const b = await draft();
     await owner.json("POST", `/api/v1/orgs/${orgId}/review/${b.structuredContent.review_item_id}/reject`, {
@@ -922,6 +971,19 @@ describe("MCP", () => {
       .data;
     expect(audit.some((x: any) => x.action === "contact.create" && x.actor === "mcp")).toBe(true);
     expect(audit.some((x: any) => x.action === "contact.update" && x.actor === "mcp")).toBe(true);
+
+    // A customer's default terms round-trip through MCP (#66).
+    const cust = await call(token, "create_contact", {
+      kind: "customer",
+      name: "Terms Customer",
+      default_terms: "Net 15",
+    });
+    expect(cust.structuredContent.contact.default_terms).toBe("Net 15");
+    const cleared = await call(token, "update_contact", {
+      contact_id: cust.structuredContent.contact.id,
+      default_terms: null,
+    });
+    expect(cleared.structuredContent.contact.default_terms).toBeNull();
 
     // A read-only connection can't add contacts.
     const ro = (await authorize(viewer, await register("Viewer AI"))).tok.body.access_token;

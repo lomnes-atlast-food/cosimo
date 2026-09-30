@@ -12,6 +12,7 @@
  */
 import type { LineInput } from "@cosimo/core";
 import { org } from "@cosimo/db";
+import { ON_DUE_DATE, TERM_PRESETS } from "@cosimo/shared";
 import { and, eq, inArray } from "drizzle-orm";
 import { z } from "zod";
 import type { AppContext } from "../context.ts";
@@ -70,13 +71,19 @@ interface Tool<S extends z.ZodType> {
   title: string;
   description: string;
   input: S;
+  /** Whether the tool's inputs or results carry amounts; if so, `tool()` adds the cents note. */
+  money: boolean;
   write?: boolean;
   run(t: ToolCtx, input: z.output<S>): Promise<unknown>;
 }
 
 const tools: Tool<z.ZodType>[] = [];
+/** Appended to the description of every tool with `money: true`. */
+export const MONEY_NOTE =
+  "All amounts, in inputs and results, are integer cents in the org's currency (123456 = $1,234.56); divide by 100 before showing them to a person.";
 function tool<S extends z.ZodType>(t: Tool<S>) {
-  tools.push(t as unknown as Tool<z.ZodType>);
+  const description = t.money ? `${t.description} ${MONEY_NOTE}` : t.description;
+  tools.push({ ...t, description } as unknown as Tool<z.ZodType>);
 }
 
 const Rationale = z
@@ -84,14 +91,23 @@ const Rationale = z
   .min(3)
   .max(2000)
   .describe("Why you are proposing this, shown to the person who reviews it. Required.");
-const Cents = z.number().int().describe("Integer cents");
+/**
+ * An amount in integer cents. `.describe()` replaces a schema's description, so the label is built
+ * in here rather than left to callers; put the sign convention or role in `extra`.
+ */
+function cents(extra?: string, sign?: "positive" | "nonnegative") {
+  const n = z.number().int();
+  return (sign === "positive" ? n.positive() : sign === "nonnegative" ? n.nonnegative() : n).describe(
+    `Integer cents: 123456 = $1,234.56.${extra ? ` ${extra}` : ""}`,
+  );
+}
 const IsoDate = z.string().regex(/^\d{4}-\d{2}-\d{2}$/, "YYYY-MM-DD");
 
 const EntryLines = z
   .array(
     z.object({
       account: z.string().describe("Account ID or code"),
-      amount: Cents.describe("Debit positive, credit negative"),
+      amount: cents("Debit positive, credit negative."),
       description: z.string().optional(),
       contact_id: z.string().optional(),
     }),
@@ -195,6 +211,7 @@ tool({
   title: "List organizations",
   description:
     "The one organization this connection can access, and your role in it. Call this first if you're unsure which org or role you have. To work with a different org, the person must approve a new connection; there is no tool to switch.",
+  money: false,
   input: z.object({}),
   async run(t) {
     const reg = await t.ctx.orgs.get(t.scope.id);
@@ -215,7 +232,8 @@ tool({
   name: "get_account_balances",
   title: "Chart of accounts with balances",
   description:
-    "Every account (id, code, name, type, subtype, tax line, parent_id) with its posted balance as of a date. Balances are integer cents, debit-positive, and cover the account's own postings only; a parent's balance excludes its sub-accounts (those with parent_id set to it), which share its type, subtype, and tax line. Use this for the chart of accounts and current balances; for a full P&L or balance sheet, or history over a range, use run_report instead. Read org://profile first to learn which accounts this business uses.",
+    "Every account (id, code, name, type, subtype, tax line, parent_id) with its posted balance as of a date. Balances are debit-positive and cover the account's own postings only; a parent's balance excludes its sub-accounts (those with parent_id set to it), which share its type, subtype, and tax line. Use this for the chart of accounts and current balances; for a full P&L or balance sheet, or history over a range, use run_report instead. Read org://profile first to learn which accounts this business uses.",
+  money: true,
   input: z.object({
     as_of: IsoDate.optional().describe("Defaults to today"),
     include_inactive: z.boolean().default(false),
@@ -230,7 +248,8 @@ tool({
   name: "run_report",
   title: "Run a report",
   description:
-    "Runs a full financial report: profit_and_loss, balance_sheet, trial_balance, cash_flow, tax_line_summary, general_ledger, ar_aging, ap_aging, or vendor_1099. Period reports (profit_and_loss, cash_flow, tax_line_summary, general_ledger) use from/to; point-in-time reports (balance_sheet, trial_balance, ar_aging, ap_aging) use as_of; vendor_1099 uses the year of `to`. Amounts are integer cents. For a quick balance check, use get_cash_snapshot or get_account_balances instead of a full report.",
+    "Runs a full financial report: profit_and_loss, balance_sheet, trial_balance, cash_flow, tax_line_summary, general_ledger, ar_aging, ap_aging, or vendor_1099. Period reports (profit_and_loss, cash_flow, tax_line_summary, general_ledger) use from/to; point-in-time reports (balance_sheet, trial_balance, ar_aging, ap_aging) use as_of; vendor_1099 uses the year of `to`. For a quick balance check, use get_cash_snapshot or get_account_balances instead of a full report.",
+  money: true,
   input: z.object({
     report: z.enum(REPORT_KEYS),
     from: IsoDate.optional(),
@@ -250,7 +269,8 @@ tool({
   name: "list_uncategorized_transactions",
   title: "Bank transactions needing categorization",
   description:
-    "Bank and card transactions that are not yet categorized, newest first: what to work through in the monthly close. Leaves out transactions still pending at the bank (they show up here once posted) and ones already waiting in the review queue (see list_pending_reviews); `pending` gives the count and total of the pending ones. Amounts are integer cents: positive is money in, negative is money out. Pass next_cursor back as cursor for more. To find a specific transaction, already categorized or not, use search_transactions instead. Each bank account in `bank_accounts` carries its feed's sync status. If a transaction you expect is missing, check each bank account's `last_synced_at` / `last_sync_status` / `connection_status`, and call sync_bank_feed to fetch now.",
+    "Bank and card transactions that are not yet categorized, newest first: what to work through in the monthly close. Leaves out transactions still pending at the bank (they show up here once posted) and ones already waiting in the review queue (see list_pending_reviews); `pending` gives the count and total of the pending ones. Positive amounts are money in, negative are money out. Pass next_cursor back as cursor for more. To find a specific transaction, already categorized or not, use search_transactions instead. Each bank account in `bank_accounts` carries its feed's sync status. If a transaction you expect is missing, check each bank account's `last_synced_at` / `last_sync_status` / `connection_status`, and call sync_bank_feed to fetch now.",
+  money: true,
   input: z.object({
     bank_account_id: z.string().optional(),
     limit: z.number().int().min(1).max(200).default(50),
@@ -273,6 +293,7 @@ tool({
   title: "Search bank transactions",
   description:
     "Search bank and card transactions (the bank feed, not the ledger) by text (description or payee), date range, account, and status. For only what still needs a category, use list_uncategorized_transactions instead; for journal entries once posted, use list_entries or get_entry. If a transaction you expect is missing, check each bank account's `last_synced_at` / `last_sync_status` / `connection_status`, and call sync_bank_feed to fetch now.",
+  money: true,
   input: z.object({
     query: z.string().optional(),
     from: IsoDate.optional(),
@@ -301,6 +322,7 @@ tool({
   description:
     "Fetch new, changed, and removed transactions from the bank now (Plaid bank feeds), for one bank account (`bank_account_id`), one connection (`connection_id`), or, with neither, every connected bank. Applies right away; it is not a proposal and does not go to the review queue. Rules run exactly as in a scheduled sync, under the same review policy: their categorizations go to the review queue unless a person set the rule to post automatically. Each result has a `status`: `synced` (with counts and the new rows in `transactions`, each with any rule or history `suggestion`), `cooldown` (synced moments ago; retry after `retry_after_seconds`), `in_progress`, `error`, `needs_reauth`, or `disconnected`. `needs_reauth` means the bank login must be renewed: only a person can do that in Cosimo, so tell them; you can't fix it. `force_refresh` also asks Plaid to check the bank for newer transactions; Plaid bills that separately, so it only works when the instance allows it (otherwise `refresh` is `not_enabled` and the sync still runs), and what it finds arrives later, through a webhook-triggered sync or another call. An account without a bank feed can't be synced; import a statement instead.",
   write: true,
+  money: true,
   input: z.object({
     bank_account_id: z.string().optional().describe("Sync the bank feed behind this bank account."),
     connection_id: z.string().optional().describe("Sync this bank connection."),
@@ -323,7 +345,8 @@ tool({
   name: "get_entry",
   title: "Get a journal entry",
   description:
-    "One journal entry: its lines (integer cents, debit-positive) with account code/name and, when set, contact name; status; source; and whether a receipt or other file is attached. For several entries, or to find one, use list_entries.",
+    "One journal entry: its lines (debit-positive) with account code/name and, when set, contact name; status; source; and whether a receipt or other file is attached. For several entries, or to find one, use list_entries.",
+  money: true,
   input: z.object({ entry_id: z.string() }),
   async run(t, i) {
     const e = await getEntry(t.scope.handle.db, i.entry_id);
@@ -345,6 +368,7 @@ tool({
   title: "List journal entries",
   description:
     "Journal entries in a date range, newest first, filtered by status or source type. Each entry's lines carry account code/name and, when set, contact name, plus whether it has an attachment. For bank and card lines, use search_transactions instead.",
+  money: true,
   input: z.object({
     from: IsoDate.optional(),
     to: IsoDate.optional(),
@@ -390,6 +414,7 @@ tool({
   title: "List customers and vendors",
   description:
     "Customers and vendors, optionally filtered by kind or a name search. Archived contacts are left out unless include_archived is true; a contact missing from the default list is often archived, not deleted.",
+  money: false,
   input: z.object({
     kind: z.enum(["customer", "vendor"]).optional(),
     query: z.string().optional(),
@@ -411,6 +436,7 @@ tool({
   title: "List invoices",
   description:
     "Invoices to customers, with status, balance due, and whether each is overdue. Each invoice also says whether it accepts online payment (online_payment_enabled), its customer pay link (pay_url; none while the balance due is under Stripe's $0.50 minimum) or hand-entered payment link (manual_pay_url), whether a bank payment is still processing (online_pay_status), when the customer first opened the link, and why the link last failed (pay_error). Payments made online are recorded automatically. Refunds and disputes (chargebacks) made in Stripe are proposed as entries that wait for review; online_refunded and online_disputed are the posted amounts, refund_pending_review says one is waiting, and refund_rejected that one was rejected and must be booked by hand. A refunded invoice stays paid. For bills from vendors use list_bills instead; there is no tool yet for payments received against invoices.",
+  money: true,
   input: z.object({
     status: z.array(z.enum(["draft", "sent", "partial", "paid", "void"])).optional(),
     customer_id: z.string().optional(),
@@ -434,6 +460,7 @@ tool({
   title: "List bills",
   description:
     "Bills from vendors, with balance due and whether each is overdue. Each line carries account code/name, and each bill whether it has an attachment. For invoices to customers, use list_invoices; for payments already recorded against bills, use list_bill_payments.",
+  money: true,
   input: z.object({
     status: z.array(z.enum(["draft", "open", "partial", "paid", "void"])).optional(),
     vendor_id: z.string().optional(),
@@ -478,6 +505,7 @@ tool({
   title: "List payments sent to vendors",
   description:
     "Payments this business has sent to vendors, each with the bills it was applied to. There is no tool yet for payments received from customers. For the bills themselves, use list_bills.",
+  money: true,
   input: z.object({
     vendor_id: z.string().optional(),
     from: IsoDate.optional(),
@@ -503,7 +531,8 @@ tool({
   name: "list_recurring_templates",
   title: "List recurring templates",
   description:
-    "Recurring invoices, bills, and journal entries: each template's contact, schedule summary (for example \"Monthly on the last day\"), next and upcoming dates, run mode, total in cents, last error, and any change waiting for review. Run modes: draft creates drafts for a person to finish; post posts them (still through the review threshold and policies); post_and_send also emails invoices to the customer. Lines carry account code and name. Deleted templates are left out. Check this before proposing a template so you don't duplicate one; to create or change one, use propose_recurring_template.",
+    "Recurring invoices, bills, and journal entries: each template's contact, schedule summary (for example \"Monthly on the last day\"), next and upcoming dates, run mode, total, last error, and any change waiting for review. Run modes: draft creates drafts for a person to finish; post posts them (still through the review threshold and policies); post_and_send also emails invoices to the customer. Lines carry account code and name. Deleted templates are left out. Check this before proposing a template so you don't duplicate one; to create or change one, use propose_recurring_template.",
+  money: true,
   input: z.object({
     kind: z.enum(["invoice", "bill", "entry"]).optional(),
     status: z.array(z.enum(["proposed", "active", "paused", "ended"])).optional(),
@@ -536,6 +565,7 @@ tool({
   title: "Cash and business snapshot",
   description:
     "One overview: cash and card balances, this month's and year-to-date income/expense, review-queue and uncategorized-transaction counts, overdue invoices, and bills overdue or due soon. Each account and bank connection carries its feed's sync status (`last_synced_at`, `last_successful_sync_at`, `last_sync_status`, `last_sync_error`, `connection_status`); a stale or failing feed means recent transactions may be missing. Good for a quick 'how are we doing' check; for a full P&L or balance sheet use run_report, and for one account's balance use get_account_balances.",
+  money: true,
   input: z.object({ as_of: IsoDate.optional().describe("Defaults to today") }),
   async run(t, i) {
     return dashboard(t.scope.handle.db, t.scope.id, i.as_of);
@@ -547,6 +577,7 @@ tool({
   title: "Pending review items",
   description:
     "Proposals waiting for a person to approve, oldest first, including your own. You cannot approve, reject, or otherwise act on them; tell the person what's waiting instead. For one item's status once you have its ID, use get_review_item.",
+  money: true,
   input: z.object({ limit: z.number().int().min(1).max(200).default(50), cursor: z.string().optional() }),
   async run(t, i) {
     return listReview(t.scope.handle.db, { status: ["pending"], limit: i.limit, cursor: i.cursor });
@@ -558,6 +589,7 @@ tool({
   title: "Get a review item",
   description:
     "One review item: its status (pending, approved, rejected, expired), the proposed payload, and any decision note left when it was decided. To find items rather than look one up by ID, use list_pending_reviews instead.",
+  money: true,
   input: z.object({ review_item_id: z.string() }),
   async run(t, i) {
     return reviewView(await mustGetReview(t.scope.handle.db, i.review_item_id));
@@ -572,13 +604,14 @@ tool({
   description:
     "Propose the account(s) for a bank or card transaction from list_uncategorized_transactions or search_transactions. Give one split for the whole amount, or several splits whose positive amounts add up to the transaction's absolute amount. Accounts may be IDs or codes. Refuses a transaction that isn't open to categorize (already categorized, matched, or excluded); to fix one of those, tell the person instead.",
   write: true,
+  money: true,
   input: z.object({
     transaction_id: z.string(),
     splits: z
       .array(
         z.object({
           account: z.string().describe("Account ID or code"),
-          amount: Cents.positive().optional().describe("Positive cents; omit when there is one split"),
+          amount: cents("Positive; omit when there is one split.", "positive").optional(),
           description: z.string().optional(),
           contact_id: z.string().optional(),
         }),
@@ -619,14 +652,15 @@ tool({
   description:
     "Propose a rule that categorizes future bank transactions matching its conditions. Conditions: description_contains, description_regex, amount_eq / amount_min / amount_max (absolute cents), direction (in|out), bank_account_id. Actions: account (ID or code), contact_id, memo, auto_post. Use this once a payee recurs with the same category; for a single transaction, use categorize_transaction instead.",
   write: true,
+  money: true,
   input: z.object({
     name: z.string().min(1).max(200),
     conditions: z.object({
       description_contains: z.string().optional(),
       description_regex: z.string().max(200).optional(),
-      amount_eq: Cents.optional(),
-      amount_min: Cents.optional(),
-      amount_max: Cents.optional(),
+      amount_eq: cents("Match this exact amount (absolute value).").optional(),
+      amount_min: cents("Match amounts at least this large (absolute value).").optional(),
+      amount_max: cents("Match amounts at most this large (absolute value).").optional(),
       direction: z.enum(["in", "out"]).optional(),
       bank_account_id: z.string().optional(),
     }),
@@ -665,8 +699,9 @@ tool({
   name: "create_manual_entry",
   title: "Propose a journal entry",
   description:
-    "Propose a balanced journal entry (debits positive, credits negative, integer cents; lines must sum to zero). Use it for adjustments and follow-on entries, such as monthly amortization of a prepaid expense. It goes to the review queue unless a policy approves it. To correct an entry that's already posted, use propose_replacement (or propose_reversal to cancel it) instead of adding an offsetting entry.",
+    "Propose a balanced journal entry (debits positive, credits negative; lines must sum to zero). Use it for adjustments and follow-on entries, such as monthly amortization of a prepaid expense. It goes to the review queue unless a policy approves it. To correct an entry that's already posted, use propose_replacement (or propose_reversal to cancel it) instead of adding an offsetting entry.",
   write: true,
+  money: true,
   input: z.object({
     date: IsoDate,
     memo: z.string().max(500).optional(),
@@ -692,19 +727,29 @@ tool({
   name: "create_invoice_draft",
   title: "Propose an invoice draft",
   description:
-    "Draft an invoice for a customer. It is held in the review queue; a person approves it (which finalizes it, posting Accounts Receivable) and decides when to send it. Line amounts are quantity × unit price, in cents. For a bill from a vendor use create_bill_draft instead.",
+    "Draft an invoice for a customer. It is held in the review queue; a person approves it (which finalizes it, posting Accounts Receivable) and decides when to send it. Line amounts are quantity × unit price. For a bill from a vendor use create_bill_draft instead.",
   write: true,
+  money: true,
   input: z.object({
     customer_id: z.string(),
     issue_date: IsoDate,
-    due_date: IsoDate.optional(),
+    due_date: IsoDate.optional().describe(
+      "Leave out to compute it from the terms. The due date can't be before issue_date.",
+    ),
+    terms: z
+      .string()
+      .max(100)
+      .optional()
+      .describe(
+        `A preset (${TERM_PRESETS.join(", ")}) or custom text. Leave out to use the customer's default terms, then the organization's; if you give only a due_date the terms are derived from it. Terms that disagree with the due_date (Net 30 with a due date 5 days out) are rejected; "On due date" needs a due_date.`,
+      ),
     memo: z.string().max(2000).optional(),
     lines: z
       .array(
         z.object({
           description: z.string().min(1),
           quantity: z.number().positive().default(1),
-          unit_price: Cents.nonnegative(),
+          unit_price: cents("Price per unit.", "nonnegative"),
           account: z.string().describe("Income account ID or code"),
         }),
       )
@@ -726,6 +771,7 @@ tool({
         customer_id: i.customer_id,
         issue_date: i.issue_date,
         due_date: i.due_date ?? null,
+        terms: i.terms ?? null,
         memo: i.memo ?? null,
         lines,
       });
@@ -735,6 +781,8 @@ tool({
           invoice_id: inv.id,
           number: inv.number,
           total: inv.total,
+          terms: inv.terms,
+          due_date: inv.dueDate,
           status: "pending_review",
           review_item_id: reviewId,
           entry_id: null,
@@ -752,6 +800,8 @@ tool({
         invoice_id: inv.id,
         number: inv.number,
         total: inv.total,
+        terms: inv.terms,
+        due_date: inv.dueDate,
         status: posted?.status ?? "sent",
         review_item_id: null,
         entry_id: r.entry.id,
@@ -766,8 +816,9 @@ tool({
   name: "create_bill_draft",
   title: "Propose a bill draft",
   description:
-    "Draft a bill from a vendor. It is held in the review queue; a person approves it (which finalizes it, posting Accounts Payable). Each line is a description, an amount in cents, and an expense (or asset/liability) account. The vendor must be a contact marked vendor or both, not customer-only. For an invoice to a customer use create_invoice_draft instead.",
+    "Draft a bill from a vendor. It is held in the review queue; a person approves it (which finalizes it, posting Accounts Payable). Each line is a description, an amount, and an expense (or asset/liability) account. The vendor must be a contact marked vendor or both, not customer-only. For an invoice to a customer use create_invoice_draft instead.",
   write: true,
+  money: true,
   input: z.object({
     vendor_id: z.string(),
     bill_number: z.string().optional(),
@@ -778,7 +829,7 @@ tool({
       .array(
         z.object({
           description: z.string().min(1),
-          amount: Cents.positive(),
+          amount: cents("The line amount.", "positive"),
           account: z.string().describe("Expense (or asset/liability) account ID or code"),
         }),
       )
@@ -842,6 +893,14 @@ const ContactFields = {
     .nullable()
     .optional()
     .describe("Default expense or income account, ID or code; null clears it"),
+  default_terms: z
+    .string()
+    .max(100)
+    .nullable()
+    .optional()
+    .describe(
+      `Customers: terms for new invoices, used before the organization's default. A preset (${TERM_PRESETS.filter((t) => t !== ON_DUE_DATE).join(", ")}) or custom text; null clears it`,
+    ),
   notes: z.string().max(5000).nullable().optional(),
 };
 
@@ -857,6 +916,7 @@ tool({
   description:
     "Add a customer or vendor, for example when one is missing before create_bill_draft or create_invoice_draft. Check list_contacts with include_archived: true first so you don't create a duplicate; to bring back an archived contact use update_contact with archived: false instead. Applies right away and is recorded in the audit log; it is not a proposal and does not go to the review queue, because contacts don't touch the books.",
   write: true,
+  money: false,
   input: z.object({
     kind: z.enum(["customer", "vendor", "both"]),
     name: z.string().trim().min(1).max(200),
@@ -882,6 +942,7 @@ tool({
   description:
     "Change a customer's or vendor's details, archive one (archived: true), or bring an archived one back (archived: false). Only the fields you pass change. Applies right away and is recorded in the audit log; it is not a proposal and does not go to the review queue. To add a new contact use create_contact.",
   write: true,
+  money: false,
   input: z.object({
     contact_id: z.string(),
     kind: z.enum(["customer", "vendor", "both"]).optional(),
@@ -909,6 +970,7 @@ tool({
   description:
     "Propose cancelling a posted journal entry with a reversal: a new entry with every line negated, dated the original's date unless you give one. It waits in the review queue like any other proposal. To fix an entry rather than cancel it, use propose_replacement. Entries created by an invoice, bill, or payment are refused: for a payment recorded on the wrong date use propose_payment_date_change; otherwise explain the fix to the person, who can void or edit the document. An entry that is already reversed, or has a reversal or replacement waiting, is refused too.",
   write: true,
+  money: false,
   input: z.object({
     entry_id: z.string(),
     date: IsoDate.optional().describe("Defaults to the original entry's date"),
@@ -935,6 +997,7 @@ tool({
   description:
     "Propose correcting a posted journal entry: the original is reversed and a corrected entry (the date, memo, and balanced lines you give, in the same format as create_manual_entry) is posted in its place. It is one review item: a person approves both halves together or neither, and nothing changes until then. Use get_entry first to see the original's lines. Entries created by an invoice, bill, or payment are refused (for a payment's date, use propose_payment_date_change). An entry that is already reversed, or has a reversal or replacement waiting, is refused too.",
   write: true,
+  money: true,
   input: z.object({
     entry_id: z.string(),
     date: IsoDate,
@@ -979,6 +1042,7 @@ tool({
   description:
     "Propose moving a recorded payment (to a vendor or from a customer) to a different date, typically to match the date the bank shows. Payment IDs come from list_bill_payments, or from a journal entry's source_id when its source_type is bill_payment or invoice_payment. On approval the payment's entry is reversed on its original date and posted again on the new date; the bills or invoices it pays stay paid, and a matched bank transaction stays matched. It is one review item and changes nothing until a person approves it. Refuses a voided payment, one not yet posted, one in a completed bank reconciliation, or one with a date change already waiting.",
   write: true,
+  money: false,
   input: z.object({ payment_id: z.string(), date: IsoDate, rationale: Rationale }),
   async run(t, i) {
     requireWriter(t);
@@ -1006,8 +1070,8 @@ const TemplateLineArg = z.object({
   account: z.string().describe("Account ID or code"),
   description: z.string().max(1000).optional().describe("May use period placeholders such as {month}"),
   quantity: z.number().positive().optional().describe("Invoices: quantity, default 1"),
-  unit_price: Cents.optional().describe("Invoices: price per unit"),
-  amount: Cents.optional().describe("Bills: the line amount. Entries: debit positive, credit negative"),
+  unit_price: cents("Invoices: price per unit.").optional(),
+  amount: cents("Bills: the line amount. Entries: debit positive, credit negative.").optional(),
   contact_id: z.string().optional().describe("Entries: a contact for this line"),
 });
 
@@ -1053,6 +1117,7 @@ tool({
   description:
     "Propose a template that creates an invoice, bill, or balanced journal entry on a schedule, or propose changing, pausing, or resuming one (template IDs come from list_recurring_templates). Use it for things that repeat on a fixed schedule: a monthly software subscription or reimbursement, rent, a retainer invoice, or monthly amortization of a prepaid expense. For a single, one-off entry use create_manual_entry instead. Nothing runs or changes until a person approves it in the review queue. Schedule: unit day|week|month|year with interval (quarterly is month with interval 3); anchor_day 1-31 or -1 for the last day of the month (month and year only, defaults to the start date's day); start_date; end_date or max_occurrences, not both. Run mode: draft (default) creates drafts; post posts each one, still through the review threshold and policies; post_and_send (invoices only) also emails the customer and is always reviewed. Memo, terms, bill_number, and line descriptions may use {month}, {year}, {quarter}, {period}, {date}, with offsets like {month-1}, filled from each run's date. For update, pass only the fields to change; lines replace all lines. Accounts may be IDs or codes.",
   write: true,
+  money: true,
   input: z.object({
     action: z.enum(["create", "update", "pause", "resume"]),
     template_id: z.string().optional().describe("Required for update, pause, and resume"),
@@ -1076,7 +1141,14 @@ tool({
       .optional()
       .describe("Required for create (unit and start_date at least)"),
     memo: z.string().max(2000).nullable().optional(),
-    terms: z.string().max(100).nullable().optional().describe("Invoices, e.g. Net 30"),
+    terms: z
+      .string()
+      .max(100)
+      .nullable()
+      .optional()
+      .describe(
+        `Invoices: a preset (${TERM_PRESETS.join(", ")}) or custom text. A preset sets the due date, so leave due_days out or make it match (Net 30 needs 30); end-of-month presets can't have due_days; "On due date" needs due_days. Leave both out for the customer's or organization's default terms.`,
+      ),
     due_days: z
       .number()
       .int()
@@ -1084,7 +1156,9 @@ tool({
       .max(365)
       .nullable()
       .optional()
-      .describe("Invoices and bills: days until due"),
+      .describe(
+        "Invoices and bills: days until due. For an invoice with only due_days, the terms are derived from it",
+      ),
     bill_number: z.string().max(60).nullable().optional(),
     lines: z.array(TemplateLineArg).min(1).max(200).optional().describe("Required for create"),
     rationale: Rationale,
@@ -1162,6 +1236,7 @@ tool({
   description:
     'Record something durable you learned about how this business keeps its books, for example: "Payments from Acme are retainer billing, account 4010." Notes are dated, attributed to you, and read by future assistants (org://notes). Applies right away; it is not a proposal and does not go to the review queue. Never include secrets, passwords, or account numbers. For something specific to one write, put it in that tool\'s rationale instead of a note.',
   write: true,
+  money: false,
   input: z.object({ note: z.string().min(3).max(10_000) }),
   async run(t, i) {
     requireWriter(t);

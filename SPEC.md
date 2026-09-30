@@ -188,7 +188,7 @@ All IDs are ULIDs stored as TEXT. All timestamps are UTC ISO 8601 TEXT. All mone
 
 **Contacts, receivables, payables**
 
-- `contacts` (id, kind, name, email, phone, address_json, tax_id_last4, is_1099_vendor, default_account_id, notes, archived_at)
+- `contacts` (id, kind, name, email, phone, address_json, tax_id_last4, is_1099_vendor, default_account_id, default_terms, notes, archived_at)
   - `kind`: customer, vendor, both
 - `invoices` (id, number unique, customer_id, issue_date, due_date, status, currency, subtotal, total, amount_paid, memo, terms, entry_id, sent_at, voided_at)
   - `status`: draft, sent, partial, paid, void
@@ -374,6 +374,7 @@ Owners can change policies. For example: "auto-approve MCP categorizations under
 
 - Create, edit (while draft), send, record payment, void. Voiding reverses the entry.
 - Numbering from `invoice_prefix` and `next_invoice_number`, unique per org.
+- Terms and due date agree. The due date is authoritative and the terms describe it. Terms are a preset (Due on receipt, Net 7/10/15/30/45/60/90, Due end of month, Due end of next month, On due date) or custom text. A preset computes the due date; a due date without terms derives them (the matching preset, else "On due date"). Terms and a due date that disagree are rejected (`terms_conflict`), "On due date" needs a due date, and a due date can't be before the issue date. With neither given, the customer's `default_terms`, then the org's `default_terms`, apply. Changing only the issue date of a draft moves a preset's due date. Custom text is kept and not checked.
 - PDF generated with org name, logo, address, invoice lines, terms, and payment instructions. Template is simple and professional. Custom colors and logo are configurable.
 - Send by email through the instance's SMTP settings, with the PDF attached. Record `sent_at`.
 - Optional reminder emails for overdue invoices, off by default.

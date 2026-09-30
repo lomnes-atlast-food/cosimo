@@ -520,3 +520,81 @@ describe(`exports (${DB_MODE})`, () => {
     expect(pdf.headers.get("content-type")).toBe("application/pdf");
   });
 });
+
+describe(`invoice terms and due dates (${DB_MODE})`, () => {
+  const create = (extra: Record<string, unknown>, date = "2026-01-10") =>
+    owner.json("POST", `${base()}/invoices`, {
+      customer_id: customer,
+      issue_date: date,
+      lines: [{ description: "Work", quantity_milli: 1000, unit_price: 1000, account_id: acct["4000"] }],
+      ...extra,
+    });
+  const patch = (id: string, body: Record<string, unknown>) =>
+    owner.json("PATCH", `${base()}/invoices/${id}`, body);
+
+  test("a due date alone derives the terms", async () => {
+    const a = await create({ due_date: "2026-01-15" });
+    expect(a.body).toMatchObject({ terms: "On due date", due_date: "2026-01-15" });
+    const b = await create({ due_date: "2026-02-09" });
+    expect(b.body).toMatchObject({ terms: "Net 30", due_date: "2026-02-09" });
+  });
+
+  test("terms and a due date that disagree are rejected; custom text is kept", async () => {
+    const bad = await create({ terms: "Net 30", due_date: "2026-01-15" });
+    expect(bad.status).toBe(422);
+    expect(bad.body.error.code).toBe("terms_conflict");
+    expect(bad.body.error.message).toContain("2026-02-09");
+    const ok = await create({ terms: "Net 15", due_date: "2026-01-25" });
+    expect(ok.body).toMatchObject({ terms: "Net 15", due_date: "2026-01-25" });
+    const custom = await create({ terms: "Pay when paid", due_date: "2026-01-12" });
+    expect(custom.body).toMatchObject({ terms: "Pay when paid", due_date: "2026-01-12" });
+  });
+
+  test("On due date needs a due date, and the due date can't precede the issue date", async () => {
+    const r = await create({ terms: "On due date" });
+    expect(r.status).toBe(422);
+    expect(r.body.error.code).toBe("due_date_required");
+    const early = await create({ due_date: "2026-01-09" });
+    expect(early.status).toBe(422);
+    expect(early.body.error.code).toBe("invalid_due_date");
+  });
+
+  test("the customer's default terms beat the org default", async () => {
+    const c = await owner.json("POST", `${base()}/contacts`, {
+      kind: "customer",
+      name: "Hooli",
+      default_terms: "Net 15",
+    });
+    expect(c.body.default_terms).toBe("Net 15");
+    const r = await create({ customer_id: c.body.id });
+    expect(r.body).toMatchObject({ terms: "Net 15", due_date: "2026-01-25" });
+    const cleared = await owner.json("PATCH", `${base()}/contacts/${c.body.id}`, { default_terms: null });
+    expect(cleared.body.default_terms).toBeNull();
+    expect((await create({ customer_id: c.body.id })).body.terms).toBe("Net 30");
+  });
+
+  test("editing: the issue date moves a rule's due date but not On due date's", async () => {
+    const net = await create({});
+    const moved = await patch(net.body.id, { issue_date: "2026-01-20" });
+    expect(moved.body).toMatchObject({ terms: "Net 30", due_date: "2026-02-19" });
+    const fixed = await create({ due_date: "2026-01-15" });
+    const kept = await patch(fixed.body.id, { issue_date: "2026-01-12" });
+    expect(kept.body).toMatchObject({ terms: "On due date", due_date: "2026-01-15" });
+    const past = await patch(fixed.body.id, { issue_date: "2026-01-16" });
+    expect(past.body.error.code).toBe("invalid_due_date");
+  });
+
+  test("editing: a due date sent alone re-derives the terms; terms alone recompute the due date", async () => {
+    const a = await create({});
+    const d = await patch(a.body.id, { due_date: "2026-01-18" });
+    expect(d.body).toMatchObject({ terms: "On due date", due_date: "2026-01-18" });
+    const t = await patch(a.body.id, { terms: "Net 7" });
+    expect(t.body).toMatchObject({ terms: "Net 7", due_date: "2026-01-17" });
+    const t2 = await patch(a.body.id, { terms: "Net 45" });
+    expect(t2.body).toMatchObject({ terms: "Net 45", due_date: "2026-02-24" });
+    const both = await patch(a.body.id, { terms: "Net 30", due_date: "2026-01-12" });
+    expect(both.body.error.code).toBe("terms_conflict");
+    const nul = await patch(a.body.id, { due_date: null });
+    expect(nul.body).toMatchObject({ terms: "Net 45", due_date: "2026-02-24" });
+  });
+});

@@ -25,7 +25,7 @@ offer to. Corrections to posted entries are proposals too (see "Corrections" bel
 
 ## Conventions
 
-- Money is integer **cents**. `123456` is $1,234.56.
+- Money is integer **cents**. `123456` is $1,234.56. Every amount you read or write is in cents, so divide by 100 before showing one to a person.
 - Journal lines are debit-positive and credit-negative, and every entry's lines sum to zero.
 - Bank amounts are positive for money in and negative for money out. When you categorize, give
   positive split amounts that add up to the transaction's absolute amount.
@@ -80,8 +80,11 @@ Work one month at a time, oldest first.
    invoice total), tell the person so they can record the payment against the invoice. Don't
    categorize it to income, which would count the revenue twice.
 4. For new work the person describes, propose an invoice with `create_invoice_draft` (customer,
-   lines with quantity, unit price in cents, and income account code). Approving it finalizes the
-   invoice. Sending it stays with the person.
+   lines with quantity, unit price in cents, and income account code). Leave out `terms` and
+   `due_date` to use the customer's or the org's default terms. Give a `due_date` alone and the terms
+   are derived from it; give `terms` such as "Net 15" alone and the due date follows. Terms and a due
+   date that disagree are rejected, so give only one of them unless you know they match. Approving
+   it finalizes the invoice. Sending it stays with the person.
 
 ## Bills
 
