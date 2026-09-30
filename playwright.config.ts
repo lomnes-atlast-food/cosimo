@@ -2,6 +2,9 @@ import { defineConfig, devices } from "@playwright/test";
 
 const PORT = Number(process.env.COSIMO_E2E_PORT ?? 8799);
 
+// Pre-installed browser in environments that can't download Playwright's pinned build.
+const executablePath = process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE || undefined;
+
 export default defineConfig({
   testDir: "e2e",
   testMatch: "*.e2e.ts",
@@ -18,10 +21,21 @@ export default defineConfig({
   projects: [
     {
       name: "chromium",
+      // The other specs navigate by sidebar links, which sit behind the drawer on a phone.
+      testIgnore: "mobile.e2e.ts",
       use: {
         ...devices["Desktop Chrome"],
-        // Pre-installed browser in environments that can't download Playwright's pinned build.
-        launchOptions: { executablePath: process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE || undefined },
+        launchOptions: { executablePath },
+      },
+    },
+    {
+      // iPhone 13 viewport and touch on Chromium (WebKit isn't installed everywhere).
+      name: "mobile",
+      testMatch: "mobile.e2e.ts",
+      use: {
+        ...devices["iPhone 13"],
+        defaultBrowserType: "chromium",
+        launchOptions: { executablePath },
       },
     },
   ],

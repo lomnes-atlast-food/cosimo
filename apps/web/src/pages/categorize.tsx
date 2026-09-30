@@ -3,6 +3,7 @@ import { Link, useNavigate, useSearch } from "@tanstack/react-router";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { api, unwrap } from "../api/client";
 import { AccountSelect } from "../components/AccountSelect";
+import { Attachments } from "../components/Attachments";
 import {
   Alert,
   Amount,
@@ -205,7 +206,7 @@ export function CategorizePage() {
           </div>
         )}
       </div>
-      <p className="mt-2 text-xs text-zinc-500">j/k to move · Enter to save · Esc to close</p>
+      <p className="mt-2 text-xs text-zinc-500 touch:hidden">j/k to move · Enter to save · Esc to close</p>
     </>
   );
 }
@@ -273,12 +274,16 @@ function TxnRow({
         <Amount cents={t.amount} className="shrink-0 font-medium" />
       </button>
       {open && (
-        <div className="border-t border-zinc-100 px-4 py-3 dark:border-zinc-800">
+        <div className="space-y-3 border-t border-zinc-100 px-4 py-3 dark:border-zinc-800">
+          <p className="break-words text-sm text-zinc-700 dark:text-zinc-300">
+            {t.payee && t.payee !== t.description ? `${t.payee} · ${t.description}` : t.description}
+          </p>
           {t.status === "new" && !t.review_item_id ? (
             <Editor t={t} accounts={accounts} onDone={onDone} />
           ) : (
             <Done t={t} orgId={orgId} />
           )}
+          <Attachments targetType="bank_transaction" targetId={t.id} />
         </div>
       )}
     </li>
@@ -492,7 +497,7 @@ function Editor({ t, accounts, onDone }: { t: BankTxn; accounts: Account[]; onDo
             aria-selected={mode === m}
             onClick={() => setMode(m)}
             className={cx(
-              "rounded px-2.5 py-1 capitalize",
+              "rounded px-2.5 py-1 capitalize touch:min-h-11 touch:px-3",
               mode === m ? "bg-brand-600 text-white" : "hover:bg-zinc-200 dark:hover:bg-zinc-700",
             )}
           >
