@@ -66,6 +66,18 @@ export interface Config {
     /** For the private repo; unneeded once it's public. */
     github_token: string;
   };
+  anchoring: {
+    /** Publicly timestamp the chain heads daily (SPEC §6.5, services/anchors.ts). */
+    enabled: boolean;
+    /** Comma-separated OpenTimestamps calendar URLs; "" skips OpenTimestamps. */
+    ots_calendars: string;
+    /** RFC 3161 timestamp authority; "" skips RFC 3161. */
+    tsa_url: string;
+    /** PEM file of extra roots trusted for tsa_url's tokens (FreeTSA's root is built in). */
+    tsa_ca_file: string;
+    /** Esplora-style block explorer API used to confirm Bitcoin attestations. */
+    bitcoin_api: string;
+  };
 }
 
 /** Keys whose values are secret: shown as ******** and encrypted at rest where possible. */
@@ -77,6 +89,12 @@ export const SECRET_KEYS = new Set([
   "storage.s3_secret_key",
   "updates.github_token",
 ]);
+
+export const DEFAULT_OTS_CALENDARS = [
+  "https://alice.btc.calendar.opentimestamps.org",
+  "https://bob.btc.calendar.opentimestamps.org",
+  "https://finney.calendar.eternitywall.com",
+].join(",");
 
 export function defaultDataDir(): string {
   return join(homedir(), ".cosimo");
@@ -120,6 +138,13 @@ export function defaultConfig(dataDir = defaultDataDir()): Config {
     jobs: { enabled: true, plaid_sync_hours: 6, verify_weekday: 0 },
     instance: { target: "local", created_at: "" },
     updates: { check: true, github_token: "" },
+    anchoring: {
+      enabled: true,
+      ots_calendars: DEFAULT_OTS_CALENDARS,
+      tsa_url: "https://freetsa.org/tsr",
+      tsa_ca_file: "",
+      bitcoin_api: "https://blockstream.info/api",
+    },
   };
 }
 

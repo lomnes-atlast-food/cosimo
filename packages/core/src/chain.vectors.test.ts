@@ -4,7 +4,16 @@
  * format changed: bump CHAIN_FORMAT_VERSION and document it in docs/chain-format.md.
  */
 import { expect, test } from "bun:test";
-import { auditGenesis, auditHash, canonicalJson, entryHash, ledgerGenesis, ledgerPayload } from "./index.ts";
+import {
+  anchorDigest,
+  anchorPreimage,
+  auditGenesis,
+  auditHash,
+  canonicalJson,
+  entryHash,
+  ledgerGenesis,
+  ledgerPayload,
+} from "./index.ts";
 
 const ORG = "01JABCDEFGHJKMNPQRSTVWXYZ0";
 const ENTRY = {
@@ -74,5 +83,22 @@ test("entry and audit hashes", () => {
   );
   expect(auditHash(ORG, auditGenesis(ORG), AUDIT)).toBe(
     "0287e99de8d4cce788a7953f3fffbcba8de6b54de734e1cdbe8862d0fc5c47a6",
+  );
+});
+
+test("anchor preimage and digest", () => {
+  const ledger = { seq: 1, hash: entryHash(ORG, ledgerGenesis(ORG), ENTRY) };
+  const audit = { seq: 1, hash: auditHash(ORG, auditGenesis(ORG), AUDIT) };
+  expect(anchorPreimage(ORG, ledger, audit)).toBe(
+    "cosimo-anchor v1\norg 01JABCDEFGHJKMNPQRSTVWXYZ0\n" +
+      "ledger 1 88bd7600acfefeb2df2389f7665ff37bce4fae1a7d9fac43450b70d64b56763d\n" +
+      "audit 1 0287e99de8d4cce788a7953f3fffbcba8de6b54de734e1cdbe8862d0fc5c47a6\n",
+  );
+  expect(anchorDigest(ORG, ledger, audit)).toBe(
+    "86af26feace2fa6114b0ab6beb4e448c253766c69111655de29ed72e86e93ed1",
+  );
+  // An empty ledger anchors its genesis at seq 0.
+  expect(anchorDigest(ORG, { seq: 0, hash: ledgerGenesis(ORG) }, { seq: 0, hash: auditGenesis(ORG) })).toBe(
+    "4239d74775956c193b90e99f43017e32a87186941df0a58a8ceee0dece82e5a4",
   );
 });

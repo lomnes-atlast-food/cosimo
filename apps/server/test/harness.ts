@@ -83,6 +83,8 @@ export async function createTestEnv(
   const cfg = defaultConfig(dir);
   cfg.security.master_key = generateMasterKey();
   cfg.jobs.enabled = false;
+  // No public timestamps unless a test turns them on with a fake `ctx.services.anchorFetch`.
+  cfg.anchoring.enabled = false;
   let provisioner: LibsqlNamespaceProvisioner | undefined;
   if (DB_MODE === "sqld") {
     const base = process.env.COSIMO_TEST_SQLD_URL!;

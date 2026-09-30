@@ -25,7 +25,8 @@ writeFileSync(
     port: Number(port),
   }),
 );
-const env = { ...process.env, COSIMO_INIT_SKIP_TURSO_DISCOVERY: "1" };
+// No public timestamps: the browser tests must not reach OpenTimestamps calendars or FreeTSA.
+const env = { ...process.env, COSIMO_INIT_SKIP_TURSO_DISCOVERY: "1", COSIMO_ANCHORING_ENABLED: "0" };
 const init = Bun.spawnSync(["bun", cli, "init", "--answers", answers, "--yes", "--json"], { env });
 if (init.exitCode !== 0) {
   process.stderr.write(init.stdout.toString() + init.stderr.toString());

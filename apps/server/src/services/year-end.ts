@@ -10,6 +10,8 @@ import { org } from "@cosimo/db";
 import { addMonths, fiscalYearEnd, VERSION } from "@cosimo/shared";
 import { and, asc, gte, lte } from "drizzle-orm";
 import { strToU8, zipSync } from "fflate";
+import type { AppContext } from "../context.ts";
+import { anchorNow, anchorPackageFiles } from "./anchors.ts";
 import { checkpoint } from "./chain.ts";
 import { settingsRow } from "./ledger.ts";
 import { reconciliationFiles } from "./reconcile.ts";
@@ -50,6 +52,8 @@ export interface ChainJson {
   audit: { seq: number; hash: string };
   org_id: string;
   generated_at: string;
+  /** Public timestamps included under anchors/ (see anchors.ts `anchorPackageFiles`). */
+  anchors: Awaited<ReturnType<typeof anchorPackageFiles>>["anchors"];
 }
 
 const REPORTS: { key: ReportKey; file: string; label: string }[] = [
@@ -68,6 +72,8 @@ export async function buildYearEndPackage(
   orgId: string,
   orgName: string,
   year: number,
+  /** With a context and anchoring on, the year-end heads are timestamped first (best effort). */
+  opts: { ctx?: AppContext } = {},
 ): Promise<YearEndResult> {
   const db = h.db;
   const s = await settingsRow(db);
@@ -121,11 +127,24 @@ export async function buildYearEndPackage(
     const r = rows.find((x) => x.chain === c)!;
     return { seq: r.seq, hash: r.headHash };
   };
+  // Timestamp those heads publicly. A network failure must not stop the package.
+  let anchorNote: string | null = null;
+  if (opts.ctx?.config.anchoring.enabled) {
+    try {
+      const r = await anchorNow(opts.ctx, h, orgId, "year_end");
+      if (r.status !== "anchored" && r.status !== "unchanged") anchorNote = r.message;
+    } catch (e) {
+      anchorNote = `Timestamping failed: ${(e as Error).message}`;
+    }
+  }
+  const anchored = await anchorPackageFiles(h, orgId);
+  Object.assign(entries, anchored.files);
   const chain: ChainJson = {
     ledger: head("ledger"),
     audit: head("audit"),
     org_id: orgId,
     generated_at: generatedAt,
+    anchors: anchored.anchors,
   };
 
   const basisLabel = basis === "cash" ? "Cash" : "Accrual";
@@ -152,7 +171,10 @@ export async function buildYearEndPackage(
     "Files",
     ...listing.map((l) => `- ${l}`),
     "- README.txt  This file",
-    "- chain.json  Ledger and audit chain heads at generation time",
+    "- chain.json  Ledger and audit chain heads at generation time, and the public timestamps included",
+    ...(anchored.anchors.length
+      ? ["- anchors/    Public timestamps of the chain heads, checkable without Cosimo (see below)"]
+      : []),
     "",
     "Chain heads",
     `Ledger chain: seq ${chain.ledger.seq}, hash ${chain.ledger.hash}`,
@@ -165,6 +187,7 @@ export async function buildYearEndPackage(
     "rewritten since. This makes the books tamper-evident, not tamper-proof: someone with full",
     "database access could rebuild the whole chain, but the result would no longer match this copy.",
     "",
+    ...anchorReadme(anchored.anchors, anchorNote),
   ].join("\r\n");
 
   entries["README.txt"] = strToU8(readme);
@@ -176,4 +199,45 @@ export async function buildYearEndPackage(
     files: Object.keys(entries),
     chain,
   };
+}
+
+/** README section on the public timestamps in anchors/, with the commands to check them. */
+function anchorReadme(anchors: ChainJson["anchors"], note: string | null): string[] {
+  if (!anchors.length)
+    return note ? ["Public timestamps", `No public timestamps are included. ${note}`, ""] : [];
+  const lines = [
+    "Public timestamps",
+    "anchors/ holds public timestamps of the chain heads, so a third party can confirm the books",
+    "through those heads existed by the stated time without trusting Cosimo or its database. Each",
+    "anchor-<n>.txt is the text that was timestamped (the ledger and audit chain heads at ledger link",
+    "n); its SHA-256 is what the proofs commit to.",
+    "",
+  ];
+  for (const a of anchors) {
+    const proofs = a.proofs
+      .map((p) =>
+        p.kind === "ots"
+          ? `OpenTimestamps via ${p.service} (${p.status === "complete" ? `Bitcoin block ${p.block_height}, ${p.attested_at}` : "pending"})`
+          : `RFC 3161 via ${p.service} (${p.attested_at})`,
+      )
+      .join("; ");
+    lines.push(`- ${a.file}: ledger link ${a.ledger.seq}, audit link ${a.audit.seq}. ${proofs}`);
+  }
+  lines.push(
+    "",
+    "To check them:",
+    "- OpenTimestamps (Bitcoin): install the OpenTimestamps client (pip install opentimestamps-client).",
+    "  A proof still pending when the package was made completes with",
+    "  `ots upgrade anchors/anchor-<n>.txt.ots` once its Bitcoin block is mined. Then, with a Bitcoin",
+    "  node, `ots verify anchors/anchor-<n>.txt.ots`; without one, `ots info anchors/anchor-<n>.txt.ots`",
+    "  ends with the block height and merkle root to compare on any block explorer.",
+    "- RFC 3161: `openssl ts -verify -data anchors/anchor-<n>.txt -in anchors/anchor-<n>.tsr",
+    "  -CAfile anchors/cacert.pem -untrusted anchors/tsa.crt`. Compare cacert.pem with the authority's",
+    "  published root (for FreeTSA, https://freetsa.org/files/cacert.pem) rather than trusting this copy.",
+    "- Then compare the hashes in anchor-<n>.txt with the ledger and audit hashes at those links in an",
+    "  export of the books (docs/chain-format.md in the Cosimo source explains the format).",
+    "",
+  );
+  if (note) lines.push(`Note: ${note}`, "");
+  return lines;
 }

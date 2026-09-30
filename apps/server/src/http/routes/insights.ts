@@ -98,7 +98,7 @@ export function insightsRoutes() {
       tags: ["Reports"],
       summary: "Download the year-end package (accountant or higher)",
       description:
-        "A ZIP named `<org>-<year>-year-end.zip` with PDF and CSV versions of the P&L, balance sheet, trial balance, general ledger, tax line summary, 1099 vendor summary, AR and AP aging, and reconciliation reports for the final month, plus README.txt and chain.json (ledger and audit chain heads). `year` is the fiscal year that ends in that calendar year; the 1099 summary covers calendar year `year`. Reports use the org's default basis. Generating a package records a chain checkpoint with reason `year_end`.",
+        "A ZIP named `<org>-<year>-year-end.zip` with PDF and CSV versions of the P&L, balance sheet, trial balance, general ledger, tax line summary, 1099 vendor summary, AR and AP aging, and reconciliation reports for the final month, plus README.txt, chain.json (ledger and audit chain heads), and anchors/ with public timestamps of those heads and the latest confirmed ones (see docs/chain-format.md). `year` is the fiscal year that ends in that calendar year; the 1099 summary covers calendar year `year`. Reports use the org's default basis. Generating a package records a chain checkpoint with reason `year_end` and, with anchoring on, timestamps the heads (best effort: a network failure doesn't stop the package).",
       security: bearerSecurity,
       request: {
         params: OrgParams,
@@ -114,8 +114,11 @@ export function insightsRoutes() {
     }),
     async (c) => {
       const o = requireRole(c, "accountant");
-      const reg = await c.get("ctx").orgs.get(o.id);
-      const pkg = await buildYearEndPackage(o.handle, o.id, reg?.name ?? "", c.req.valid("query").year);
+      const ctx = c.get("ctx");
+      const reg = await ctx.orgs.get(o.id);
+      const pkg = await buildYearEndPackage(o.handle, o.id, reg?.name ?? "", c.req.valid("query").year, {
+        ctx,
+      });
       return c.body(pkg.bytes as unknown as ArrayBuffer, 200, {
         "content-type": "application/zip",
         "content-disposition": `attachment; filename="${pkg.filename}"`,

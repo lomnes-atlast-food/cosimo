@@ -36,6 +36,9 @@ test("sign in, post a journal entry, and see it on the reports", async ({ page }
 
   await page.goto(`${base}/settings`);
   await page.getByRole("tab", { name: "Integrity" }).click();
+  await expect(page.getByText("Independent timestamps")).toBeVisible();
+  await expect(page.getByText("Timestamping is off (anchoring.enabled in the config).")).toBeVisible();
+  await expect(page.getByRole("button", { name: "Timestamp now" })).toHaveCount(0);
   await page.getByRole("button", { name: "Verify now" }).click();
   await expect(page.getByText(/Both chains verified/)).toBeVisible();
 });

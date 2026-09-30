@@ -1,6 +1,7 @@
 #!/usr/bin/env bun
 import { COMMIT, VERSION } from "@cosimo/shared";
 import "../modules.ts";
+import { anchorCommand } from "./commands/anchor.ts";
 import { configCommand } from "./commands/config.ts";
 import { doctorCommand } from "./commands/doctor.ts";
 import { initCommand } from "./commands/init.ts";
@@ -35,6 +36,10 @@ export const commands: Record<string, { run: Command; help: string }> = {
   token: { run: tokenCommand, help: "create, list, revoke API tokens (including propose_only)" },
   config: { run: configCommand, help: "get, set, list" },
   verify: { run: verifyCommand, help: "Recompute an org's hash chains and report the first broken link" },
+  anchor: {
+    run: anchorCommand,
+    help: "Publicly timestamp an org's chain heads now (OpenTimestamps, RFC 3161)",
+  },
   upgrade: { run: upgradeCommand, help: "Download the latest release, back up, migrate, restart" },
   migrate: { run: migrateCommand, help: "Apply pending database migrations (system, then each org)" },
   backup: { run: backupCommand, help: "Create a backup now (or `backup list`)" },

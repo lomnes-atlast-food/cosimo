@@ -12,6 +12,7 @@ import {
 } from "@cosimo/core";
 import { newId, type OrgDb, type OrgTx, org } from "@cosimo/db";
 import { and, asc, desc, eq, gte, inArray, isNotNull } from "drizzle-orm";
+import { type AnchorVerifyOptions, type AnchorVerifyResult, verifyAnchors } from "./anchor-verify.ts";
 import type { OrgHandle } from "./types.ts";
 
 type Reader = OrgDb | OrgTx;
@@ -161,16 +162,19 @@ export interface OrgVerifyResult {
     mismatches: { chain: string; seq: number; expected: string; actual: string | null }[];
   };
   firstBreak: ChainBreak | null;
+  /** Public timestamps (anchor-verify.ts): a mismatch or invalid proof fails `ok`; coverage doesn't. */
+  anchors: AnchorVerifyResult;
 }
 
 /**
  * Recompute both chains. With `tail`, verify only the last N links of each chain, starting from
- * the stored prev_hash of the first link verified (fast check for doctor).
+ * the stored prev_hash of the first link verified (fast check for doctor). Every stored anchor is
+ * checked either way; `anchors` adds trusted TSA roots and the Bitcoin block lookup.
  */
 export async function verifyOrg(
   db: Reader,
   orgId: string,
-  opts: { tail?: number } = {},
+  opts: { tail?: number; anchors?: AnchorVerifyOptions } = {},
 ): Promise<OrgVerifyResult> {
   const lh = await ledgerHead(db, orgId);
   const ah = await auditHead(db, orgId);
@@ -241,11 +245,13 @@ export async function verifyOrg(
       mismatches.push({ chain: cp.chain, seq: cp.seq, expected: cp.headHash, actual });
   }
   const firstBreak = ledger.firstBreak ?? audit.firstBreak ?? null;
+  const anchors = await verifyAnchors(db, orgId, opts.anchors);
   return {
-    ok: ledger.ok && audit.ok && mismatches.length === 0,
+    ok: ledger.ok && audit.ok && mismatches.length === 0 && anchors.ok,
     ledger,
     audit,
     checkpoints: { ok: mismatches.length === 0, mismatches },
     firstBreak,
+    anchors,
   };
 }

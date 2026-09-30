@@ -4,9 +4,9 @@
  */
 import { accessSync, constants, existsSync, readdirSync, statfsSync, statSync } from "node:fs";
 import { join } from "node:path";
-import { orgMigrations, org as orgSchema, pendingMigrations, systemMigrations } from "@cosimo/db";
+import { type OrgDb, orgMigrations, org as orgSchema, pendingMigrations, systemMigrations } from "@cosimo/db";
 import { VERSION } from "@cosimo/shared";
-import { desc } from "drizzle-orm";
+import { asc, desc, eq, gt, isNotNull } from "drizzle-orm";
 import { type Config, loadConfig } from "../config.ts";
 import { type AppContext, createContext } from "../context.ts";
 import { SecretBox } from "../crypto.ts";
@@ -172,6 +172,7 @@ async function databaseChecks(ctx: AppContext, add: (c: Check) => void, tail: nu
   const unreachable: string[] = [];
   const pendingOrgs: string[] = [];
   const broken: string[] = [];
+  const staleAnchors: string[] = [];
   for (const o of orgs) {
     try {
       const h = await ctx.orgs.mustOpen(o.id);
@@ -183,7 +184,14 @@ async function databaseChecks(ctx: AppContext, add: (c: Check) => void, tail: nu
       const v = await verifyOrg(h.db, o.id, tail ? { tail } : {});
       if (!v.ok) {
         const b = v.ledger.firstBreak ?? v.audit.firstBreak;
-        broken.push(`${o.name}${b ? ` (${b.chain} seq ${b.seq}: ${b.reason})` : ""}`);
+        const a = v.anchors.problems[0];
+        broken.push(
+          `${o.name}${b ? ` (${b.chain} seq ${b.seq}: ${b.reason})` : a ? ` (timestamp of ledger seq ${a.ledger_seq}: ${a.problem})` : ""}`,
+        );
+      }
+      if (ctx.config.anchoring.enabled) {
+        const late = await staleAnchoring(h.db);
+        if (late) staleAnchors.push(`${o.name}: ${late}`);
       }
     } catch (e) {
       unreachable.push(`${o.name}: ${(e as Error).message}`);
@@ -234,6 +242,52 @@ async function databaseChecks(ctx: AppContext, add: (c: Check) => void, tail: nu
           message: tail ? `Last ${tail} links intact in ${orgs.length} org(s)` : "Intact",
         },
   );
+  if (ctx.config.anchoring.enabled)
+    add(
+      staleAnchors.length
+        ? {
+            id: "anchors",
+            name: "Public timestamps",
+            status: "warn",
+            message: staleAnchors.join("; "),
+            remediation:
+              "Check that the server can reach the hosts in [anchoring] (ots_calendars, tsa_url, bitcoin_api) over HTTPS, then run `cosimo anchor <org>`. See docs/deployment.md.",
+          }
+        : { id: "anchors", name: "Public timestamps", status: "pass", message: "Up to date" },
+    );
+}
+
+const ANCHOR_STALE_MS = 3 * 24 * 3_600_000;
+
+/**
+ * Why the ledger isn't publicly timestamped when it should be: an entry posted more than 3 days
+ * ago that no complete anchor covers. Null when timestamps are up to date.
+ */
+async function staleAnchoring(db: OrgDb): Promise<string | null> {
+  const last = await db
+    .select()
+    .from(orgSchema.chainAnchors)
+    .where(eq(orgSchema.chainAnchors.status, "complete"))
+    .orderBy(desc(orgSchema.chainAnchors.ledgerSeq))
+    .limit(1)
+    .get();
+  const first = await db
+    .select({ seq: orgSchema.journalEntries.chainSeq, postedAt: orgSchema.journalEntries.postedAt })
+    .from(orgSchema.journalEntries)
+    .where(gt(orgSchema.journalEntries.chainSeq, last?.ledgerSeq ?? 0))
+    .orderBy(asc(orgSchema.journalEntries.chainSeq))
+    .limit(1)
+    .get();
+  if (!first?.postedAt || Date.now() - Date.parse(first.postedAt) < ANCHOR_STALE_MS) return null;
+  const failure = await db
+    .select({ service: orgSchema.chainAnchors.service, lastError: orgSchema.chainAnchors.lastError })
+    .from(orgSchema.chainAnchors)
+    .where(isNotNull(orgSchema.chainAnchors.lastError))
+    .orderBy(desc(orgSchema.chainAnchors.updatedAt))
+    .limit(1)
+    .get();
+  const since = last ? `timestamped only through ledger #${last.ledgerSeq}` : "never timestamped";
+  return `${since}, and ledger #${first.seq} was posted ${first.postedAt.slice(0, 10)}${failure ? ` (last error from ${failure.service}: ${failure.lastError})` : ""}`;
 }
 
 async function serviceChecks(

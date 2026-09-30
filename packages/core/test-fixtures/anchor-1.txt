@@ -1,0 +1,4 @@
+cosimo-anchor v1
+org 01JABCDEFGHJKMNPQRSTVWXYZ0
+ledger 1 88bd7600acfefeb2df2389f7665ff37bce4fae1a7d9fac43450b70d64b56763d
+audit 1 0287e99de8d4cce788a7953f3fffbcba8de6b54de734e1cdbe8862d0fc5c47a6
