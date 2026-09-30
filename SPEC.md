@@ -765,7 +765,7 @@ Every command supports `--json`.
 - Drizzle migrations for system and org databases, versioned and forward-only.
 - On startup, the server checks migration state. `cosimo upgrade` backs up, applies migrations to the system database and then each org database, and restarts. A failure on any org stops the upgrade and leaves a clear message; already-migrated databases remain valid because each migration is transactional.
 - Releases follow semantic versioning. The agent contract (Section 13.4), API v1, and the export format are stable within a major version.
-- The admin page checks GitHub Releases for a newer version, for instance admins only, cached in memory for a few hours. `updates.check` (or `COSIMO_UPDATES_CHECK=false`) turns it off; `updates.github_token` (or `COSIMO_UPDATES_GITHUB_TOKEN`) is a token for release lookups while the repo is private, and is unneeded once it's public.
+- The admin page checks GitHub Releases for a newer version, for instance admins only, cached in memory for a few hours. `updates.check` (or `COSIMO_UPDATES_CHECK=false`) turns it off; `updates.github_token` (or `COSIMO_UPDATES_GITHUB_TOKEN`) is an optional token for release lookups, for a private fork or to raise GitHub's unauthenticated rate limit.
 
 ### 14.4 Observability
 
