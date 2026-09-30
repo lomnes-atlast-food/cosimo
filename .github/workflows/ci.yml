@@ -59,8 +59,8 @@ jobs:
             ghcr.io/tursodatabase/libsql-server:v0.24.32@sha256:dedf5273da945d90f3b85fe367ed8f821349117ac2c488bf43c4a6bf9f2123e0 \
             /bin/sqld --enable-namespaces --admin-listen-addr 0.0.0.0:8081
           for i in $(seq 1 30); do curl -sf http://127.0.0.1:8080/health && break; sleep 1; done
-      - name: bun test
-        run: bun test
+      - name: bun run test
+        run: bun run test
         env:
           COSIMO_TEST_DB: ${{ matrix.db }}
           COSIMO_TEST_SQLD_URL: ${{ matrix.db == 'sqld' && 'http://localhost:8080' || '' }}

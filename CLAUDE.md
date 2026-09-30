@@ -5,7 +5,7 @@
 Maintainer-only notes live in `CLAUDE.local.md` (gitignored).
 
 ## Checks
-`bun run lint`, `bun run typecheck`, `bun test` (`bun run check` also runs the sqld backend). After changing server schemas, regenerate the web API types with `bun run --cwd apps/web gen:api`. Each sqld test run leaks one `sqld` process (the preload's exit hook doesn't fire); kill the ones your run started.
+`bun run lint`, `bun run typecheck`, `bun run test` (`bun run check` also runs the sqld backend). Use `bun run test`, not bare `bun test`: only the script's `--timeout` flag applies to every file (#54). After changing server schemas, regenerate the web API types with `bun run --cwd apps/web gen:api`. Each sqld test run leaks one `sqld` process (the preload's exit hook doesn't fire); kill the ones your run started.
 
 Browser tests: `bun run build:web`, then `bun run e2e`. A fresh worktree has no web build, and without one every e2e test times out on "The web UI has not been built". Set `COSIMO_E2E_PORT` to run beside another e2e run. CI retries a serial file (such as `books.e2e.ts`) as a whole against the same database, so failures on the retry can be fallout; read the first attempt's error.
 
@@ -89,6 +89,6 @@ If a step fails (auth, a push rejected, a merge conflict), stop, and tell the us
 > - The page opens on All; links from "to categorize" counts pass `status=todo`.
 > - Rows waiting in the review queue leave the to-categorize counts.
 > - Search sits in the list toolbar, not next to the account selector.
-> **Done:** lint, typecheck, `bun test`, and `gen:api` rerun. No commits.
+> **Done:** lint, typecheck, `bun run test`, and `gen:api` rerun. No commits.
 
 In review, the main session found and fixed a doubled-parentheses amount the builder had introduced, plus a misleading MCP description. That's why step 3 exists.

@@ -166,7 +166,7 @@ describe(`pre-migration backup (${DB_MODE})`, () => {
         await addOrg(e, "Closed Co", orgMigrations.length, { archived: true }),
       ];
       await startUp(e, ids);
-    }, 60_000);
+    });
   }
 
   for (const n of levels(orgMigrations.length)) {
@@ -174,6 +174,6 @@ describe(`pre-migration backup (${DB_MODE})`, () => {
       const e = await instance(systemMigrations.length);
       const ids = [await addOrg(e, "Old Co", n), await addOrg(e, "Closed Co", n, { archived: true })];
       await startUp(e, ids);
-    }, 60_000);
+    });
   }
 });
