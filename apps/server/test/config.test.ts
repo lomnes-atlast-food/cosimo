@@ -28,3 +28,25 @@ describe("updates config", () => {
     expect(row).toMatchObject({ value: "", secret: true });
   });
 });
+
+describe("anchoring config", () => {
+  test("public timestamps are on by default with the public services", () => {
+    expect(defaultConfig().anchoring).toEqual({
+      enabled: true,
+      ots_calendars:
+        "https://alice.btc.calendar.opentimestamps.org,https://bob.btc.calendar.opentimestamps.org,https://finney.calendar.eternitywall.com",
+      tsa_url: "https://freetsa.org/tsr",
+      tsa_ca_file: "",
+      bitcoin_api: "https://blockstream.info/api",
+    });
+  });
+
+  test("COSIMO_ANCHORING_* overrides them", () => {
+    const cfg = applyEnv(defaultConfig(), {
+      COSIMO_ANCHORING_ENABLED: "0",
+      COSIMO_ANCHORING_OTS_CALENDARS: "https://a.example",
+      COSIMO_ANCHORING_TSA_URL: "",
+    });
+    expect(cfg.anchoring).toMatchObject({ enabled: false, ots_calendars: "https://a.example", tsa_url: "" });
+  });
+});

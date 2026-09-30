@@ -13,6 +13,7 @@ They use the same container image and environment variables.
 | Public URL | `COSIMO_SERVER_PUBLIC_URL=https://books.example.com`, used for links in email, claim links, OAuth, and Plaid webhooks. |
 | Proxy headers | `COSIMO_SERVER_TRUST_PROXY=true` when behind a reverse proxy or platform router. |
 | One instance | The scheduler (bank sync, backups, reminders) runs in-process. Run exactly one replica and don't scale to zero. |
+| Outbound HTTPS | To the public timestamp services ([below](#public-timestamps)), unless you turn timestamping off. |
 
 Any config key can be set as `COSIMO_<SECTION>_<KEY>` (see `cosimo config list`). The image is
 `ghcr.io/steve-lomnes/cosimo:<version>`. It listens on port 8787 and runs as uid 10001.
@@ -25,6 +26,32 @@ echo '{"admin_email":"you@example.com","org_name":"My Business LLC","target":"do
 ```
 
 This prints a claim link. Open it to set your password.
+
+## Public timestamps
+
+Cosimo timestamps each org's chain heads once a day in public: with OpenTimestamps (proofs in the
+Bitcoin blockchain) and with an RFC 3161 timestamp authority. Anyone holding a proof and an export can
+then check the books through that point existed by that time, without trusting you or Cosimo
+([chain-format.md](chain-format.md#anchors-public-timestamps)). It's on by default. None of the
+services needs an account or API key, and only a SHA-256 digest leaves the server.
+
+The `[anchoring]` config section (`cosimo config set anchoring.<key>`, or `COSIMO_ANCHORING_<KEY>`):
+
+| Key | Default | Meaning |
+|---|---|---|
+| `enabled` | `true` | `false` (or `COSIMO_ANCHORING_ENABLED=0`) turns timestamping off. Existing proofs are still checked by `cosimo verify`. |
+| `ots_calendars` | `https://alice.btc.calendar.opentimestamps.org,https://bob.btc.calendar.opentimestamps.org,https://finney.calendar.eternitywall.com` | OpenTimestamps calendars, comma-separated. Each gets its own proof. `""` skips OpenTimestamps. |
+| `tsa_url` | `https://freetsa.org/tsr` | RFC 3161 timestamp authority. `""` skips RFC 3161. |
+| `tsa_ca_file` | `""` | A PEM file of extra roots trusted for `tsa_url`'s tokens. FreeTSA's root is built in; another authority's tokens fail verification until its root is here. |
+| `bitcoin_api` | `https://blockstream.info/api` | A block explorer with the Esplora API, used to confirm Bitcoin attestations. `https://mempool.space/api` works too. |
+
+The server needs outbound HTTPS to those hosts: `alice.btc.calendar.opentimestamps.org`,
+`bob.btc.calendar.opentimestamps.org`, `finney.calendar.eternitywall.com`, `freetsa.org`, and
+`blockstream.info` with the defaults. When one can't be reached, posting, checkpoints, and backups
+carry on as normal: the failure is recorded on the proof and under "Recent job errors" on the admin status page, the
+service is tried again on a later run, and `cosimo doctor` warns once the ledger has gone 3 days
+without a timestamp. `cosimo anchor <org>` timestamps now; `cosimo verify <org>` checks the proofs
+(`--offline` skips the block explorer).
 
 ## Docker (built in)
 

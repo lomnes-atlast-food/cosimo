@@ -9,6 +9,7 @@ import { loadConfig } from "../src/config.ts";
 import { createContext } from "../src/context.ts";
 import { silentLogger } from "../src/logger.ts";
 import { runDoctor } from "../src/services/doctor.ts";
+import { submitEntryTx } from "../src/services/ledger.ts";
 import { resolveAnswers } from "../src/setup/answers.ts";
 import { applyInit } from "../src/setup/init.ts";
 import { FakeBucket } from "./harness.ts";
@@ -103,6 +104,44 @@ describe("doctor", () => {
     expect(out.status).toBe("fail");
     expect(out.checks.some((c: { id: string }) => c.id === "chains")).toBe(true);
     expect(p.exitCode).toBe(1);
+  });
+
+  test("a ledger with no public timestamp for 3 days is a warning", async () => {
+    expect(byId(await runDoctor({ configPath, env: {}, fetchImpl: up })).anchors).toMatchObject({
+      status: "pass",
+    });
+    const ctx = await createContext(loadConfig(configPath, {}).effective, { logger: silentLogger, env: {} });
+    const h = await ctx.orgs.mustOpen(orgId);
+    const accts = await h.db
+      .select({ id: org.accounts.id, code: org.accounts.code })
+      .from(org.accounts)
+      .all();
+    const acct = (code: string) => accts.find((a) => a.code === code)!.id;
+    await h.write((tx) =>
+      submitEntryTx(
+        tx,
+        orgId,
+        { actor: "user", role: "owner", userId: null },
+        {
+          date: "2026-09-01",
+          memo: "old sale",
+          lines: [
+            { accountId: acct("1000"), amount: 100, description: null, contactId: null },
+            { accountId: acct("4000"), amount: -100, description: null, contactId: null },
+          ],
+        },
+      ),
+    );
+    await h.client.execute("drop trigger je_posted_immutable");
+    await h.client.execute("update journal_entries set posted_at = '2026-09-01T00:00:00.000Z'");
+    await ctx.close();
+    const c = byId(await runDoctor({ configPath, env: {}, fetchImpl: up }));
+    expect(c.anchors).toMatchObject({ status: "warn" });
+    expect(c.anchors!.message).toContain("Doctor Co: never timestamped, and ledger #1 was posted 2026-09-01");
+    expect(c.anchors!.remediation).toContain("cosimo anchor");
+    // Off means no check at all.
+    const off = byId(await runDoctor({ configPath, env: { COSIMO_ANCHORING_ENABLED: "0" }, fetchImpl: up }));
+    expect(off.anchors).toBeUndefined();
   });
 });
 

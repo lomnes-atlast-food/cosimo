@@ -38,7 +38,7 @@ registerContextPlugin((ctx) => {
 // Phase 2: ledger
 registerContextPlugin((ctx) => {
   ctx.orgs.addSeeder(coaSeeder);
-  registerLedgerJobs(ctx.config.jobs.verify_weekday);
+  registerLedgerJobs(ctx.config.jobs.verify_weekday, ctx.config.anchoring.enabled);
 });
 registerApiModule(ledgerRoutes);
 

@@ -1,3 +1,4 @@
+export * from "./anchor.ts";
 export * from "./canonical.ts";
 export * from "./chain.ts";
 export * from "./coa.ts";
@@ -8,3 +9,4 @@ export * from "./ledger.ts";
 export * from "./policy.ts";
 export * from "./recurrence.ts";
 export * from "./reports.ts";
+export * from "./tsa-roots.ts";

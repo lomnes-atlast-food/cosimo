@@ -1,10 +1,15 @@
+import type { AnchorVerifyResult } from "../../services/anchor-verify.ts";
+import { anchorVerifyOptions } from "../../services/anchors.ts";
 import { verifyOrg } from "../../services/chain.ts";
 import { CliError, emit, parse, withContext } from "../util.ts";
 
-const USAGE = `cosimo verify <org_id|--all> [--tail N]
-  Recompute the ledger and audit hash chains and report the first broken link.
-  --tail N   Only check the last N links of each chain (fast)
-  Exit code 6 when any chain fails verification.`;
+const USAGE = `cosimo verify <org_id|--all> [--tail N] [--offline]
+  Recompute the ledger and audit hash chains and report the first broken link. Also checks every
+  public timestamp (anchor) against the chains and its proof, and reports how far the ledger is
+  timestamped.
+  --tail N    Only check the last N links of each chain (fast)
+  --offline   Don't confirm Bitcoin attestations with the block explorer (anchoring.bitcoin_api)
+  Exit code 6 when any chain or timestamp fails verification.`;
 
 type VerifyRow = {
   org_id: string;
@@ -14,12 +19,14 @@ type VerifyRow = {
   audit: { ok: boolean; checked: number; head_seq: number; head_hash: string };
   checkpoint_mismatches: { chain: string; seq: number; expected: string; actual: string | null }[];
   first_break: { chain: string; seq: number; id: string | null; reason: string } | null;
+  anchors: AnchorVerifyResult;
 };
 
 export async function verifyCommand(argv: string[]) {
   const { values, positionals } = parse(argv, {
     all: { type: "boolean", default: false },
     tail: { type: "string" },
+    offline: { type: "boolean", default: false },
   });
   if (values.help || (!positionals[0] && !values.all)) {
     process.stdout.write(`${USAGE}\n`);
@@ -38,7 +45,10 @@ export async function verifyCommand(argv: string[]) {
       const reg = await ctx.orgs.get(id);
       if (!reg) throw new CliError(`Unknown org ${id}`, 1, "not_found");
       const h = await ctx.orgs.mustOpen(id);
-      const v = await verifyOrg(h.db, id, { tail });
+      const v = await verifyOrg(h.db, id, {
+        tail,
+        anchors: anchorVerifyOptions(ctx, { network: !values.offline }),
+      });
       results.push({
         org_id: id,
         name: reg.name,
@@ -57,6 +67,7 @@ export async function verifyCommand(argv: string[]) {
         },
         checkpoint_mismatches: v.checkpoints.mismatches,
         first_break: v.firstBreak,
+        anchors: v.anchors,
       });
     }
     const failed = results.filter((r) => !r.ok);
@@ -81,6 +92,12 @@ export async function verifyCommand(argv: string[]) {
               `     checkpoint mismatch: ${m.chain} #${m.seq} expected ${m.expected}, found ${m.actual ?? "nothing"}\n`,
             );
           }
+          process.stdout.write(`     timestamps: ${anchorSummary(r.anchors)}\n`);
+          for (const p of r.anchors.problems) {
+            process.stdout.write(
+              `     timestamp mismatch: ledger #${p.ledger_seq} via ${p.service}: ${p.problem}\n`,
+            );
+          }
         }
       });
     if (failed.length) {
@@ -90,4 +107,28 @@ export async function verifyCommand(argv: string[]) {
       });
     }
   });
+}
+
+function anchorSummary(a: AnchorVerifyResult): string {
+  const c = a.coverage;
+  if (!a.checked && !a.failed) return "none";
+  const parts = [`${a.complete} complete, ${a.pending} pending, ${a.failed} failed`];
+  parts.push(
+    c.anchored_through
+      ? `timestamped through ledger #${c.anchored_through.ledger_seq} at ${c.anchored_through.at}` +
+          ` (${c.unanchored_links} link(s) since; first ${c.earliest_anchor_at})`
+      : "nothing timestamped yet",
+  );
+  if (c.late_entries)
+    parts.push(
+      `${c.late_entries} entr${c.late_entries === 1 ? "y" : "ies"} timestamped over 48h after posting`,
+    );
+  const bitcoin = {
+    checked: "Bitcoin confirmed",
+    "not checked": "Bitcoin not checked",
+    unavailable: "Bitcoin not checked (explorer unreachable)",
+    none: "",
+  }[a.bitcoin];
+  if (bitcoin) parts.push(bitcoin);
+  return parts.join("; ");
 }

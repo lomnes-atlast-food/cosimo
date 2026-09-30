@@ -91,6 +91,7 @@ The tables most readers want:
 | `rules`, `review_items`, `review_policy` | Categorization rules and the review queue |
 | `attachments`, `attachment_links` | Attachment metadata; the bytes are in `attachments/<storage_key>` |
 | `audit_log`, `chain_checkpoints` | The audit chain and recorded chain heads |
+| `chain_anchors` | Public timestamps of the chain heads: OpenTimestamps proofs and RFC 3161 tokens, base64 in `proof` ([chain-format.md](chain-format.md#anchors-public-timestamps)) |
 
 Other tables (`posting_context`, `recurring_templates`, `recurring_runs`, `import_batches`,
 `csv_profiles`, `bank_connections`, `comments`, `org_notes`, `schema_meta`) are exported too, so an

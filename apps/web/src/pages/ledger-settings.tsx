@@ -1,7 +1,7 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useNavigate } from "@tanstack/react-router";
 import { useEffect, useState } from "react";
-import { api, unwrap } from "../api/client";
+import { api, download, unwrap } from "../api/client";
 import {
   Alert,
   Badge,
@@ -126,8 +126,9 @@ export function Integrity() {
         <p className="text-sm text-zinc-600 dark:text-zinc-400">
           Every posted entry and every audit log row is linked to the one before it by a SHA-256 hash.
           Verification recomputes both chains and names the first broken link. This makes changes to past
-          records detectable, not impossible: someone with full database access could rewrite the whole chain,
-          which shows up against any checkpoint or printed report kept elsewhere.
+          records detectable, not impossible: someone with full database access could rewrite the whole chain.
+          Public timestamps (below) catch that too, because the chain heads are also recorded outside this
+          database, where anyone can check them.
         </p>
         {cps.data && (
           <p className="mt-3 text-sm">
@@ -141,7 +142,8 @@ export function Integrity() {
             (v.ok ? (
               <Alert kind="success">
                 Both chains verified: {v.ledger.checked} ledger links and {v.audit.checked} audit links. All
-                checkpoints match.
+                checkpoints match
+                {v.anchors.checked > 0 ? `, and so do ${v.anchors.checked} public timestamp(s).` : "."}
               </Alert>
             ) : (
               <Alert kind="error">
@@ -151,10 +153,13 @@ export function Integrity() {
                   : ""}
                 {v.checkpoints.mismatches.length > 0 &&
                   ` ${v.checkpoints.mismatches.length} checkpoint(s) no longer match.`}
+                {v.anchors.problems.length > 0 &&
+                  ` ${v.anchors.problems.length} public timestamp(s) no longer match the books: ledger #${v.anchors.problems[0]!.ledger_seq}, ${v.anchors.problems[0]!.problem}.`}
               </Alert>
             ))}
         </div>
       </Card>
+      <Timestamps />
       <Card title="Checkpoints">
         {cps.isLoading ? (
           <Loading />
@@ -188,6 +193,173 @@ export function Integrity() {
         )}
       </Card>
     </div>
+  );
+}
+
+// ----------------------------------------------------------------------------- public timestamps
+
+const serviceHost = (url: string) => {
+  try {
+    return new URL(url).host;
+  } catch {
+    return url;
+  }
+};
+
+function Timestamps() {
+  const orgId = useOrgId();
+  const { isOwner } = useRole();
+  const qc = useQueryClient();
+  const list = useQuery({
+    queryKey: ["anchors", orgId],
+    queryFn: () => unwrap(api.GET("/api/v1/orgs/{orgId}/anchors", { params: { path: { orgId } } })),
+  });
+  const now = useMutation({
+    mutationFn: () => unwrap(api.POST("/api/v1/orgs/{orgId}/anchors", { params: { path: { orgId } } })),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["anchors", orgId] }),
+  });
+  const d = list.data;
+  const cov = d?.check.coverage;
+  const result = now.data?.result;
+  return (
+    <Card
+      title="Independent timestamps"
+      actions={
+        isOwner &&
+        d?.enabled && (
+          <Button size="sm" variant="secondary" loading={now.isPending} onClick={() => now.mutate()}>
+            Timestamp now
+          </Button>
+        )
+      }
+    >
+      <p className="text-sm text-zinc-600 dark:text-zinc-400">
+        Once a day the digest of both chain heads is timestamped publicly: in the Bitcoin blockchain through
+        OpenTimestamps, and by an RFC 3161 timestamp authority. Only the digest leaves this server. Anyone
+        with a proof and an export of the books can check, without Cosimo, that the books through that link
+        existed by that time.
+      </p>
+      {list.isLoading ? (
+        <Loading />
+      ) : (
+        d && (
+          <div className="mt-3 space-y-3">
+            {!d.enabled && (
+              <p className="text-sm text-zinc-500">Timestamping is off (anchoring.enabled in the config).</p>
+            )}
+            {cov?.anchored_through ? (
+              <p className="text-sm">
+                Timestamped through link <span className="num">#{cov.anchored_through.ledger_seq}</span> on{" "}
+                {fmtDateTime(cov.anchored_through.at)}, verifiable by anyone.
+                {cov.unanchored_links > 0 &&
+                  ` ${cov.unanchored_links} newer link(s) are not timestamped yet.`}
+                {cov.earliest_anchor_at &&
+                  ` First timestamp: ${fmtDate(cov.earliest_anchor_at.slice(0, 10))}.`}
+              </p>
+            ) : (
+              d.enabled && <p className="text-sm text-zinc-500">Nothing has been timestamped yet.</p>
+            )}
+            {cov && cov.late_entries > 0 && (
+              <p className="text-sm text-zinc-500">
+                {cov.late_entries} entr{cov.late_entries === 1 ? "y was" : "ies were"} first timestamped more
+                than 48 hours after posting.
+              </p>
+            )}
+            {!d.check.ok && (
+              <Alert kind="error">
+                {d.check.problems.length} timestamp(s) no longer match the books. First: ledger #
+                {d.check.problems[0]?.ledger_seq}, {d.check.problems[0]?.problem}.
+              </Alert>
+            )}
+            {result && (
+              <Alert
+                kind={
+                  result.status === "anchored" || result.status === "unchanged"
+                    ? "success"
+                    : result.status === "broken" || result.status === "failed"
+                      ? "error"
+                      : "warn"
+                }
+              >
+                {result.message}
+                {result.errors.length > 0 && ` (${result.errors.join("; ")})`}
+              </Alert>
+            )}
+            <ErrorText error={now.error} />
+            {d.data.length > 0 && (
+              <Table>
+                <thead>
+                  <tr>
+                    <th className={th}>When</th>
+                    <th className={th}>Kind</th>
+                    <th className={th}>Service</th>
+                    <th className={th}>Status</th>
+                    <th className={th}>Links</th>
+                    <th className={th}>Proof</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-zinc-100 dark:divide-zinc-800">
+                  {d.data.map((a) => (
+                    <tr key={a.id}>
+                      <td className={`${td} whitespace-nowrap`}>{fmtDateTime(a.created_at)}</td>
+                      <td className={td}>{a.kind === "ots" ? "Bitcoin (OpenTimestamps)" : "RFC 3161"}</td>
+                      <td className={td}>{serviceHost(a.service)}</td>
+                      <td className={td}>
+                        <Badge
+                          tone={a.status === "complete" ? "green" : a.status === "pending" ? "amber" : "red"}
+                        >
+                          {a.status}
+                        </Badge>
+                        <div className="mt-0.5 text-xs text-zinc-500">
+                          {a.status === "complete" && a.attested_at
+                            ? `${a.block_height ? `block ${a.block_height}, ` : ""}${fmtDateTime(a.attested_at)}`
+                            : a.last_error}
+                        </div>
+                      </td>
+                      <td className={`${td} num whitespace-nowrap`}>
+                        ledger #{a.ledger_seq}, audit #{a.audit_seq}
+                      </td>
+                      <td className={`${td} whitespace-nowrap`}>
+                        {a.status !== "failed" && (
+                          <>
+                            <Button
+                              size="sm"
+                              variant="ghost"
+                              onClick={() =>
+                                download(
+                                  `/api/v1/orgs/${orgId}/anchors/${a.id}/proof`,
+                                  a.kind === "ots"
+                                    ? `anchor-${a.ledger_seq}.txt.ots`
+                                    : `anchor-${a.ledger_seq}.tsr`,
+                                )
+                              }
+                            >
+                              {a.kind === "ots" ? ".ots" : ".tsr"}
+                            </Button>
+                            <Button
+                              size="sm"
+                              variant="ghost"
+                              onClick={() =>
+                                download(
+                                  `/api/v1/orgs/${orgId}/anchors/${a.id}/proof?file=preimage`,
+                                  `anchor-${a.ledger_seq}.txt`,
+                                )
+                              }
+                            >
+                              .txt
+                            </Button>
+                          </>
+                        )}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </Table>
+            )}
+          </div>
+        )
+      )}
+    </Card>
   );
 }
 

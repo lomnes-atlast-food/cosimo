@@ -807,6 +807,45 @@ export const chainCheckpoints = sqliteTable(
   (t) => [index("chain_checkpoints_chain_idx").on(t.chain, t.seq)],
 );
 
+/**
+ * Public timestamps of the chain heads (SPEC §6.5, #11): one row per service (OpenTimestamps
+ * calendar or RFC 3161 authority) per digest. Append-only apart from a pending proof being
+ * completed or failed (triggers in migration 0009).
+ */
+export const chainAnchors = sqliteTable(
+  "chain_anchors",
+  {
+    id: text("id").primaryKey(),
+    kind: text("kind", { enum: ["ots", "rfc3161"] }).notNull(),
+    /** Calendar or TSA URL. */
+    service: text("service").notNull(),
+    ledgerSeq: integer("ledger_seq").notNull(),
+    ledgerHash: text("ledger_hash").notNull(),
+    auditSeq: integer("audit_seq").notNull(),
+    auditHash: text("audit_hash").notNull(),
+    /** SHA-256 of the anchor preimage (docs/chain-format.md), hex. */
+    digest: text("digest").notNull(),
+    status: text("status", { enum: ["pending", "complete", "failed"] }).notNull(),
+    /** Base64 of the .ots file or the DER TimeStampResp (.tsr); null when the request failed. */
+    proof: text("proof"),
+    /** TSA genTime, or the Bitcoin block time. */
+    attestedAt: text("attested_at"),
+    blockHeight: integer("block_height"),
+    /** What asked for it: daily, manual, year_end. */
+    reason: text("reason"),
+    attempts: integer("attempts").notNull().default(0),
+    lastError: text("last_error"),
+    createdAt: text("created_at").notNull().default(now),
+    updatedAt: text("updated_at").notNull().default(now),
+  },
+  (t) => [
+    index("chain_anchors_ledger_idx").on(t.ledgerSeq),
+    index("chain_anchors_digest_idx").on(t.digest),
+    check("chain_anchors_kind_ck", sql`${t.kind} in ('ots','rfc3161')`),
+    check("chain_anchors_status_ck", sql`${t.status} in ('pending','complete','failed')`),
+  ],
+);
+
 export const comments = sqliteTable(
   "comments",
   {

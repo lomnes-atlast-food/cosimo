@@ -5780,10 +5780,15 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** Recompute both hash chains and report the first broken link */
+        /**
+         * Recompute both hash chains and report the first broken link
+         * @description Also checks every public timestamp (anchor) against the chains and its own proof. With `network=true`, complete OpenTimestamps proofs are confirmed against the configured Bitcoin block explorer; if it can't be reached, `anchors.bitcoin` is `unavailable` and verification doesn't fail for that.
+         */
         post: {
             parameters: {
-                query?: never;
+                query?: {
+                    network?: "true" | "false";
+                };
                 header?: {
                     /** @description Makes a retry safe: the same key and body replay the first response. */
                     "Idempotency-Key"?: string;
@@ -5869,6 +5874,322 @@ export interface paths {
                 };
             };
         };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/orgs/{orgId}/anchors": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List public timestamps of the chain heads (newest first) with coverage
+         * @description Up to 200 anchors without their proof bytes, whether timestamping is on (`anchoring.enabled`), and an offline check of every stored anchor: `check.coverage` says how far the ledger is timestamped.
+         */
+        get: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    orgId: string;
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            enabled: boolean;
+                            data: components["schemas"]["Anchor"][];
+                            check: components["schemas"]["AnchorCheck"];
+                        };
+                    };
+                };
+                /** @description Invalid request */
+                400: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+                /** @description Not authenticated */
+                401: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+                /** @description Forbidden */
+                403: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+                /** @description Not found */
+                404: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+                /** @description Conflict */
+                409: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+                /** @description Rule or invariant violation */
+                422: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+                /** @description Rate limited */
+                429: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+            };
+        };
+        put?: never;
+        /**
+         * Timestamp the chain heads now and check pending proofs (owner)
+         * @description Sends the digest of the current ledger and audit heads to each configured OpenTimestamps calendar and RFC 3161 authority that doesn't already hold them, then asks calendars about pending proofs. Refuses (status `broken`) when the chain doesn't verify. 409 when timestamping is off.
+         */
+        post: {
+            parameters: {
+                query?: never;
+                header?: {
+                    /** @description Makes a retry safe: the same key and body replay the first response. */
+                    "Idempotency-Key"?: string;
+                };
+                path: {
+                    orgId: string;
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            result: components["schemas"]["AnchorNowResult"];
+                            upgrade: {
+                                checked: number;
+                                completed: number;
+                                failed: number;
+                                pending: number;
+                                errors: string[];
+                            };
+                        };
+                    };
+                };
+                /** @description Invalid request */
+                400: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+                /** @description Not authenticated */
+                401: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+                /** @description Forbidden */
+                403: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+                /** @description Not found */
+                404: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+                /** @description Conflict */
+                409: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+                /** @description Rule or invariant violation */
+                422: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+                /** @description Rate limited */
+                429: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/orgs/{orgId}/anchors/{anchorId}/proof": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Download an anchor's proof (.ots or .tsr) or the text it commits to
+         * @description `file=proof` (default) returns the OpenTimestamps file `anchor-<seq>.txt.ots` or the RFC 3161 response `anchor-<seq>.tsr`; `file=preimage` returns `anchor-<seq>.txt`. Save both side by side and check them with `ots verify` or `openssl ts -verify` (docs/chain-format.md).
+         */
+        get: {
+            parameters: {
+                query?: {
+                    file?: "proof" | "preimage";
+                };
+                header?: never;
+                path: {
+                    orgId: string;
+                    anchorId: string;
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description File */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "text/plain": string;
+                        "application/octet-stream": string;
+                    };
+                };
+                /** @description Invalid request */
+                400: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+                /** @description Not authenticated */
+                401: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+                /** @description Forbidden */
+                403: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+                /** @description Not found */
+                404: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+                /** @description Conflict */
+                409: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+                /** @description Rule or invariant violation */
+                422: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+                /** @description Rate limited */
+                429: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+            };
+        };
+        put?: never;
+        post?: never;
         delete?: never;
         options?: never;
         head?: never;
@@ -19313,7 +19634,7 @@ export interface paths {
         };
         /**
          * Download the year-end package (accountant or higher)
-         * @description A ZIP named `<org>-<year>-year-end.zip` with PDF and CSV versions of the P&L, balance sheet, trial balance, general ledger, tax line summary, 1099 vendor summary, AR and AP aging, and reconciliation reports for the final month, plus README.txt and chain.json (ledger and audit chain heads). `year` is the fiscal year that ends in that calendar year; the 1099 summary covers calendar year `year`. Reports use the org's default basis. Generating a package records a chain checkpoint with reason `year_end`.
+         * @description A ZIP named `<org>-<year>-year-end.zip` with PDF and CSV versions of the P&L, balance sheet, trial balance, general ledger, tax line summary, 1099 vendor summary, AR and AP aging, and reconciliation reports for the final month, plus README.txt, chain.json (ledger and audit chain heads), and anchors/ with public timestamps of those heads and the latest confirmed ones (see docs/chain-format.md). `year` is the fiscal year that ends in that calendar year; the 1099 summary covers calendar year `year`. Reports use the org's default basis. Generating a package records a chain checkpoint with reason `year_end` and, with anchoring on, timestamps the heads (best effort: a network failure doesn't stop the package).
          */
         get: {
             parameters: {
@@ -19720,6 +20041,67 @@ export interface components {
                 id: string | null;
                 reason: string;
             } | null;
+            anchors: components["schemas"]["AnchorCheck"];
+        };
+        AnchorCheck: {
+            ok: boolean;
+            checked: number;
+            complete: number;
+            pending: number;
+            failed: number;
+            /** @enum {string} */
+            bitcoin: "checked" | "not checked" | "unavailable" | "none";
+            /** @enum {string} */
+            tsa_trust: "checked" | "not checked" | "none";
+            problems: {
+                id: string;
+                /** @enum {string} */
+                kind: "ots" | "rfc3161";
+                service: string;
+                ledger_seq: number;
+                audit_seq: number;
+                problem: string;
+            }[];
+            coverage: components["schemas"]["AnchorCoverage"];
+        };
+        AnchorCoverage: {
+            anchored_through: {
+                ledger_seq: number;
+                at: string;
+            } | null;
+            earliest_anchor_at: string | null;
+            unanchored_links: number;
+            late_entries: number;
+        };
+        Anchor: {
+            id: string;
+            /** @enum {string} */
+            kind: "ots" | "rfc3161";
+            service: string;
+            /** @enum {string} */
+            status: "pending" | "complete" | "failed";
+            ledger_seq: number;
+            ledger_hash: string;
+            audit_seq: number;
+            audit_hash: string;
+            digest: string;
+            attested_at: string | null;
+            block_height: number | null;
+            reason: string | null;
+            attempts: number;
+            last_error: string | null;
+            created_at: string;
+            updated_at: string;
+        };
+        AnchorNowResult: {
+            /** @enum {string} */
+            status: "anchored" | "partial" | "failed" | "unchanged" | "waiting" | "broken" | "disabled";
+            message: string;
+            digest: string | null;
+            ledger_seq: number;
+            audit_seq: number;
+            created: number;
+            errors: string[];
         };
         Checkpoint: {
             id: string;

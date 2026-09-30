@@ -11,6 +11,17 @@ import {
   listAccounts,
   updateAccountTx,
 } from "../../services/accounts.ts";
+import { verifyAnchors } from "../../services/anchor-verify.ts";
+import {
+  anchorNow,
+  anchorPreimageOf,
+  anchorVerifyOptions,
+  anchorView,
+  getAnchor,
+  listAnchors,
+  proofFileName,
+  upgradePending,
+} from "../../services/anchors.ts";
 import { checkpoint, ledgerHead, verifyOrg } from "../../services/chain.ts";
 import {
   createDraftTx,
@@ -29,6 +40,7 @@ import {
 } from "../../services/ledger.ts";
 import { runForDoc } from "../../services/recurring.ts";
 import { REPORT_KEYS, reportCsv, reportPdf, runReport } from "../../services/reports.ts";
+import { conflict, notFound } from "../errors.ts";
 import { requireOwner, requireWriter } from "../middleware.ts";
 import {
   bearerSecurity,
@@ -183,6 +195,68 @@ const ChainResultSchema = z.object({
   head_hash: z.string(),
   first_break: BreakSchema,
 });
+const AnchorCoverageSchema = z
+  .object({
+    anchored_through: z.object({ ledger_seq: z.number().int(), at: z.string() }).nullable(),
+    earliest_anchor_at: z.string().nullable(),
+    unanchored_links: z.number().int(),
+    late_entries: z.number().int(),
+  })
+  .openapi("AnchorCoverage");
+const AnchorCheckSchema = z
+  .object({
+    ok: z.boolean(),
+    checked: z.number().int(),
+    complete: z.number().int(),
+    pending: z.number().int(),
+    failed: z.number().int(),
+    bitcoin: z.enum(["checked", "not checked", "unavailable", "none"]),
+    tsa_trust: z.enum(["checked", "not checked", "none"]),
+    problems: z.array(
+      z.object({
+        id: z.string(),
+        kind: z.enum(["ots", "rfc3161"]),
+        service: z.string(),
+        ledger_seq: z.number().int(),
+        audit_seq: z.number().int(),
+        problem: z.string(),
+      }),
+    ),
+    coverage: AnchorCoverageSchema,
+  })
+  .openapi("AnchorCheck");
+const AnchorSchema = z
+  .object({
+    id: z.string(),
+    kind: z.enum(["ots", "rfc3161"]),
+    service: z.string(),
+    status: z.enum(["pending", "complete", "failed"]),
+    ledger_seq: z.number().int(),
+    ledger_hash: z.string(),
+    audit_seq: z.number().int(),
+    audit_hash: z.string(),
+    digest: z.string(),
+    attested_at: z.string().nullable(),
+    block_height: z.number().int().nullable(),
+    reason: z.string().nullable(),
+    attempts: z.number().int(),
+    last_error: z.string().nullable(),
+    created_at: z.string(),
+    updated_at: z.string(),
+  })
+  .openapi("Anchor");
+const AnchorNowSchema = z
+  .object({
+    status: z.enum(["anchored", "partial", "failed", "unchanged", "waiting", "broken", "disabled"]),
+    message: z.string(),
+    digest: z.string().nullable(),
+    ledger_seq: z.number().int(),
+    audit_seq: z.number().int(),
+    created: z.number().int(),
+    errors: z.array(z.string()),
+  })
+  .openapi("AnchorNowResult");
+
 const VerifySchema = z
   .object({
     ok: z.boolean(),
@@ -200,6 +274,7 @@ const VerifySchema = z
       ),
     }),
     first_break: BreakSchema,
+    anchors: AnchorCheckSchema,
   })
   .openapi("VerifyResult");
 
@@ -263,6 +338,7 @@ export function verifyView(v: Awaited<ReturnType<typeof verifyOrg>>) {
     audit: chainView(v.audit),
     checkpoints: v.checkpoints,
     first_break: v.firstBreak,
+    anchors: v.anchors,
   };
 }
 
@@ -743,13 +819,125 @@ export function ledgerRoutes() {
       path: "/orgs/{orgId}/verify",
       tags: ["Integrity"],
       summary: "Recompute both hash chains and report the first broken link",
+      description:
+        "Also checks every public timestamp (anchor) against the chains and its own proof. With `network=true`, complete OpenTimestamps proofs are confirmed against the configured Bitcoin block explorer; if it can't be reached, `anchors.bitcoin` is `unavailable` and verification doesn't fail for that.",
       security: bearerSecurity,
-      request: { params: OrgParams },
+      request: {
+        params: OrgParams,
+        query: z.object({ network: z.enum(["true", "false"]).optional() }),
+      },
       responses: { 200: json(VerifySchema), ...errorResponses },
     }),
     async (c) => {
       const o = c.get("org");
-      return c.json(verifyView(await verifyOrg(o.handle.db, o.id)), 200);
+      const anchors = anchorVerifyOptions(c.get("ctx"), { network: c.req.valid("query").network === "true" });
+      return c.json(verifyView(await verifyOrg(o.handle.db, o.id, { anchors })), 200);
+    },
+  );
+
+  const AnchorParams = OrgParams.extend({
+    anchorId: Id.openapi({ param: { name: "anchorId", in: "path" } }),
+  });
+
+  r.openapi(
+    createRoute({
+      method: "get",
+      path: "/orgs/{orgId}/anchors",
+      tags: ["Integrity"],
+      summary: "List public timestamps of the chain heads (newest first) with coverage",
+      description:
+        "Up to 200 anchors without their proof bytes, whether timestamping is on (`anchoring.enabled`), and an offline check of every stored anchor: `check.coverage` says how far the ledger is timestamped.",
+      security: bearerSecurity,
+      request: { params: OrgParams },
+      responses: {
+        200: json(z.object({ enabled: z.boolean(), data: z.array(AnchorSchema), check: AnchorCheckSchema })),
+        ...errorResponses,
+      },
+    }),
+    async (c) => {
+      const o = c.get("org");
+      const ctx = c.get("ctx");
+      const rows = await listAnchors(o.handle);
+      const check = await verifyAnchors(o.handle.db, o.id, anchorVerifyOptions(ctx));
+      return c.json({ enabled: ctx.config.anchoring.enabled, data: rows.map(anchorView), check }, 200);
+    },
+  );
+
+  r.openapi(
+    createRoute({
+      method: "get",
+      path: "/orgs/{orgId}/anchors/{anchorId}/proof",
+      tags: ["Integrity"],
+      summary: "Download an anchor's proof (.ots or .tsr) or the text it commits to",
+      description:
+        "`file=proof` (default) returns the OpenTimestamps file `anchor-<seq>.txt.ots` or the RFC 3161 response `anchor-<seq>.tsr`; `file=preimage` returns `anchor-<seq>.txt`. Save both side by side and check them with `ots verify` or `openssl ts -verify` (docs/chain-format.md).",
+      security: bearerSecurity,
+      request: {
+        params: AnchorParams,
+        query: z.object({ file: z.enum(["proof", "preimage"]).default("proof") }),
+      },
+      responses: {
+        200: {
+          content: {
+            "text/plain": { schema: z.string() },
+            "application/octet-stream": { schema: z.string().openapi({ format: "binary" }) },
+          },
+          description: "File",
+        },
+        ...errorResponses,
+      },
+    }),
+    async (c) => {
+      const o = c.get("org");
+      const row = await getAnchor(o.handle, c.req.valid("param").anchorId);
+      if (!row) throw notFound("Anchor");
+      if (c.req.valid("query").file === "preimage")
+        return c.body(anchorPreimageOf(o.id, row), 200, {
+          "content-type": "text/plain; charset=utf-8",
+          "content-disposition": `attachment; filename="anchor-${row.ledgerSeq}.txt"`,
+        });
+      if (!row.proof) throw notFound("Proof");
+      return c.body(Buffer.from(row.proof, "base64") as unknown as ArrayBuffer, 200, {
+        "content-type": row.kind === "ots" ? "application/octet-stream" : "application/timestamp-reply",
+        "content-disposition": `attachment; filename="${proofFileName(row)}"`,
+      });
+    },
+  );
+
+  r.openapi(
+    createRoute({
+      method: "post",
+      path: "/orgs/{orgId}/anchors",
+      tags: ["Integrity"],
+      summary: "Timestamp the chain heads now and check pending proofs (owner)",
+      description:
+        "Sends the digest of the current ledger and audit heads to each configured OpenTimestamps calendar and RFC 3161 authority that doesn't already hold them, then asks calendars about pending proofs. Refuses (status `broken`) when the chain doesn't verify. 409 when timestamping is off.",
+      security: bearerSecurity,
+      request: { params: OrgParams },
+      responses: {
+        200: json(
+          z.object({
+            result: AnchorNowSchema,
+            upgrade: z.object({
+              checked: z.number().int(),
+              completed: z.number().int(),
+              failed: z.number().int(),
+              pending: z.number().int(),
+              errors: z.array(z.string()),
+            }),
+          }),
+        ),
+        ...errorResponses,
+      },
+    }),
+    async (c) => {
+      const o = requireOwner(c);
+      const ctx = c.get("ctx");
+      if (!ctx.config.anchoring.enabled)
+        throw conflict("Timestamping is off (anchoring.enabled in the config).", "anchoring_disabled");
+      const result = await anchorNow(ctx, o.handle, o.id, "manual");
+      const upgrade = await upgradePending(ctx, o.handle, o.id);
+      return c.json({ result, upgrade }, 200);
     },
   );
 

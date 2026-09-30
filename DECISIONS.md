@@ -406,3 +406,25 @@ Choices made during the build. SPEC.md is the source of truth for requirements; 
   `money: boolean` (required, so a new tool can't skip it) and `tool()` appends one standard sentence
   to the description when it's true; the server instructions say it too, and a `tools/list` test
   checks both.
+- **Public timestamps instead of emailed checkpoints** (#11): a checkpoint in the same database can be
+  rewritten along with the chains, and an emailed one only helps if SMTP is set up, someone keeps the
+  mail, and a third party believes an inbox the owner controls. The goal is books a third party can
+  check without trusting the owner, so the digest of both chain heads is timestamped by services
+  outside the owner's control. **OpenTimestamps and RFC 3161 together**: OpenTimestamps anchors in
+  Bitcoin with no trusted party and no account, but takes hours to confirm and is unfamiliar to
+  auditors; an RFC 3161 token (FreeTSA by default) is immediate, recognized, and checkable with
+  openssl, but rests on trusting the authority. Each covers the other's gap. **On by default**,
+  because a timeline only proves something if it starts early: books first timestamped the day
+  someone asks are only evidence from that day. Only a digest leaves the server (OpenTimestamps adds
+  a nonce), nothing needs a key, and `anchoring.enabled = false` turns it off. **No new
+  dependencies**: the server ships as one compiled binary and keeps its dependencies few, so the
+  `.ots` format and a minimal DER reader and writer are written in `@cosimo/core`, and signatures and
+  certificates use `node:crypto`. Tokens must chain to a trusted root (FreeTSA's is built in, others
+  via `anchoring.tsa_ca_file`): a token signed by any key its own embedded certificate names would
+  let whoever rewrote the books sign an earlier date. Anchoring never blocks posting, checkpoints,
+  backups, or the year-end package; a chain whose recent links don't verify is never timestamped; an
+  anchor that no longer matches fails verification, while coverage gaps (deleted anchors, late
+  timestamps) are reported but don't, since deleting proofs is exactly what a rewrite can do and the
+  earliest-timestamp date is what a verifier should weigh. A failed service is retried after a
+  3-hour back-off, on the next daily run in practice, rather than every scheduler tick, because
+  failed attempts are append-only rows.

@@ -64,6 +64,13 @@
       "when": 1790740124752,
       "tag": "0008_contact_default_terms",
       "breakpoints": true
+    },
+    {
+      "idx": 9,
+      "version": "6",
+      "when": 1790770343774,
+      "tag": "0009_chain_anchors",
+      "breakpoints": true
     }
   ]
 }
