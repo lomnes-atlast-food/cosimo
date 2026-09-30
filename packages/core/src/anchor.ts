@@ -644,9 +644,17 @@ export interface TsaVerified {
 
 /** Split a PEM bundle into certificates. */
 export function parsePemCertificates(pem: string): X509Certificate[] {
-  return (pem.match(/-----BEGIN CERTIFICATE-----[\s\S]+?-----END CERTIFICATE-----/g) ?? []).map(
-    (p) => new X509Certificate(p),
-  );
+  // A linear scan rather than a lazy regex, which backtracks polynomially on repeated BEGIN lines.
+  const begin = "-----BEGIN CERTIFICATE-----";
+  const end = "-----END CERTIFICATE-----";
+  const out: X509Certificate[] = [];
+  for (let i = pem.indexOf(begin); i !== -1; ) {
+    const j = pem.indexOf(end, i + begin.length);
+    if (j === -1) break;
+    out.push(new X509Certificate(pem.slice(pem.lastIndexOf(begin, j), j + end.length)));
+    i = pem.indexOf(begin, j + end.length);
+  }
+  return out;
 }
 
 const validAt = (c: X509Certificate, at: Date) =>
