@@ -25,10 +25,17 @@ In the Stripe dashboard, under **Developers → API keys → Create restricted k
 | Balance transactions | Read |
 | Webhook Endpoints | Write |
 | Events | Read |
+| Refunds | Read |
+| Disputes | Read |
+| Payouts | Read |
 
-Every permission in the table is needed; Webhook Endpoints write only when Cosimo registers the
-webhook itself (see [below](#webhooks-or-polling)). **Account: Read** is optional: with it, Cosimo can
-also check that the payment methods you offer are active.
+Customers can pay with the first seven; Webhook Endpoints write is needed only when Cosimo registers
+the webhook itself (see [below](#webhooks-or-polling)). Refunds, Disputes, and Payouts read let
+Cosimo propose entries for [refunds and disputes](#refunds-and-disputes) and suggest [payouts](#payouts)
+on Categorize; without them it skips those and the settings page says which are missing. If you offer
+Bank Transfers, the key also needs to read customers' **cash balances**; the check names the
+permission Stripe asks for. **Account: Read** is optional: with it, Cosimo can also check that the
+payment methods you offer are active.
 
 Save and **Test connection** check each permission with requests that can't create anything. A
 missing permission doesn't stop the save; the settings page (and `cosimo doctor`) list what's missing
@@ -74,7 +81,9 @@ Only owners see this tab; AI assistants can't change it.
   **Link**, Stripe's saved-card wallet, can appear with card and is recorded as a card payment.
 - On first setup Cosimo creates a **Stripe Clearing** asset account (code 1090, or the next free
   code) and uses **6300 Bank and Merchant Fees** for Stripe's fees, creating it if your chart doesn't
-  have it. You can pick other accounts instead.
+  have it. For refunds it uses **4050 Refunds and Allowances** (income), and for disputes a
+  **Chargebacks** expense account (the next free code from 6310), creating each if it's missing.
+  You can pick other accounts instead.
 - **Accept online payment on new invoices by default** turns the link on for new invoices. Each
   invoice has its own switch.
 
@@ -86,18 +95,21 @@ Payment methods are chosen for the whole organization, not per invoice.
   key registers `https://<your-host>/api/v1/webhooks/payments/stripe/<org-id>` in your Stripe account
   and stores its signing secret. Changing the key or turning Stripe off deletes that endpoint.
   An endpoint registered by an earlier release is updated with any events added since (such as
-  `charge.updated`) on the next save or payment check; `cosimo doctor` warns if that fails.
+  `charge.updated` and the dispute events) on the next save or payment check; `cosimo doctor` warns
+  if that fails.
 - **Manual webhook**: if the key can't create webhook endpoints, add an endpoint for the same URL in
   the Stripe dashboard (events `checkout.session.*`, `payment_intent.succeeded`,
   `payment_intent.payment_failed`, `charge.updated`, `charge.refunded`, `charge.dispute.created`,
+  `charge.dispute.funds_withdrawn`, `charge.dispute.funds_reinstated`, `charge.dispute.closed`,
   `payout.paid`), then paste its signing secret (`whsec_...`) under **Settings → Online payments**.
   When the key can read webhook endpoints, the settings page and `cosimo doctor` name any event the
   endpoint is missing.
 - **Polling**: without a webhook (for example on a local instance), Cosimo asks Stripe every 15
   minutes about invoices with an open or processing checkout. With a webhook it still checks every 6
   hours as a safety net, and every 15 minutes while a payment waits for its fee or a webhook event
-  waits to be retried. A customer who finishes Checkout is sent back to the pay link, which
-  records the payment right away, webhook or not.
+  waits to be retried. Each check also looks for refunds and payouts from the last 30 days and
+  disputes from the last 120, so nothing depends on a webhook arriving. A customer who finishes
+  Checkout is sent back to the pay link, which records the payment right away, webhook or not.
 
 Every webhook's `Stripe-Signature` is checked (HMAC-SHA256 with the signing secret, at most 5 minutes
 old); unsigned or altered requests get `401` and are not stored. Each event is stored once, so a
@@ -144,9 +156,8 @@ is posted on the next check, every 15 minutes. Bank payments settle days later, 
 posted the same way once Stripe reports it.
 
 Stripe takes its fee when the customer pays, not when it pays out, so once the fee is posted Stripe
-Clearing matches your Stripe balance: payments less fees. A payout then moves that net amount to
-your bank with no fee in it. Until payout matching arrives, record each payout as a transfer from
-Stripe Clearing to checking when it shows up in the bank feed.
+Clearing matches your Stripe balance: payments less fees (and less refunds and disputes, below). A
+payout then moves that net amount to your bank with no fee in it; see [Payouts](#payouts).
 
 Provider payments auto-approve by default, but the org's review threshold and review policies still
 apply (add a policy for the **Payment provider** actor to hold them). A payment that doesn't match an
@@ -158,8 +169,46 @@ The same Stripe payment is never recorded twice, whether the webhook, polling, a
 return all see it: each Stripe payment is written once to `provider_payments` in the same
 transaction as the payment.
 
-Refunds, disputes, and payouts are received and stored, but nothing is posted for them yet; handle
-them by hand for now.
+## Refunds and disputes
+
+Refunds and disputes happen in Stripe. Cosimo proposes an entry for each one, and **every one waits
+in the review queue**; none posts on its own. They are proposed only for payments Cosimo recorded.
+
+- **Refund** (full or partial, once Stripe reports it succeeded): debit **Refunds and Allowances**,
+  credit Stripe Clearing, for the refunded amount, dated the refund, memo "Stripe refund, invoice
+  <number>". Stripe keeps its original fee, so no fee entry is posted. The invoice stays paid, and
+  its page shows "Refunded $X". Two partial refunds are two entries.
+- **Dispute**: when Stripe takes the disputed amount from your balance, debit **Chargebacks** for
+  the amount and the fee account for Stripe's dispute fee, credit Stripe Clearing for both. The
+  amounts come from the dispute's balance transactions in Stripe. If you win and Stripe returns the
+  funds, a reversing entry is proposed (debit Stripe Clearing, credit Chargebacks, and credit the fee
+  account too if Stripe returns the fee).
+
+The review card shows the refund or dispute amounts from Stripe next to the entry. Each refund and
+each dispute movement is proposed once, however many times the webhook and the checks see it. If you
+reject one, Cosimo doesn't propose it again; the invoice page says so, and you book it by hand if
+the money did move.
+
+Events for refunds, disputes, and payouts that arrived before this handling existed are processed
+once if they are less than 30 days old (Stripe keeps events that long). `cosimo doctor` lists older
+ones; check the Stripe dashboard for refunds and disputes from then and book them by hand.
+
+## Payouts
+
+When Stripe pays out to your bank, Cosimo stores the payout (nothing is posted). When a bank deposit
+for the same amount shows up within a day before to three days after the payout's arrival date,
+Categorize suggests "Stripe payout <date>: transfer from Stripe Clearing". Accept it and the usual
+transfer entry moves the amount from Stripe Clearing to the bank account, and the payout is linked to
+the deposit. This works whichever arrives first, the payout or the bank transaction. Undoing the
+transfer frees the payout to match again.
+
+## Customer cash balances
+
+With Bank Transfers, a customer's transfer that Stripe can't match to a payment (a wrong amount or
+reference) stays in the customer's **cash balance** in Stripe, and Stripe returns it after 75 days.
+Cosimo reads these balances every 6 hours (up to 200 customers at a time) and when an invoice page is
+opened. When Stripe holds money for the invoice's customer, the invoice page says so; resolve it in
+Stripe. The instance admin's status page lists every nonzero balance.
 
 ## When a pay link shows an error
 
@@ -198,8 +247,9 @@ Choose **Payment link** under **Settings → Online payments** to paste a URL fr
 on each invoice (**Payment link** in the invoice form). It is printed and linked on the PDF, and the
 email says `Pay online: <link>`. Cosimo doesn't know when such a payment is made; record it as usual.
 
-## Not yet
+## Status and checks
 
-Refund and dispute handling, matching Stripe payouts in Categorize, and a Stripe status card for
-instance admins come in a later release. `cosimo doctor` already checks each org's Stripe key, mode,
-permissions, payment methods, webhook, last event, and recent pay-link failures.
+`cosimo doctor` checks each org's Stripe key, mode, permissions, payment methods, webhook, last
+event, and recent pay-link failures. Instance admins also see an **Online payments** card on the
+status page: each org's mode, last event, Stripe entries waiting for review, payouts not yet matched
+to a deposit, and customer cash balances. It reads only the org databases and calls no Stripe API.

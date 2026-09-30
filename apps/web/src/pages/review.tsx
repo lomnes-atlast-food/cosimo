@@ -39,6 +39,11 @@ const ACTOR_LABEL: Record<string, string> = {
   system: "System",
   integration: "Payment provider",
 };
+const ADJUSTMENT_LABEL = {
+  refund: "Stripe refund",
+  dispute_withdrawal: "Stripe dispute: funds taken back",
+  dispute_reinstatement: "Stripe dispute: funds returned",
+} as const;
 
 export function ReviewQueuePage() {
   const orgId = useOrgId();
@@ -204,6 +209,13 @@ function ReviewCard({
   const payload = (item.payload ?? {}) as {
     entry?: Entry;
     bank_transaction?: { description: string; amount: number; date: string; bank_account_id: string };
+    provider_adjustment?: {
+      kind: "refund" | "dispute_withdrawal" | "dispute_reinstatement";
+      invoice_number: string | null;
+      gross: number;
+      amount: number;
+      fee: number;
+    };
     rule?: { name: string; conditions: Record<string, unknown>; actions: Record<string, unknown> };
     invoice?: {
       number: string;
@@ -303,6 +315,22 @@ function ReviewCard({
               Bank: {fmtDate(payload.bank_transaction.date)} · {payload.bank_transaction.description} ·{" "}
               {money(payload.bank_transaction.amount)}
               {bankName && <span className="text-zinc-500"> ({bankName})</span>}
+            </p>
+          )}
+          {payload.provider_adjustment && (
+            <p className="text-sm">
+              {ADJUSTMENT_LABEL[payload.provider_adjustment.kind]}:{" "}
+              {money(payload.provider_adjustment.amount)}
+              {payload.provider_adjustment.fee > 0 &&
+                ` · Stripe dispute fee ${money(payload.provider_adjustment.fee)}`}
+              {payload.provider_adjustment.fee < 0 &&
+                ` · dispute fee returned ${money(-payload.provider_adjustment.fee)}`}
+              {payload.provider_adjustment.invoice_number &&
+                ` · invoice ${payload.provider_adjustment.invoice_number}`}
+              <span className="text-zinc-500">
+                {" "}
+                (online payment of {money(payload.provider_adjustment.gross)})
+              </span>
             </p>
           )}
           {payload.entry && !editing && (

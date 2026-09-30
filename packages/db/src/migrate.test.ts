@@ -236,6 +236,32 @@ test("0005 adds the pay-link failure columns to invoices", async () => {
   expect(inv.rows[0]).toMatchObject({ pay_attempt: 0, pay_error: null, pay_error_at: null });
 });
 
+test("0006 adds provider adjustments and payouts, and cash balances on provider customers", async () => {
+  const upTo = orgMigrations.findIndex((m) => m.tag === "0006_provider_adjustments");
+  expect(upTo).toBeGreaterThan(0);
+  expect(await migrate(client, orgMigrations.slice(0, upTo))).toEqual([]);
+  await client.execute(
+    "INSERT INTO provider_customers (contact_id, provider, provider_customer_id) VALUES ('c1', 'stripe', 'cus_1')",
+  );
+  expect(await migrate(client, orgMigrations.slice(0, upTo + 1))).toEqual(["0006_provider_adjustments"]);
+  // Existing customers have no balance read yet.
+  const pc = await client.execute("SELECT cash_balance, cash_balance_checked_at FROM provider_customers");
+  expect(pc.rows[0]).toMatchObject({ cash_balance: null, cash_balance_checked_at: null });
+  const adj =
+    "INSERT INTO provider_adjustments (provider, provider_object_id, kind, provider_payment_id, payment_id, amount, occurred_on) VALUES ('stripe', 're_1', 'refund', 'pi_1', 'p1', 50, '2026-05-02')";
+  await client.execute(adj);
+  // The same refund or dispute movement can't be proposed twice.
+  await expect(client.execute(adj)).rejects.toThrow(/UNIQUE/);
+  const row = await client.execute(
+    "SELECT fee, entry_id FROM provider_adjustments WHERE provider_object_id = 're_1'",
+  );
+  expect(row.rows[0]).toMatchObject({ fee: 0, entry_id: null });
+  const po =
+    "INSERT INTO provider_payouts (provider, payout_id, amount, arrival_date, status) VALUES ('stripe', 'po_1', 98, '2026-05-03', 'paid')";
+  await client.execute(po);
+  await expect(client.execute(po)).rejects.toThrow(/UNIQUE/);
+});
+
 test("0001_known_randall (system) backfills is_sample for the existing demo org by name", async () => {
   const sysDir = mkdtempSync(join(tmpdir(), "cosimo-migrate-sys-"));
   const sysClient = createClient({ url: `file:${join(sysDir, "system.db")}` });

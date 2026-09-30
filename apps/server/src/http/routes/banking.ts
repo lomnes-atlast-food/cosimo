@@ -91,13 +91,21 @@ const BankTxnCountsSchema = z
 
 const SuggestionSchema = z
   .object({
-    source: z.enum(["rule", "history"]),
+    source: z.enum(["rule", "history", "payout"]),
     account_id: z.string().nullable().optional(),
     transfer_account_id: z.string().nullable().optional(),
     contact_id: z.string().nullable().optional(),
     memo: z.string().nullable().optional(),
     rule_id: z.string().nullable().optional(),
     rule_name: z.string().nullable().optional(),
+    payout_id: z
+      .string()
+      .nullable()
+      .optional()
+      .describe(
+        "A Stripe payout this deposit matches; accepting the transfer from the clearing account links it.",
+      ),
+    payout_arrival_date: z.string().nullable().optional(),
   })
   .openapi("Suggestion");
 

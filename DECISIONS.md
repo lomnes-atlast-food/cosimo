@@ -374,3 +374,15 @@ Choices made during the build. SPEC.md is the source of truth for requirements; 
   to the review threshold and owner policies, and `SubmitOptions.requireReview` forces anything that
   doesn't match an open invoice into review. Fees use a new `payment_fee` source type linked to the
   payment, not `invoice_payment`, so rejecting a fee doesn't void the payment.
+- **Stripe refunds and disputes are review-only journal entries, not negative payments** (#55):
+  payments and applications can't be negative, and a "sent" payment would go through accounts
+  payable, so a refund is Dr Refunds and Allowances (4050, income: contra-revenue) / Cr Stripe
+  Clearing, and the invoice stays paid. A dispute is Dr a Chargebacks expense and Dr the fee account
+  for Stripe's dispute fee / Cr Stripe Clearing, using each dispute balance transaction's own amount
+  and fee, so funds reinstated reverse it exactly. Every one requires review whatever the policy says:
+  the money has already moved in Stripe, and the owner decides how it's booked. A new
+  `provider_adjustments` table keyed on the refund or balance transaction ID makes the webhook,
+  polling, and the backfill of older events propose each once; a rejected entry keeps its row, so it
+  isn't proposed again. Payouts are suggest-only on Categorize (a transfer from Stripe Clearing),
+  because the owner already books payouts that way and a wrong automatic match would be worse than
+  one click.

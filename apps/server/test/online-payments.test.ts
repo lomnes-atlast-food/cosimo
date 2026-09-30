@@ -6,14 +6,25 @@ import { registeredJobs, type Scheduler } from "../src/jobs/scheduler.ts";
 import { readZip } from "../src/services/archive.ts";
 import { exportOrgBytes } from "../src/services/export.ts";
 import type { Mailer, SentMail } from "../src/services/mailer.ts";
-import { payUrl, pollInterval, pollPayments, saveSettings } from "../src/services/online-payments.ts";
+import {
+  payUrl,
+  pollInterval,
+  pollPayments,
+  refreshCashBalances,
+  saveSettings,
+  staleUnhandledEvents,
+  syncRefunds,
+} from "../src/services/online-payments.ts";
 import {
   type CreateSessionInput,
+  type DisputeMovement,
   type MethodStatus,
   type PaymentMethodType,
   type PaymentProvider,
   ProviderError,
   type ProviderEvent,
+  type ProviderPayout,
+  type ProviderRefund,
   type SessionResult,
 } from "../src/services/payment-providers/index.ts";
 import {
@@ -21,6 +32,7 @@ import {
   setStripeFactory,
   stripeSignature,
   verifyStripeWebhook,
+  WEBHOOK_EVENTS_VERSION,
 } from "../src/services/payment-providers/stripe.ts";
 import {
   addMember,
@@ -44,6 +56,9 @@ const PERMISSIONS = [
   "Charges: Read",
   "Balance transactions: Read",
   "Events: Read",
+  "Refunds: Read",
+  "Disputes: Read",
+  "Payouts: Read",
   "Customers: Write",
   "Checkout Sessions: Write",
   "Webhook Endpoints: Write",
@@ -76,6 +91,14 @@ class FakeStripe implements PaymentProvider {
   deniedPermissions = new Set<string>();
   methodStatus: Partial<Record<PaymentMethodType, MethodStatus>> = {};
   accountReadDenied = false;
+  /** Refunds, dispute movements by dispute, payouts, and cash balances by customer. */
+  refunds: ProviderRefund[] = [];
+  disputes = new Map<string, DisputeMovement[]>();
+  payouts = new Map<string, ProviderPayout>();
+  cashBalances = new Map<string, number>();
+  cashBalanceCalls: string[] = [];
+  /** The key lacks Refunds: Read. */
+  refundsDenied = false;
   #n = 0;
 
   async testConnection() {
@@ -156,6 +179,41 @@ class FakeStripe implements PaymentProvider {
     const e = this.events.get(id);
     if (!e) throw new ProviderError("Stripe: No such event", 404);
     return e;
+  }
+  #refundsRead() {
+    if (this.refundsDenied)
+      throw new ProviderError("Stripe: The provided key does not have the required permissions", 403);
+  }
+  async listRefunds() {
+    await Bun.sleep(2);
+    this.#refundsRead();
+    return [...this.refunds];
+  }
+  async getRefundsForPayment(pi: string) {
+    await Bun.sleep(2);
+    this.#refundsRead();
+    return this.refunds.filter((r) => r.paymentIntentId === pi);
+  }
+  async getDispute(id: string) {
+    await Bun.sleep(2);
+    const d = this.disputes.get(id);
+    if (!d) throw new ProviderError("Stripe: No such dispute", 404);
+    return [...d];
+  }
+  async listDisputes() {
+    return [...this.disputes.values()].flat();
+  }
+  async listPayouts() {
+    return [...this.payouts.values()].filter((p) => p.status === "paid");
+  }
+  async getPayout(id: string) {
+    const p = this.payouts.get(id);
+    if (!p) throw new ProviderError("Stripe: No such payout", 404);
+    return p;
+  }
+  async getCashBalance(customerId: string) {
+    this.cashBalanceCalls.push(customerId);
+    return this.cashBalances.get(customerId) ?? 0;
   }
   verifyWebhook(sig: string | undefined, raw: string, now?: number) {
     return verifyStripeWebhook(this.creds.webhookSecret, sig, raw, now);
@@ -258,9 +316,13 @@ function deliver(body: string, sig: string | undefined) {
     body,
   });
 }
-async function webhook(type: string, objectId: string, opts: { id?: string } = {}) {
+async function webhook(
+  type: string,
+  objectId: string,
+  opts: { id?: string; object?: Record<string, unknown> } = {},
+) {
   const id = opts.id ?? `evt_${++evt}`;
-  const body = JSON.stringify({ id, type, data: { object: { id: objectId } } });
+  const body = JSON.stringify({ id, type, data: { object: { id: objectId, ...opts.object } } });
   return { res: await deliver(body, signed(body)), id };
 }
 
@@ -832,21 +894,42 @@ describe(`recording payments (${DB_MODE})`, () => {
     expect(unknown).toMatchObject({ invoiceId: null, gross: 7_000 });
   });
 
-  test("refunds, disputes, and payouts are stored as unhandled and post nothing", async () => {
+  test("refunds and disputes of payments Cosimo didn't record post nothing", async () => {
     const entriesBefore = (await (
       await db()
     )
       .select({ n: sql<number>`count(*)` })
       .from(org.journalEntries)
       .get())!.n;
-    for (const t of ["charge.refunded", "charge.dispute.created", "payout.paid"]) await webhook(t, "ch_1");
+    fake.refunds.push({
+      id: "re_other",
+      paymentIntentId: "pi_not_cosimos",
+      amount: 1_000,
+      status: "succeeded",
+      created: "2026-03-05",
+    });
+    fake.disputes.set("dp_other", [
+      {
+        balanceTxnId: "txn_dp_other",
+        disputeId: "dp_other",
+        paymentIntentId: "pi_not_cosimos",
+        kind: "withdrawal",
+        amount: 1_000,
+        fee: 1_500,
+        created: "2026-03-05",
+      },
+    ]);
+    const a = await webhook("charge.refunded", "ch_other", { object: { payment_intent: "pi_not_cosimos" } });
+    const b = await webhook("charge.dispute.funds_withdrawn", "dp_other");
+    // A refund of a charge without a payment intent isn't from a checkout.
+    const c = await webhook("charge.refunded", "ch_plain");
     await settle();
     const rows = await (await db())
       .select()
       .from(org.providerEvents)
-      .where(sql`${org.providerEvents.type} in ('charge.refunded','charge.dispute.created','payout.paid')`)
+      .where(inArray(org.providerEvents.eventId, [a.id, b.id, c.id]))
       .all();
-    expect(rows.map((r) => r.result)).toEqual(["unhandled", "unhandled", "unhandled"]);
+    expect(rows.map((r) => r.result)).toEqual(["ignored", "ignored", "ignored"]);
     const entriesAfter = (await (
       await db()
     )
@@ -854,6 +937,8 @@ describe(`recording payments (${DB_MODE})`, () => {
       .from(org.journalEntries)
       .get())!.n;
     expect(entriesAfter).toBe(entriesBefore);
+    const adjustments = await (await db()).select().from(org.providerAdjustments).all();
+    expect(adjustments.length).toBe(0);
   });
 });
 
@@ -998,6 +1083,20 @@ async function feeEntries(paymentId: string) {
 }
 
 describe(`setup check (${DB_MODE})`, () => {
+  test("a key without the refund, dispute, and payout permissions saves with a warning that payments still work", async () => {
+    fake.deniedPermissions = new Set(["Refunds: Read", "Payouts: Read"]);
+    try {
+      const body = await setUpStripe();
+      expect(body.setup_check.missing).toEqual(["Refunds: Read", "Payouts: Read"]);
+      expect(body.warning).toContain("missing Refunds: Read, Payouts: Read");
+      expect(body.warning).toContain("can't propose entries for refunds and disputes");
+      expect(body.warning).not.toContain("customers can't pay online");
+    } finally {
+      fake.deniedPermissions = new Set();
+      await setUpStripe();
+    }
+  });
+
   test("a missing permission saves, with a warning that is stored and shown", async () => {
     fake.deniedPermissions = new Set(["Customers: Write", "Checkout Sessions: Write"]);
     try {
@@ -1373,7 +1472,7 @@ describe(`webhook endpoint events (${DB_MODE})`, () => {
     JSON.parse((await (await db()).select().from(org.orgSettings).get())!.paymentOptionsJson!)
       .webhook_events_version;
 
-  test("an endpoint registered by an older release gets charge.updated from the job and from Save", async () => {
+  test("an endpoint registered by an older release gets the newer events from the job and from Save", async () => {
     const endpoint = fake.webhooks.at(-1)!.id;
     await setVersion(1);
     const n = fake.updatedWebhooks.length;
@@ -1381,7 +1480,8 @@ describe(`webhook endpoint events (${DB_MODE})`, () => {
     expect(fake.updatedWebhooks.length - n).toBe(1);
     expect(fake.updatedWebhooks.at(-1)).toMatchObject({ id: endpoint });
     expect(fake.updatedWebhooks.at(-1)!.events).toContain("charge.updated");
-    expect(await version()).toBe(2);
+    expect(fake.updatedWebhooks.at(-1)!.events).toContain("charge.dispute.funds_reinstated");
+    expect(await version()).toBe(WEBHOOK_EVENTS_VERSION);
     // Up to date: nothing more is sent.
     await pollPayments(env.ctx, orgId);
     expect(fake.updatedWebhooks.length - n).toBe(1);
@@ -1389,6 +1489,566 @@ describe(`webhook endpoint events (${DB_MODE})`, () => {
     await setVersion(1);
     await setUpStripe();
     expect(fake.updatedWebhooks.length - n).toBe(2);
-    expect(await version()).toBe(2);
+    expect(await version()).toBe(WEBHOOK_EVENTS_VERSION);
+  });
+});
+
+// ----------------------------------------------------------------------------- refunds, disputes, payouts
+
+async function paidInvoice(amount: number, fee: number) {
+  const inv = await openInvoice(amount);
+  const sid = await checkout(inv);
+  const paid = fake.pay(sid, { gross: amount, fee, balanceTxnId: `txn_${sid}` });
+  await webhook("checkout.session.completed", sid);
+  await settle();
+  const pp = (await providerPayments(inv.id))[0]!;
+  return { inv, pi: paid.paymentId, paymentId: pp.paymentId };
+}
+
+async function adjustments(pi: string) {
+  return (await db())
+    .select()
+    .from(org.providerAdjustments)
+    .where(eq(org.providerAdjustments.providerPaymentId, pi))
+    .orderBy(org.providerAdjustments.createdAt, org.providerAdjustments.amount)
+    .all();
+}
+
+async function entry(id: string) {
+  return (await owner.json("GET", `${base()}/entries/${id}`)).body;
+}
+const lineAmounts = (e: any) => e.lines.map((l: any) => [l.account_id, l.amount]);
+
+async function reviewItemFor(entryId: string) {
+  return (await (
+    await db()
+  )
+    .select()
+    .from(org.reviewItems)
+    .where(eq(org.reviewItems.itemId, entryId))
+    .get())!;
+}
+
+async function decide(entryId: string, action: "approve" | "reject") {
+  const item = await reviewItemFor(entryId);
+  const r = await owner.json("POST", `${base()}/review/${item.id}/${action}`, { note: null });
+  expect(r.status).toBe(200);
+}
+
+async function stripeAccounts() {
+  const s = (await (await db()).select().from(org.orgSettings).get())!;
+  const o = JSON.parse(s.paymentOptionsJson!);
+  return {
+    clearing: s.paymentClearingAccountId!,
+    fee: s.paymentFeeAccountId!,
+    refund: o.refund_account_id as string,
+    chargeback: o.chargeback_account_id as string,
+  };
+}
+
+async function entriesFor(sourceType: string, paymentId: string) {
+  return (await db())
+    .select()
+    .from(org.journalEntries)
+    .where(and(eq(org.journalEntries.sourceType, sourceType), eq(org.journalEntries.sourceId, paymentId)))
+    .all();
+}
+
+describe(`refunds and disputes (${DB_MODE})`, () => {
+  let refunded: Awaited<ReturnType<typeof paidInvoice>>;
+
+  test("saving the settings sets up Refunds and Allowances and a Chargebacks expense", async () => {
+    const view = (await owner.json("GET", `${base()}/online-payments`)).body;
+    // The template's 4050 is reused.
+    expect(view.refund_account_id).toBe(acct["4050"]);
+    const accounts = (await owner.json("GET", `${base()}/accounts`)).body.data;
+    expect(accounts.find((a: any) => a.id === view.chargeback_account_id)).toMatchObject({
+      name: "Chargebacks",
+      type: "expense",
+      is_active: true,
+    });
+  });
+
+  test("a refund proposes one entry for review: Dr Refunds and Allowances, Cr clearing; the invoice stays paid", async () => {
+    refunded = await paidInvoice(40_000, 1_190);
+    const { inv, pi } = refunded;
+    const acc = await stripeAccounts();
+    fake.refunds.push({
+      id: `re_${pi}_1`,
+      paymentIntentId: pi,
+      amount: 15_000,
+      status: "succeeded",
+      created: "2026-03-10",
+    });
+    const { res } = await webhook("charge.refunded", "ch_r1", { object: { payment_intent: pi } });
+    expect(((await res.json()) as any).action).toBe("refund");
+    await settle();
+    const adj = await adjustments(pi);
+    expect(adj).toHaveLength(1);
+    expect(adj[0]).toMatchObject({
+      kind: "refund",
+      amount: 15_000,
+      fee: 0,
+      invoiceId: inv.id,
+      paymentId: refunded.paymentId,
+      occurredOn: "2026-03-10",
+    });
+    const e = await entry(adj[0]!.entryId!);
+    expect(e).toMatchObject({
+      status: "pending_review",
+      source_type: "payment_refund",
+      source_id: refunded.paymentId,
+      date: "2026-03-10",
+      memo: `Stripe refund, invoice ${inv.number}`,
+      created_by_actor: "integration",
+    });
+    expect(lineAmounts(e)).toEqual([
+      [acc.refund, 15_000],
+      [acc.clearing, -15_000],
+    ]);
+    const item = await reviewItemFor(e.id);
+    expect(item.reason).toBe("Refunds are issued in Stripe; confirm the entry.");
+    expect(JSON.parse(item.payloadJson!).provider_adjustment).toMatchObject({
+      kind: "refund",
+      amount: 15_000,
+      invoice_number: inv.number,
+      payment_id: pi,
+    });
+    expect(await getInvoice(inv.id)).toMatchObject({
+      status: "paid",
+      online_refunded: 0,
+      refund_pending_review: true,
+      refund_rejected: false,
+    });
+  });
+
+  test("a second partial refund through a redelivery, another event, and polling together proposes once", async () => {
+    const { pi, paymentId } = refunded;
+    fake.refunds.push({
+      id: `re_${pi}_2`,
+      paymentIntentId: pi,
+      amount: 5_000,
+      status: "succeeded",
+      created: "2026-03-11",
+    });
+    // A bank refund still pending proposes nothing yet.
+    fake.refunds.push({
+      id: `re_${pi}_3`,
+      paymentIntentId: pi,
+      amount: 1_000,
+      status: "pending",
+      created: "2026-03-11",
+    });
+    const object = { payment_intent: pi };
+    const first = await webhook("charge.refunded", "ch_r1", { object });
+    await Promise.all([
+      webhook("charge.refunded", "ch_r1", { id: first.id, object }),
+      webhook("charge.refunded", "ch_r1", { object }),
+      pollPayments(env.ctx, orgId),
+      syncRefunds(env.ctx, orgId),
+      syncRefunds(env.ctx, orgId, { paymentIntentId: pi }),
+    ]);
+    await settle();
+    const adj = await adjustments(pi);
+    expect(adj.map((a) => a.amount).sort()).toEqual([15_000, 5_000].sort());
+    expect(await entriesFor("payment_refund", paymentId)).toHaveLength(2);
+  });
+
+  test("approving posts the refund; a rejected refund isn't proposed again", async () => {
+    const { inv, pi, paymentId } = refunded;
+    const acc = await stripeAccounts();
+    const clearingBefore = await postedBalance(acc.clearing);
+    const adj = await adjustments(pi);
+    const big = adj.find((a) => a.amount === 15_000)!;
+    const small = adj.find((a) => a.amount === 5_000)!;
+    await decide(big.entryId!, "approve");
+    expect((await entry(big.entryId!)).status).toBe("posted");
+    expect((await postedBalance(acc.clearing)) - clearingBefore).toBe(-15_000);
+    expect(await getInvoice(inv.id)).toMatchObject({
+      status: "paid",
+      online_refunded: 15_000,
+      refund_pending_review: true,
+    });
+
+    await decide(small.entryId!, "reject");
+    await webhook("charge.refunded", "ch_r1", { object: { payment_intent: pi } });
+    await pollPayments(env.ctx, orgId);
+    await settle();
+    expect(await adjustments(pi)).toHaveLength(2);
+    expect(await entriesFor("payment_refund", paymentId)).toHaveLength(2);
+    expect(await getInvoice(inv.id)).toMatchObject({
+      online_refunded: 15_000,
+      refund_pending_review: false,
+      refund_rejected: true,
+    });
+  });
+
+  test("a dispute proposes Dr Chargebacks and the dispute fee, Cr clearing; funds reinstated propose the reversal", async () => {
+    const { inv, pi, paymentId } = await paidInvoice(30_000, 900);
+    const acc = await stripeAccounts();
+    const withdrawal: DisputeMovement = {
+      balanceTxnId: `txn_dw_${pi}`,
+      disputeId: `dp_${pi}`,
+      paymentIntentId: pi,
+      kind: "withdrawal",
+      amount: 30_000,
+      fee: 1_500,
+      created: "2026-03-12",
+    };
+    fake.disputes.set(`dp_${pi}`, [withdrawal]);
+    await webhook("charge.dispute.created", `dp_${pi}`);
+    await webhook("charge.dispute.funds_withdrawn", `dp_${pi}`);
+    await settle();
+    let adj = await adjustments(pi);
+    expect(adj).toHaveLength(1);
+    expect(adj[0]).toMatchObject({ kind: "dispute_withdrawal", amount: 30_000, fee: 1_500 });
+    const w = await entry(adj[0]!.entryId!);
+    expect(w).toMatchObject({
+      status: "pending_review",
+      source_type: "payment_dispute",
+      source_id: paymentId,
+      date: "2026-03-12",
+      memo: `Stripe dispute, invoice ${inv.number}`,
+    });
+    expect(lineAmounts(w)).toEqual([
+      [acc.chargeback, 30_000],
+      [acc.fee, 1_500],
+      [acc.clearing, -31_500],
+    ]);
+    expect((await reviewItemFor(w.id)).reason).toBe("Disputes are decided in Stripe; confirm the entry.");
+
+    // Won: Stripe returns the funds (and, here, the fee).
+    fake.disputes.set(`dp_${pi}`, [
+      withdrawal,
+      {
+        ...withdrawal,
+        balanceTxnId: `txn_dr_${pi}`,
+        kind: "reinstatement",
+        fee: -1_500,
+        created: "2026-04-20",
+      },
+    ]);
+    await webhook("charge.dispute.funds_reinstated", `dp_${pi}`);
+    await webhook("charge.dispute.closed", `dp_${pi}`);
+    await pollPayments(env.ctx, orgId);
+    await settle();
+    adj = await adjustments(pi);
+    expect(adj.map((a) => a.kind).sort()).toEqual(["dispute_reinstatement", "dispute_withdrawal"]);
+    const r = await entry(adj.find((a) => a.kind === "dispute_reinstatement")!.entryId!);
+    expect(r.memo).toBe(`Stripe dispute funds returned, invoice ${inv.number}`);
+    expect(lineAmounts(r)).toEqual([
+      [acc.clearing, 31_500],
+      [acc.fee, -1_500],
+      [acc.chargeback, -30_000],
+    ]);
+    expect(await entriesFor("payment_dispute", paymentId)).toHaveLength(2);
+
+    await decide(w.id, "approve");
+    expect((await getInvoice(inv.id)).online_disputed).toBe(30_000);
+    await decide(r.id, "approve");
+    expect(await getInvoice(inv.id)).toMatchObject({ online_disputed: 0, refund_pending_review: false });
+  });
+
+  test("without Refunds: Read a refund event is set aside, not retried, and polling skips refunds without failing", async () => {
+    const { pi } = await paidInvoice(7_000, 233);
+    fake.refunds.push({
+      id: `re_${pi}`,
+      paymentIntentId: pi,
+      amount: 2_000,
+      status: "succeeded",
+      created: "2026-03-13",
+    });
+    fake.refundsDenied = true;
+    try {
+      const { id } = await webhook("charge.refunded", "ch_denied", { object: { payment_intent: pi } });
+      await settle();
+      const row = await (await db())
+        .select()
+        .from(org.providerEvents)
+        .where(eq(org.providerEvents.eventId, id))
+        .get();
+      expect(row).toMatchObject({ result: "ignored" });
+      expect(row!.processedAt).not.toBeNull();
+      expect(row!.error).toContain("permissions");
+      const out = await pollPayments(env.ctx, orgId);
+      expect(out.refunds).toBe(0);
+      expect(out.failed).toBe(0);
+      expect(await adjustments(pi)).toHaveLength(0);
+    } finally {
+      fake.refundsDenied = false;
+    }
+    // With the permission back, the next check proposes it.
+    expect((await pollPayments(env.ctx, orgId)).refunds).toBe(1);
+    expect(await adjustments(pi)).toHaveLength(1);
+  });
+
+  test("an org set up before refunds were handled gets the accounts on its first refund", async () => {
+    const before = await stripeAccounts();
+    const h = await env.ctx.orgs.mustOpen(orgId);
+    const s0 = (await h.db.select().from(org.orgSettings).get())!;
+    const o = JSON.parse(s0.paymentOptionsJson!);
+    delete o.refund_account_id;
+    delete o.chargeback_account_id;
+    await h.write((tx) =>
+      tx
+        .update(org.orgSettings)
+        .set({ paymentOptionsJson: JSON.stringify(o) })
+        .where(eq(org.orgSettings.id, 1)),
+    );
+    expect((await owner.json("GET", `${base()}/online-payments`)).body.refund_account_id).toBeNull();
+    const { pi } = await paidInvoice(8_000, 262);
+    fake.refunds.push({
+      id: `re_${pi}`,
+      paymentIntentId: pi,
+      amount: 8_000,
+      status: "succeeded",
+      created: "2026-03-13",
+    });
+    await syncRefunds(env.ctx, orgId, { paymentIntentId: pi });
+    const e = await entry((await adjustments(pi))[0]!.entryId!);
+    // Found again, not duplicated.
+    expect(await stripeAccounts()).toEqual(before);
+    expect(lineAmounts(e)[0]).toEqual([before.refund, 8_000]);
+  });
+
+  test("refund, dispute, and payout events stored before they were handled are processed once, if Stripe still has them", async () => {
+    const { pi } = await paidInvoice(12_000, 378);
+    fake.refunds.push({
+      id: `re_${pi}_old`,
+      paymentIntentId: pi,
+      amount: 12_000,
+      status: "succeeded",
+      created: "2026-03-14",
+    });
+    const h = await env.ctx.orgs.mustOpen(orgId);
+    const at = (days: number) => new Date(Date.now() - days * 86_400_000).toISOString();
+    await h.write((tx) =>
+      tx.insert(org.providerEvents).values([
+        {
+          id: "row_recent",
+          provider: "stripe",
+          eventId: "evt_unhandled_recent",
+          type: "charge.refunded",
+          receivedAt: at(3),
+          processedAt: at(3),
+          result: "unhandled",
+        },
+        {
+          id: "row_old",
+          provider: "stripe",
+          eventId: "evt_unhandled_old",
+          type: "charge.refunded",
+          receivedAt: at(40),
+          processedAt: at(40),
+          result: "unhandled",
+        },
+      ]),
+    );
+    fake.events.set("evt_unhandled_recent", {
+      id: "evt_unhandled_recent",
+      type: "charge.refunded",
+      kind: "refund",
+      paymentIntentId: pi,
+    });
+    await pollPayments(env.ctx, orgId);
+    const rows = await (await db())
+      .select()
+      .from(org.providerEvents)
+      .where(inArray(org.providerEvents.id, ["row_recent", "row_old"]))
+      .orderBy(org.providerEvents.id)
+      .all();
+    expect(rows.map((r) => [r.id, r.result])).toEqual([
+      ["row_old", "unhandled"],
+      ["row_recent", "recorded"],
+    ]);
+    const processedAt = rows[1]!.processedAt;
+    expect(await adjustments(pi)).toHaveLength(1);
+    // Once: a second run leaves it alone.
+    await pollPayments(env.ctx, orgId);
+    const again = await (await db())
+      .select()
+      .from(org.providerEvents)
+      .where(eq(org.providerEvents.id, "row_recent"))
+      .get();
+    expect(again!.processedAt).toBe(processedAt!);
+    expect(await adjustments(pi)).toHaveLength(1);
+    expect(await staleUnhandledEvents(await db())).toBe(1);
+  });
+});
+
+describe(`payouts on Categorize (${DB_MODE})`, () => {
+  let bankId: string;
+
+  const importCsv = async (rows: string[]) => {
+    const r = await owner.json("POST", `${base()}/bank-accounts/${bankId}/import`, {
+      filename: `stripe-${rows.length}-${Date.now()}.csv`,
+      content: `Date,Description,Amount\n${rows.join("\n")}\n`,
+    });
+    expect(r.status).toBe(200);
+  };
+  const txns = async () =>
+    (await owner.json("GET", `${base()}/bank-transactions?bank_account_id=${bankId}`)).body.data as any[];
+  const byDescription = async (d: string) => (await txns()).find((t) => t.description === d);
+  const payoutRow = async (id: string) =>
+    (await db()).select().from(org.providerPayouts).where(eq(org.providerPayouts.payoutId, id)).get();
+
+  beforeAll(async () => {
+    bankId = (
+      await owner.json("POST", `${base()}/bank-accounts`, {
+        name: "Operating",
+        kind: "checking",
+        ledger_account_id: acct["1000"],
+      })
+    ).body.id;
+  });
+
+  test("a payout before the import is suggested on the matching deposit; accepting it links the payout and nets clearing to zero", async () => {
+    const acc = await stripeAccounts();
+    const clearingBefore = await postedBalance(acc.clearing);
+    await paidInvoice(50_000, 1_480);
+    expect((await postedBalance(acc.clearing)) - clearingBefore).toBe(48_520);
+
+    fake.payouts.set("po_before", {
+      id: "po_before",
+      amount: 48_520,
+      arrivalDate: "2026-03-20",
+      status: "paid",
+    });
+    const { res } = await webhook("payout.paid", "po_before");
+    expect(((await res.json()) as any).action).toBe("payout");
+    await settle();
+    expect(await payoutRow("po_before")).toMatchObject({ amount: 48_520, status: "paid", bankTxnId: null });
+
+    await importCsv([
+      "03/21/2026,STRIPE TRANSFER A,485.20",
+      "03/21/2026,STRIPE TRANSFER CENT OFF,485.21",
+      "03/28/2026,STRIPE TRANSFER LATE,485.20",
+    ]);
+    const hit = await byDescription("STRIPE TRANSFER A");
+    expect(hit.suggestion).toMatchObject({
+      source: "payout",
+      transfer_account_id: acc.clearing,
+      memo: "Stripe payout 2026-03-20",
+      payout_id: "po_before",
+      payout_arrival_date: "2026-03-20",
+    });
+    // A different amount, or outside the window: nothing.
+    expect((await byDescription("STRIPE TRANSFER CENT OFF")).suggestion).toBeNull();
+    expect((await byDescription("STRIPE TRANSFER LATE")).suggestion).toBeNull();
+
+    const r = await owner.json("POST", `${base()}/bank-transactions/${hit.id}/transfer`, {
+      account_id: acc.clearing,
+      memo: hit.suggestion.memo,
+    });
+    expect(r.status).toBe(200);
+    const linked = await payoutRow("po_before");
+    expect(linked).toMatchObject({ bankTxnId: hit.id });
+    expect((await entry(linked!.entryId!)).status).toBe("posted");
+    // Payment in, fee out, payout out: nothing left in clearing.
+    expect((await postedBalance(acc.clearing)) - clearingBefore).toBe(0);
+
+    // Undo sends the deposit back and frees the payout to match again.
+    expect((await owner.json("POST", `${base()}/bank-transactions/${hit.id}/undo`, {})).status).toBe(200);
+    expect(await payoutRow("po_before")).toMatchObject({ bankTxnId: null, entryId: null });
+  });
+
+  test("a payout that arrives after the import is suggested on the existing deposit", async () => {
+    await importCsv(["03/25/2026,STRIPE PAYOUT LATER,300.00", "03/25/2026,SOMETHING ELSE,300.01"]);
+    expect((await byDescription("STRIPE PAYOUT LATER")).suggestion).toBeNull();
+    fake.payouts.set("po_after", {
+      id: "po_after",
+      amount: 30_000,
+      arrivalDate: "2026-03-24",
+      status: "paid",
+    });
+    await pollPayments(env.ctx, orgId);
+    const t = await byDescription("STRIPE PAYOUT LATER");
+    expect(t.suggestion).toMatchObject({ source: "payout", payout_id: "po_after" });
+    expect((await byDescription("SOMETHING ELSE")).suggestion).toBeNull();
+    // Polling again changes nothing.
+    await pollPayments(env.ctx, orgId);
+    expect((await byDescription("STRIPE PAYOUT LATER")).suggestion.payout_id).toBe("po_after");
+    const pending = (await txns()).filter((x) => x.suggestion?.payout_id === "po_after");
+    expect(pending).toHaveLength(1);
+  });
+});
+
+describe(`cash balances and the admin status (${DB_MODE})`, () => {
+  test("refresh stores balances, at most every 6 hours and 200 customers a run; the invoice route and admin status show them", async () => {
+    await setUpStripe({ methods: ["card", "us_bank_account", "customer_balance"] });
+    const inv = await openInvoice(9_000);
+    await checkout(inv);
+    // An earlier test replaced this customer's Stripe ID; use the stored one.
+    const cus = (await (
+      await db()
+    )
+      .select()
+      .from(org.providerCustomers)
+      .where(eq(org.providerCustomers.contactId, customer))
+      .get())!.providerCustomerId;
+    fake.cashBalances.set(cus, 12_500);
+    const n0 = fake.cashBalanceCalls.length;
+    expect(await refreshCashBalances(env.ctx, orgId)).toBeGreaterThanOrEqual(1);
+    const stored = await (await db())
+      .select()
+      .from(org.providerCustomers)
+      .where(eq(org.providerCustomers.contactId, customer))
+      .get();
+    expect(stored).toMatchObject({ cashBalance: 12_500 });
+    expect(stored!.cashBalanceCheckedAt).not.toBeNull();
+    // Within 6 hours: no calls.
+    const n1 = fake.cashBalanceCalls.length;
+    expect(await refreshCashBalances(env.ctx, orgId)).toBe(0);
+    expect(fake.cashBalanceCalls.length).toBe(n1);
+    expect(n1 - n0).toBeGreaterThanOrEqual(1);
+
+    // The invoice route returns the stored balance while it is fresh; bookkeepers can read it.
+    const path = `${base()}/invoices/${inv.id}/online-pay/cash-balance`;
+    const r = await keeper.json("GET", path);
+    expect(r.status).toBe(200);
+    expect(r.body).toMatchObject({ amount: 12_500, currency: "USD", error: null });
+    expect(fake.cashBalanceCalls.length).toBe(n1);
+
+    const admin = await login(env, "pay-admin@example.com", { admin: true });
+    const status = (await admin.json("GET", "/api/v1/admin/status")).body;
+    const mine = status.online_payments.find((o: any) => o.org_id === orgId);
+    expect(mine).toMatchObject({
+      org_name: "Pay Co",
+      livemode: false,
+      webhook_mode: "registered",
+      cash_balances: [{ contact_name: "Globex", amount: 12_500 }],
+    });
+    expect(mine.unmatched_payouts).toBeGreaterThanOrEqual(1);
+    expect(mine.pending_reviews).toBeGreaterThanOrEqual(0);
+
+    // Stale: read live.
+    const h = await env.ctx.orgs.mustOpen(orgId);
+    const old = new Date(Date.now() - 10 * 60_000).toISOString();
+    await h.write((tx) =>
+      tx
+        .update(org.providerCustomers)
+        .set({ cashBalanceCheckedAt: old })
+        .where(eq(org.providerCustomers.contactId, customer)),
+    );
+    fake.cashBalances.set(cus, 0);
+    expect((await owner.json("GET", path)).body.amount).toBe(0);
+    expect(fake.cashBalanceCalls.at(-1)).toBe(cus);
+
+    // The cap: 250 customers, one run reads 200.
+    await h.write(async (tx) => {
+      for (let i = 0; i < 250; i++) {
+        const id = `cap-contact-${i}`;
+        await tx.insert(org.contacts).values({ id, kind: "customer", name: `Cap ${i}` });
+        await tx
+          .insert(org.providerCustomers)
+          .values({ contactId: id, provider: "stripe", providerCustomerId: `cus_cap_${i}` });
+      }
+    });
+    const n2 = fake.cashBalanceCalls.length;
+    expect(await refreshCashBalances(env.ctx, orgId, { force: true })).toBe(200);
+    expect(fake.cashBalanceCalls.length - n2).toBe(200);
+    // Never-checked customers go first.
+    expect(fake.cashBalanceCalls.slice(n2).every((c) => c.startsWith("cus_cap_"))).toBe(true);
+    await setUpStripe();
   });
 });

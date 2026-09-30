@@ -221,6 +221,57 @@ export function AdminStatus() {
         )}
       </Card>
 
+      <Card title="Online payments">
+        {s.online_payments.length === 0 ? (
+          <p className="text-sm text-zinc-500">No organization takes online payments through Stripe.</p>
+        ) : (
+          <Table>
+            <thead>
+              <tr>
+                <th className={th}>Organization</th>
+                <th className={th}>Mode</th>
+                <th className={th}>Last event</th>
+                <th className={th}>Waiting for review</th>
+                <th className={th}>Unmatched payouts</th>
+                <th className={th}>Cash balances</th>
+              </tr>
+            </thead>
+            <tbody>
+              {s.online_payments.map((p) => (
+                <tr key={p.org_id}>
+                  <td className={td}>
+                    {p.org_name}
+                    {p.last_pay_error_at && (
+                      <div className="text-xs text-amber-700 dark:text-amber-400">
+                        Pay link failed {fmtDateTime(p.last_pay_error_at)}
+                      </div>
+                    )}
+                  </td>
+                  <td className={td}>
+                    <Badge tone={p.livemode ? "green" : "amber"}>{p.livemode ? "Live" : "Test"}</Badge>{" "}
+                    <span className="text-xs text-zinc-500">
+                      {p.webhook_mode === "polling" ? "polling" : p.webhook_mode ? "webhook" : "no key"}
+                    </span>
+                  </td>
+                  <td className={td}>{p.last_event_at ? fmtDateTime(p.last_event_at) : "never"}</td>
+                  <td className={td}>{p.pending_reviews}</td>
+                  <td className={td}>{p.unmatched_payouts}</td>
+                  <td className={td}>
+                    {p.cash_balances.length === 0
+                      ? "—"
+                      : p.cash_balances.map((b) => (
+                          <div key={`${b.contact_name}-${b.amount}-${b.checked_at}`}>
+                            {b.contact_name}: {money(b.amount)}
+                          </div>
+                        ))}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </Table>
+        )}
+      </Card>
+
       <Card title="Recent job errors">
         {s.recent_job_errors.length === 0 ? (
           <p className="text-sm text-zinc-500">None.</p>

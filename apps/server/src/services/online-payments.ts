@@ -8,6 +8,10 @@
  * the provider and records the payment at most once: the unique (provider, payment) key on
  * `provider_payments` is written in the same transaction as the payment.
  *
+ * Refunds and disputes (money Stripe takes back from a recorded payment) are proposed as journal
+ * entries that always wait for review; `provider_adjustments` makes each proposal happen once.
+ * Payouts are stored and suggested as transfers on Categorize; cash balances are read for display.
+ *
  * Pay links are derived from the master key (like Plaid tokens, they stop working if the master
  * key changes); only the SHA-256 of a link's token is stored, so a database copy alone gives no
  * working links. Network calls run outside database transactions.
@@ -15,23 +19,26 @@
 import { checkLock } from "@cosimo/core";
 import { newId, type OrgDb, type OrgTx, org } from "@cosimo/db";
 import { formatCents } from "@cosimo/shared";
-import { and, desc, eq, gt, inArray, isNotNull, isNull, or, sql } from "drizzle-orm";
+import { and, asc, desc, eq, gt, inArray, isNotNull, isNull, lt, or, sql } from "drizzle-orm";
 import type { AppContext } from "../context.ts";
 import { hashToken } from "../crypto.ts";
 import { ApiError, badRequest, conflict, forbidden, notFound, unprocessable } from "../http/errors.ts";
 import { createAccountTx } from "./accounts.ts";
 import type { ActorInfo } from "./actor.ts";
 import { appendAudit } from "./audit.ts";
+import { suggestPayoutMatchesTx } from "./banking.ts";
 import { mustGetContact } from "./contacts.ts";
 import { issuePayLinkTx, mustGetInvoice, type PayLinker, recordPaymentTx } from "./documents.ts";
 import { accountMap, settingsRow, submitEntryTx } from "./ledger.ts";
 import {
   type CreateSessionInput,
+  type DisputeMovement,
   offeredMethods,
   type PaymentMethodType,
   type PaymentProvider,
   ProviderError,
   type ProviderEvent,
+  type ProviderPayout,
   providerFor,
   type SessionResult,
   type SetupCheck,
@@ -43,6 +50,7 @@ import {
   WebhookSignatureError,
 } from "./payment-providers/index.ts";
 import {
+  SYNC_PERMISSIONS,
   stripeClient,
   stripeKeyLivemode,
   stripeKeyProblem,
@@ -132,6 +140,8 @@ export async function settingsView(ctx: AppContext, db: Reader, orgId: string) {
     livemode: secrets ? opts.livemode : null,
     clearing_account_id: s.paymentClearingAccountId,
     fee_account_id: s.paymentFeeAccountId,
+    refund_account_id: opts.refund_account_id,
+    chargeback_account_id: opts.chargeback_account_id,
     online_pay_default: s.onlinePayDefault,
     last_event_at: last?.at ?? null,
     setup_check: secrets ? opts.setup_check : null,
@@ -177,6 +187,8 @@ export interface SettingsInput {
   methods?: PaymentMethodType[];
   clearing_account_id?: string | null;
   fee_account_id?: string | null;
+  refund_account_id?: string | null;
+  chargeback_account_id?: string | null;
   online_pay_default?: boolean;
 }
 
@@ -253,9 +265,15 @@ export function summarizeSetup(
 export function setupWarning(c: StoredSetupCheck | null): string | null {
   if (!c) return null;
   const out: string[] = [];
-  if (c.missing.length)
+  const toPay = c.missing.filter((p) => !SYNC_PERMISSIONS.has(p));
+  const toSync = c.missing.filter((p) => SYNC_PERMISSIONS.has(p));
+  if (toPay.length)
     out.push(
-      `The Stripe key is missing permissions: ${c.missing.join(", ")}. Add them to the restricted key in the Stripe dashboard (Developers → API keys), or customers can't pay online.`,
+      `The Stripe key is missing permissions: ${toPay.join(", ")}. Add them to the restricted key in the Stripe dashboard (Developers → API keys), or customers can't pay online.`,
+    );
+  if (toSync.length)
+    out.push(
+      `The Stripe key is missing ${toSync.join(", ")}. Add ${toSync.length > 1 ? "them" : "it"} to the restricted key, or Cosimo can't propose entries for refunds and disputes, suggest payouts on Categorize, or show customer cash balances.`,
     );
   if (c.inactive_methods.length)
     out.push(
@@ -390,6 +408,86 @@ async function ensureAccountsTx(
   return { clearing, fee };
 }
 
+/**
+ * The accounts refunds and disputes are debited to: 4050 Refunds and Allowances (income, reduces
+ * revenue) and a Chargebacks expense, each reused when present and created otherwise.
+ */
+async function ensureAdjustmentAccountsTx(
+  tx: OrgTx,
+  orgId: string,
+  a: ActorInfo,
+  input: { refund: string | null; chargeback: string | null },
+) {
+  const accts = await accountMap(tx);
+  let refund = input.refund;
+  let chargeback = input.chargeback;
+  if (refund) {
+    const r = accts.get(refund);
+    if (!r?.isActive || (r.type !== "income" && r.type !== "expense"))
+      throw unprocessable(
+        "The refunds account must be an active income or expense account.",
+        "invalid_account",
+      );
+  } else {
+    const income = await tx
+      .select()
+      .from(org.accounts)
+      .where(and(eq(org.accounts.isActive, true), eq(org.accounts.type, "income")))
+      .all();
+    refund =
+      (income.find((x) => x.code === "4050") ?? income.find((x) => /^refunds and allowances$/i.test(x.name)))
+        ?.id ??
+      (
+        await createAccountTx(tx, orgId, a, {
+          code: await freeCode(tx, 4050),
+          name: "Refunds and Allowances",
+          type: "income",
+          description:
+            "Refunds given to customers, reducing revenue. Online payment refunds are debited here.",
+        })
+      ).id;
+  }
+  if (chargeback) {
+    const c = accts.get(chargeback);
+    if (!c?.isActive || c.type !== "expense")
+      throw unprocessable("The chargebacks account must be an active expense account.", "invalid_account");
+  } else {
+    const expense = await tx
+      .select()
+      .from(org.accounts)
+      .where(and(eq(org.accounts.isActive, true), eq(org.accounts.type, "expense")))
+      .all();
+    chargeback =
+      expense.find((x) => /^chargebacks$/i.test(x.name))?.id ??
+      (
+        await createAccountTx(tx, orgId, a, {
+          code: await freeCode(tx, 6310),
+          name: "Chargebacks",
+          type: "expense",
+          description:
+            "Payments customers disputed with their bank and lost, taken back by the payment provider.",
+        })
+      ).id;
+  }
+  return { refund, chargeback };
+}
+
+/** The adjustment accounts for a sync: the stored ones while usable, else found or created and stored. */
+async function adjustmentAccountsTx(tx: OrgTx, orgId: string) {
+  const opts = stripeOptions(await settingsRow(tx));
+  const accts = await accountMap(tx);
+  const usable = (id: string | null) => (id && accts.get(id)?.isActive ? id : null);
+  const refund = usable(opts.refund_account_id);
+  const chargeback = usable(opts.chargeback_account_id);
+  if (refund && chargeback) return { refund, chargeback };
+  const acc = await ensureAdjustmentAccountsTx(tx, orgId, STRIPE_ACTOR, { refund, chargeback });
+  await patchOptionsTx(tx, (o) => {
+    o.refund_account_id = acc.refund;
+    o.chargeback_account_id = acc.chargeback;
+  });
+  return acc;
+}
+
 export async function saveSettings(ctx: AppContext, orgId: string, a: ActorInfo, input: SettingsInput) {
   assertCanManage(a);
   const h = await ctx.orgs.mustOpen(orgId);
@@ -455,16 +553,10 @@ export async function saveSettings(ctx: AppContext, orgId: string, a: ActorInfo,
   }
   await h.write(async (tx) => {
     const before = await settingsView(ctx, tx, orgId);
+    let adjustment = { refund: opts.refund_account_id, chargeback: opts.chargeback_account_id };
     const patch: Partial<typeof org.orgSettings.$inferInsert> = {
       paymentProvider: input.provider,
       paymentCredentialsEnc: creds ? ctx.secrets.encrypt(JSON.stringify(creds)) : null,
-      paymentOptionsJson: JSON.stringify({
-        methods,
-        account_name: account?.account_name ?? null,
-        livemode: account?.livemode ?? false,
-        setup_check: setupCheck,
-        webhook_events_version: eventsVersion,
-      }),
     };
     if (input.online_pay_default !== undefined) patch.onlinePayDefault = input.online_pay_default;
     if (input.provider === "stripe") {
@@ -474,7 +566,20 @@ export async function saveSettings(ctx: AppContext, orgId: string, a: ActorInfo,
       });
       patch.paymentClearingAccountId = acc.clearing;
       patch.paymentFeeAccountId = acc.fee;
+      adjustment = await ensureAdjustmentAccountsTx(tx, orgId, a, {
+        refund: input.refund_account_id ?? opts.refund_account_id,
+        chargeback: input.chargeback_account_id ?? opts.chargeback_account_id,
+      });
     }
+    patch.paymentOptionsJson = JSON.stringify({
+      methods,
+      account_name: account?.account_name ?? null,
+      livemode: account?.livemode ?? false,
+      setup_check: setupCheck,
+      webhook_events_version: eventsVersion,
+      refund_account_id: adjustment.refund,
+      chargeback_account_id: adjustment.chargeback,
+    });
     await tx.update(org.orgSettings).set(patch).where(eq(org.orgSettings.id, 1));
     await appendAudit(tx, orgId, a, {
       action: "online_payments.update",
@@ -1220,6 +1325,435 @@ async function chargeUpdated(
   return recorded ? "recorded" : "ignored";
 }
 
+// ----------------------------------------------------------------------------- refunds, disputes, payouts
+
+/** How far back polling looks for refunds and payouts (Stripe keeps events for 30 days). */
+const SYNC_DAYS = 30;
+/** Disputes are decided months after they open, so polling looks further back for reinstatements. */
+const DISPUTE_SYNC_DAYS = 120;
+const REFUND_REVIEW = "Refunds are issued in Stripe; confirm the entry.";
+const DISPUTE_REVIEW = "Disputes are decided in Stripe; confirm the entry.";
+
+const daysAgo = (n: number) => new Date(Date.now() - n * 86_400_000);
+
+type AdjustmentKind = (typeof org.providerAdjustments.$inferSelect)["kind"];
+
+/** One money movement against a recorded payment, from a refund or a dispute's balance transaction. */
+interface Movement {
+  objectId: string;
+  kind: AdjustmentKind;
+  paymentIntentId: string;
+  /** Positive cents. */
+  amount: number;
+  /** Dispute fee: positive when charged, negative when returned; 0 for refunds. */
+  fee: number;
+  /** YYYY-MM-DD. */
+  date: string;
+  disputeId?: string;
+}
+
+function disputeMovement(m: DisputeMovement): Movement | null {
+  if (!m.paymentIntentId) return null;
+  return {
+    objectId: m.balanceTxnId,
+    kind: m.kind === "withdrawal" ? "dispute_withdrawal" : "dispute_reinstatement",
+    paymentIntentId: m.paymentIntentId,
+    amount: m.amount,
+    fee: m.fee,
+    date: m.created,
+    disputeId: m.disputeId,
+  };
+}
+
+/**
+ * The lines of a movement's entry. A dispute uses the balance transaction's signed amount `s`
+ * (negative when withdrawn) and fee `f`: clearing gets the net `s - f`, Chargebacks `-s`, and the
+ * fee account `f`, so a withdrawal is Dr Chargebacks + Dr fee / Cr clearing and a reinstatement
+ * reverses it (crediting the fee account only when Stripe returns the fee).
+ */
+function movementLines(
+  m: Movement,
+  acc: { clearing: string; fee: string; refund: string; chargeback: string },
+  memo: string,
+) {
+  if (m.kind === "refund")
+    return [
+      { accountId: acc.refund, amount: m.amount, description: memo },
+      { accountId: acc.clearing, amount: -m.amount, description: memo },
+    ];
+  const signed = m.kind === "dispute_withdrawal" ? -m.amount : m.amount;
+  return [
+    { accountId: acc.chargeback, amount: -signed, description: memo },
+    { accountId: acc.fee, amount: m.fee, description: memo },
+    { accountId: acc.clearing, amount: signed - m.fee, description: memo },
+  ]
+    .filter((l) => l.amount !== 0)
+    .sort((x, y) => y.amount - x.amount);
+}
+
+async function findAdjustment(db: Reader, provider: string, objectId: string) {
+  return db
+    .select()
+    .from(org.providerAdjustments)
+    .where(
+      and(
+        eq(org.providerAdjustments.provider, provider),
+        eq(org.providerAdjustments.providerObjectId, objectId),
+      ),
+    )
+    .get();
+}
+
+/**
+ * Propose the entry for one movement, once. Movements of payments Cosimo didn't record are ignored.
+ * The key is checked before taking the write lock (most listed refunds are already known) and again
+ * inside the write; the unique index is the backstop for a concurrent writer elsewhere.
+ */
+async function recordMovement(
+  h: OrgHandle,
+  orgId: string,
+  provider: PaymentProvider,
+  m: Movement,
+): Promise<"recorded" | "already_recorded" | "ignored"> {
+  if (await findAdjustment(h.db, provider.name, m.objectId)) return "already_recorded";
+  if (!(await findProviderPayment(h.db, provider.name, m.paymentIntentId))) return "ignored";
+  try {
+    return await h.write(async (tx) => {
+      if (await findAdjustment(tx, provider.name, m.objectId)) return "already_recorded";
+      const pp = await findProviderPayment(tx, provider.name, m.paymentIntentId);
+      if (!pp) return "ignored";
+      const s = await settingsRow(tx);
+      if (!s.paymentClearingAccountId || !s.paymentFeeAccountId)
+        throw new Error("Online payments have no clearing or fee account set.");
+      const adj = await adjustmentAccountsTx(tx, orgId);
+      const inv = pp.invoiceId
+        ? await tx.select().from(org.invoices).where(eq(org.invoices.id, pp.invoiceId)).get()
+        : null;
+      const on = inv ? `, invoice ${inv.number}` : "";
+      const memo =
+        m.kind === "refund"
+          ? `Stripe refund${on}`
+          : m.kind === "dispute_withdrawal"
+            ? `Stripe dispute${on}`
+            : `Stripe dispute funds returned${on}`;
+      const lock = checkLock(m.date, s, { actor: STRIPE_ACTOR.actor, role: STRIPE_ACTOR.role });
+      const reason = `${m.kind === "refund" ? REFUND_REVIEW : DISPUTE_REVIEW}${lock.ok ? "" : ` The date ${m.date} is in a locked period.`}`;
+      const r = await submitEntryTx(
+        tx,
+        orgId,
+        STRIPE_ACTOR,
+        {
+          date: m.date,
+          memo,
+          lines: movementLines(
+            m,
+            { clearing: s.paymentClearingAccountId, fee: s.paymentFeeAccountId, ...adj },
+            memo,
+          ),
+          sourceType: m.kind === "refund" ? "payment_refund" : "payment_dispute",
+          sourceId: pp.paymentId,
+        },
+        {
+          requireReview: reason,
+          reviewContext: {
+            provider_adjustment: {
+              provider: provider.name,
+              kind: m.kind,
+              object_id: m.objectId,
+              dispute_id: m.disputeId ?? null,
+              payment_id: m.paymentIntentId,
+              invoice_id: inv?.id ?? null,
+              invoice_number: inv?.number ?? null,
+              gross: pp.gross,
+              amount: m.amount,
+              fee: m.fee,
+            },
+          },
+        },
+      );
+      // The same transaction as the entry: a concurrent proposal of this movement fails here and
+      // rolls back, entry included.
+      await tx.insert(org.providerAdjustments).values({
+        provider: provider.name,
+        providerObjectId: m.objectId,
+        kind: m.kind,
+        providerPaymentId: m.paymentIntentId,
+        paymentId: pp.paymentId,
+        invoiceId: pp.invoiceId,
+        amount: m.amount,
+        fee: m.fee,
+        entryId: r.entry.id,
+        occurredOn: m.date,
+      });
+      return "recorded";
+    });
+  } catch (e) {
+    if (/UNIQUE constraint failed: provider_adjustments/.test(errorText(e))) return "already_recorded";
+    throw e;
+  }
+}
+
+async function syncContext(ctx: AppContext, orgId: string) {
+  const h = await ctx.orgs.mustOpen(orgId);
+  const provider = providerFor(ctx.secrets, await settingsRow(h.db));
+  return provider ? { h, provider } : null;
+}
+
+/**
+ * Propose entries for refunds of recorded payments: one payment's refunds (a webhook names it), or
+ * every refund of the last 30 days (polling). Only succeeded refunds count; a pending bank refund
+ * is picked up by a later poll. Returns how many entries were proposed.
+ */
+export async function syncRefunds(ctx: AppContext, orgId: string, opts: { paymentIntentId?: string } = {}) {
+  const c = await syncContext(ctx, orgId);
+  if (!c) return 0;
+  const refunds = opts.paymentIntentId
+    ? await c.provider.getRefundsForPayment(opts.paymentIntentId)
+    : await c.provider.listRefunds({ since: daysAgo(SYNC_DAYS) });
+  let recorded = 0;
+  for (const r of refunds) {
+    if (r.status !== "succeeded" || !r.paymentIntentId || r.amount <= 0) continue;
+    const m: Movement = {
+      objectId: r.id,
+      kind: "refund",
+      paymentIntentId: r.paymentIntentId,
+      amount: r.amount,
+      fee: 0,
+      date: r.created,
+    };
+    if ((await recordMovement(c.h, orgId, c.provider, m)) === "recorded") recorded++;
+  }
+  return recorded;
+}
+
+/**
+ * Propose entries for disputes of recorded payments, one per balance transaction: one dispute (a
+ * webhook names it), or every dispute opened in the last 120 days (polling).
+ */
+export async function syncDisputes(ctx: AppContext, orgId: string, opts: { disputeId?: string } = {}) {
+  const c = await syncContext(ctx, orgId);
+  if (!c) return 0;
+  const movements = opts.disputeId
+    ? await c.provider.getDispute(opts.disputeId)
+    : await c.provider.listDisputes({ since: daysAgo(DISPUTE_SYNC_DAYS) });
+  let recorded = 0;
+  for (const d of movements.sort((x, y) => x.created.localeCompare(y.created))) {
+    const m = disputeMovement(d);
+    if (m && (await recordMovement(c.h, orgId, c.provider, m)) === "recorded") recorded++;
+  }
+  return recorded;
+}
+
+/**
+ * Store paid payouts (one a webhook names, or the last 30 days) and suggest each unlinked one on a
+ * matching bank deposit. Nothing is posted. Returns how many payouts were new.
+ */
+export async function syncPayouts(ctx: AppContext, orgId: string, opts: { payoutId?: string } = {}) {
+  const c = await syncContext(ctx, orgId);
+  if (!c) return 0;
+  const payouts: ProviderPayout[] = opts.payoutId
+    ? [await c.provider.getPayout(opts.payoutId)]
+    : await c.provider.listPayouts({ since: daysAgo(SYNC_DAYS), status: "paid" });
+  let added = 0;
+  for (const p of payouts) {
+    if (p.status !== "paid" || !p.id) continue;
+    const known = await c.h.db
+      .select()
+      .from(org.providerPayouts)
+      .where(and(eq(org.providerPayouts.provider, c.provider.name), eq(org.providerPayouts.payoutId, p.id)))
+      .get();
+    if (known?.bankTxnId) continue;
+    await c.h.write(async (tx) => {
+      const inserted = await tx
+        .insert(org.providerPayouts)
+        .values({
+          provider: c.provider.name,
+          payoutId: p.id,
+          amount: p.amount,
+          arrivalDate: p.arrivalDate,
+          status: p.status,
+        })
+        .onConflictDoNothing()
+        .returning({ id: org.providerPayouts.payoutId });
+      if (inserted.length) added++;
+      await suggestPayoutMatchesTx(tx, p.id);
+    });
+  }
+  return added;
+}
+
+// ----------------------------------------------------------------------------- cash balances
+
+/** Customers whose cash balance one refresh reads, at most. */
+export const CASH_BALANCE_BATCH = 200;
+/** Polling refreshes cash balances at most this often. */
+const CASH_BALANCE_EVERY_MS = 6 * 3_600_000;
+/** The invoice card reads a balance live when the stored one is older than this. */
+const CASH_BALANCE_FRESH_MS = 5 * 60_000;
+
+/** Whether the org offers bank transfers, the only method that leaves a cash balance. */
+function usesCashBalance(s: SettingsRow) {
+  return s.paymentProvider === "stripe" && stripeOptions(s).methods.includes("customer_balance");
+}
+
+/**
+ * Read the cash balance Stripe holds for each customer, the least recently checked first, up to
+ * 200 per run, and at most every 6 hours unless `force`. Returns how many were read.
+ */
+export async function refreshCashBalances(ctx: AppContext, orgId: string, opts: { force?: boolean } = {}) {
+  const h = await ctx.orgs.mustOpen(orgId);
+  const s = await settingsRow(h.db);
+  const provider = providerFor(ctx.secrets, s);
+  if (!provider || !usesCashBalance(s)) return 0;
+  if (!opts.force) {
+    const last = await h.db
+      .select({ at: sql<string | null>`max(${org.providerCustomers.cashBalanceCheckedAt})` })
+      .from(org.providerCustomers)
+      .get();
+    if (last?.at && Date.now() - Date.parse(last.at) < CASH_BALANCE_EVERY_MS) return 0;
+  }
+  const rows = await h.db
+    .select()
+    .from(org.providerCustomers)
+    .where(eq(org.providerCustomers.provider, provider.name))
+    // Never-checked customers (null) sort first.
+    .orderBy(asc(org.providerCustomers.cashBalanceCheckedAt))
+    .limit(CASH_BALANCE_BATCH)
+    .all();
+  const read: { contactId: string; amount: number }[] = [];
+  for (const r of rows) {
+    try {
+      read.push({
+        contactId: r.contactId,
+        amount: await provider.getCashBalance(r.providerCustomerId, s.baseCurrency),
+      });
+    } catch (e) {
+      // A key without the permission fails for every customer: stop, the setup check reports it.
+      if (e instanceof ProviderError && e.status === 403) break;
+      if (!(e instanceof ProviderError && e.status === 404)) throw e;
+    }
+  }
+  await storeCashBalances(h, provider.name, read);
+  return read.length;
+}
+
+async function storeCashBalances(
+  h: OrgHandle,
+  provider: string,
+  read: { contactId: string; amount: number }[],
+) {
+  if (!read.length) return;
+  const at = new Date().toISOString();
+  await h.write(async (tx) => {
+    for (const r of read)
+      await tx
+        .update(org.providerCustomers)
+        .set({ cashBalance: r.amount, cashBalanceCheckedAt: at })
+        .where(
+          and(eq(org.providerCustomers.contactId, r.contactId), eq(org.providerCustomers.provider, provider)),
+        );
+  });
+}
+
+/**
+ * The cash balance Stripe holds for an invoice's customer, read live when the stored one is more
+ * than 5 minutes old. `amount` is null when the org doesn't take bank transfers or the customer has
+ * never checked out.
+ */
+export async function invoiceCashBalance(ctx: AppContext, orgId: string, invoiceId: string) {
+  const h = await ctx.orgs.mustOpen(orgId);
+  const inv = await mustGetInvoice(h.db, invoiceId);
+  const s = await settingsRow(h.db);
+  const provider = providerFor(ctx.secrets, s);
+  const none = { amount: null, currency: inv.currency, checked_at: null, error: null };
+  if (!provider || !usesCashBalance(s)) return none;
+  const find = () =>
+    h.db
+      .select()
+      .from(org.providerCustomers)
+      .where(
+        and(
+          eq(org.providerCustomers.contactId, inv.customerId),
+          eq(org.providerCustomers.provider, provider.name),
+        ),
+      )
+      .get();
+  let pc = await find();
+  if (!pc) return none;
+  let error: string | null = null;
+  if (!pc.cashBalanceCheckedAt || Date.now() - Date.parse(pc.cashBalanceCheckedAt) > CASH_BALANCE_FRESH_MS) {
+    try {
+      const amount = await provider.getCashBalance(pc.providerCustomerId, s.baseCurrency);
+      await storeCashBalances(h, provider.name, [{ contactId: pc.contactId, amount }]);
+      pc = (await find()) ?? pc;
+    } catch (e) {
+      error = scrubProviderText((e as Error).message);
+    }
+  }
+  return { amount: pc.cashBalance, currency: inv.currency, checked_at: pc.cashBalanceCheckedAt, error };
+}
+
+// ----------------------------------------------------------------------------- admin status
+
+/**
+ * One org's online payment status for the instance admin page, from the org database only (no
+ * calls to Stripe). Null when the org doesn't use Stripe.
+ */
+export async function onlinePaymentStatus(ctx: AppContext, db: Reader, orgId: string, orgName: string) {
+  const s = await settingsRow(db);
+  if (s.paymentProvider !== "stripe") return null;
+  const secrets = stripeSecrets(ctx.secrets, s);
+  const last = await db
+    .select({ at: sql<string | null>`max(${org.providerEvents.receivedAt})` })
+    .from(org.providerEvents)
+    .get();
+  const pending = await db
+    .select({ n: sql<number>`count(*)` })
+    .from(org.journalEntries)
+    .where(
+      and(
+        eq(org.journalEntries.status, "pending_review"),
+        sql`(${org.journalEntries.id} in (select entry_id from provider_adjustments)
+          or ${org.journalEntries.id} in (select fee_entry_id from provider_payments)
+          or ${org.journalEntries.id} in (select p.entry_id from payments p join provider_payments pp on pp.payment_id = p.id))`,
+      ),
+    )
+    .get();
+  const unmatched = await db
+    .select({ n: sql<number>`count(*)` })
+    .from(org.providerPayouts)
+    .where(and(eq(org.providerPayouts.status, "paid"), isNull(org.providerPayouts.bankTxnId)))
+    .get();
+  const balances = await db
+    .select({
+      contact_name: org.contacts.name,
+      amount: org.providerCustomers.cashBalance,
+      checked_at: org.providerCustomers.cashBalanceCheckedAt,
+    })
+    .from(org.providerCustomers)
+    .innerJoin(org.contacts, eq(org.contacts.id, org.providerCustomers.contactId))
+    .where(gt(org.providerCustomers.cashBalance, 0))
+    .orderBy(desc(org.providerCustomers.cashBalance))
+    .all();
+  return {
+    org_id: orgId,
+    org_name: orgName,
+    livemode: secrets ? stripeOptions(s).livemode : null,
+    webhook_mode: !secrets
+      ? null
+      : secrets.webhook_endpoint_id
+        ? ("registered" as const)
+        : secrets.webhook_secret
+          ? ("manual" as const)
+          : ("polling" as const),
+    last_event_at: last?.at ?? null,
+    last_pay_error_at: (await lastPayError(db))?.payErrorAt ?? null,
+    pending_reviews: Number(pending?.n ?? 0),
+    unmatched_payouts: Number(unmatched?.n ?? 0),
+    cash_balances: balances.map((b) => ({ ...b, amount: b.amount ?? 0 })),
+  };
+}
+
 // ----------------------------------------------------------------------------- webhooks and polling
 
 async function processEvent(
@@ -1230,10 +1764,15 @@ async function processEvent(
   rowId: string,
   ev: ProviderEvent,
 ) {
-  let result: "recorded" | "ignored" | "unhandled" | "error" = "ignored";
+  let result: "recorded" | "ignored" | "error" = "ignored";
   let error: string | null = null;
+  const done = (n: number) => (n > 0 ? "recorded" : "ignored");
   try {
-    if (ev.kind === "unhandled") result = "unhandled";
+    if (ev.kind === "refund")
+      result = done(await syncRefunds(ctx, orgId, { paymentIntentId: ev.paymentIntentId }));
+    else if (ev.kind === "dispute")
+      result = done(await syncDisputes(ctx, orgId, { disputeId: ev.disputeId }));
+    else if (ev.kind === "payout") result = done(await syncPayouts(ctx, orgId, { payoutId: ev.payoutId }));
     else if (ev.kind === "charge") result = await chargeUpdated(ctx, h, orgId, provider, ev.paymentIntentId);
     else if (ev.kind === "session" || ev.kind === "payment_intent") {
       const sessionId =
@@ -1242,8 +1781,14 @@ async function processEvent(
         result = (await reconcileSession(ctx, orgId, sessionId)) === "recorded" ? "recorded" : "ignored";
     }
   } catch (e) {
-    result = "error";
-    error = String((e as Error)?.message ?? e).slice(0, 1000);
+    error = scrubProviderText(String((e as Error)?.message ?? e)).slice(0, 1000);
+    // A key without Refunds, Disputes, or Payouts read fails every retry; the setup check reports
+    // the permission, and polling picks the object up once it's added.
+    const denied =
+      e instanceof ProviderError &&
+      e.status === 403 &&
+      (ev.kind === "refund" || ev.kind === "dispute" || ev.kind === "payout");
+    result = denied ? "ignored" : "error";
     ctx.logger.warn("payment webhook processing failed", {
       org_id: orgId,
       event: ev.id,
@@ -1307,6 +1852,8 @@ export const POLL_HOURS_WITH_WEBHOOK = 6;
 
 /** Retry window for events whose processing failed. */
 const EVENT_RETRY_DAYS = 7;
+/** Stripe returns events for 30 days; older ones can't be fetched again. */
+const EVENT_FETCH_DAYS = 30;
 
 /** How often the polling job should run for this org, in ms, or null when it has nothing to do. */
 export async function pollInterval(ctx: AppContext, orgId: string): Promise<number | null> {
@@ -1352,13 +1899,102 @@ async function updateWebhookEvents(ctx: AppContext, h: OrgHandle, orgId: string)
 }
 
 /**
+ * Refund, dispute, and payout events stored before Cosimo handled them (result `unhandled`): fetch
+ * each again and process it once. Stripe keeps events for 30 days, so older ones stay unhandled and
+ * doctor lists them. Returns how many were processed; failures are counted in `out.failed`.
+ */
+async function backfillUnhandledEvents(
+  ctx: AppContext,
+  h: OrgHandle,
+  orgId: string,
+  provider: PaymentProvider,
+  out: { failed: number },
+) {
+  const rows = await h.db
+    .select()
+    .from(org.providerEvents)
+    .where(
+      and(
+        eq(org.providerEvents.result, "unhandled"),
+        gt(org.providerEvents.receivedAt, daysAgo(EVENT_FETCH_DAYS).toISOString()),
+      ),
+    )
+    .all();
+  let n = 0;
+  for (const row of rows) {
+    try {
+      await processEvent(ctx, h, orgId, provider, row.id, await provider.fetchEvent(row.eventId));
+      n++;
+    } catch (e) {
+      out.failed++;
+      ctx.logger.warn("payment event backfill failed", {
+        org_id: orgId,
+        event: row.eventId,
+        error: (e as Error).message,
+      });
+    }
+  }
+  return n;
+}
+
+/** Stored events from before refunds, disputes, and payouts were handled, too old to fetch again. */
+export async function staleUnhandledEvents(db: Reader) {
+  const r = await db
+    .select({ n: sql<number>`count(*)` })
+    .from(org.providerEvents)
+    .where(
+      and(
+        eq(org.providerEvents.result, "unhandled"),
+        lt(org.providerEvents.receivedAt, daysAgo(EVENT_FETCH_DAYS).toISOString()),
+      ),
+    )
+    .get();
+  return Number(r?.n ?? 0);
+}
+
+/**
+ * Run one sync step of the job. A key without the permission (403) skips the step quietly: the
+ * setup check and doctor report the missing permission, so the job doesn't fail every run.
+ */
+async function syncStep(
+  ctx: AppContext,
+  orgId: string,
+  what: string,
+  out: { failed: number },
+  fn: () => Promise<number>,
+) {
+  try {
+    return await fn();
+  } catch (e) {
+    if (e instanceof ProviderError && e.status === 403) {
+      ctx.logger.info(`payment ${what} sync skipped: the key lacks the permission`, { org_id: orgId });
+      return 0;
+    }
+    out.failed++;
+    ctx.logger.warn(`payment ${what} sync failed`, { org_id: orgId, error: (e as Error).message });
+    return 0;
+  }
+}
+
+/**
  * The polling job: reconcile invoices with an open or processing checkout, retry failed webhook
- * events, and post fees that have settled since.
+ * events, process refund, dispute, and payout events stored before they were handled, sync refunds,
+ * disputes, and payouts, post fees that have settled since, and refresh cash balances.
  */
 export async function pollPayments(ctx: AppContext, orgId: string) {
   const h = await ctx.orgs.mustOpen(orgId);
   const provider = providerFor(ctx.secrets, await settingsRow(h.db));
-  const out = { reconciled: 0, recorded: 0, events: 0, fees: 0, failed: 0 };
+  const out = {
+    reconciled: 0,
+    recorded: 0,
+    events: 0,
+    refunds: 0,
+    disputes: 0,
+    payouts: 0,
+    fees: 0,
+    balances: 0,
+    failed: 0,
+  };
   if (!provider) return out;
   await updateWebhookEvents(ctx, h, orgId);
   const open = await h.db
@@ -1402,11 +2038,16 @@ export async function pollPayments(ctx: AppContext, orgId: string) {
       });
     }
   }
+  out.events += await backfillUnhandledEvents(ctx, h, orgId, provider, out);
+  out.refunds = await syncStep(ctx, orgId, "refund", out, () => syncRefunds(ctx, orgId));
+  out.disputes = await syncStep(ctx, orgId, "dispute", out, () => syncDisputes(ctx, orgId));
+  out.payouts = await syncStep(ctx, orgId, "payout", out, () => syncPayouts(ctx, orgId));
   try {
     out.fees = await fillMissingFees(ctx, orgId);
   } catch (e) {
     out.failed++;
     ctx.logger.warn("payment fee fill failed", { org_id: orgId, error: (e as Error).message });
   }
+  out.balances = await syncStep(ctx, orgId, "cash balance", out, () => refreshCashBalances(ctx, orgId));
   return out;
 }

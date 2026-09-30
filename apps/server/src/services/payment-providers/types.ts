@@ -89,9 +89,49 @@ export type ProviderEvent =
       paymentIntentId: string;
       balanceTxnId: string;
     }
-  /** Refunds, disputes, payouts: stored for later processing; nothing is posted. */
-  | { id: string; type: string; kind: "unhandled" }
+  /** A charge was refunded: sync the payment's refunds. */
+  | { id: string; type: string; kind: "refund"; paymentIntentId: string }
+  /** A dispute changed: sync its balance transactions (funds withdrawn or reinstated). */
+  | { id: string; type: string; kind: "dispute"; disputeId: string }
+  | { id: string; type: string; kind: "payout"; payoutId: string }
   | { id: string; type: string; kind: "ignored" };
+
+/** A refund of a payment. `created` is YYYY-MM-DD. */
+export interface ProviderRefund {
+  id: string;
+  /** The payment it refunds; null for a refund that isn't of a PaymentIntent. */
+  paymentIntentId: string | null;
+  amount: number;
+  /** Stripe: `pending`, `succeeded`, `failed`, `canceled`, `requires_action`. */
+  status: string;
+  created: string;
+}
+
+/**
+ * One movement of funds for a dispute, from the dispute's balance transactions: the disputed amount
+ * taken from the balance (withdrawal) or given back (reinstatement).
+ */
+export interface DisputeMovement {
+  /** The balance transaction, the idempotency key. */
+  balanceTxnId: string;
+  disputeId: string;
+  paymentIntentId: string | null;
+  kind: "withdrawal" | "reinstatement";
+  /** Positive cents moved. */
+  amount: number;
+  /** The provider's dispute fee on this movement: positive when charged, negative when returned. */
+  fee: number;
+  /** YYYY-MM-DD. */
+  created: string;
+}
+
+export interface ProviderPayout {
+  id: string;
+  amount: number;
+  /** YYYY-MM-DD: when the bank should have the money. */
+  arrivalDate: string;
+  status: string;
+}
 
 export interface PaymentProvider {
   readonly name: "stripe";
@@ -119,6 +159,18 @@ export interface PaymentProvider {
   paymentFee(paymentId: string): Promise<{ fee: number; balanceTxnId: string } | null>;
   /** Fetch a past event again (retrying one whose processing failed). */
   fetchEvent(eventId: string): Promise<ProviderEvent>;
+  /** Refunds created since `since`, newest first. */
+  listRefunds(opts: { since: Date }): Promise<ProviderRefund[]>;
+  getRefundsForPayment(paymentIntentId: string): Promise<ProviderRefund[]>;
+  /** A dispute's movements of funds so far (none until the provider withdraws them). */
+  getDispute(id: string): Promise<DisputeMovement[]>;
+  /** The movements of every dispute created since `since`. */
+  listDisputes(opts: { since: Date }): Promise<DisputeMovement[]>;
+  /** Payouts to the bank arriving since `since`. */
+  listPayouts(opts: { since: Date; status: "paid" }): Promise<ProviderPayout[]>;
+  getPayout(id: string): Promise<ProviderPayout>;
+  /** Funds held for a customer that aren't applied to a payment (Stripe: cash balance), in cents. */
+  getCashBalance(customerId: string, currency: string): Promise<number>;
   /** Verify the signature and parse the event. Throws `WebhookSignatureError` when it fails. */
   verifyWebhook(signature: string | undefined, rawBody: string, now?: number): ProviderEvent;
   registerWebhook(url: string): Promise<{ id: string; secret: string }>;

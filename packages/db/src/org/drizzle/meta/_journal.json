@@ -43,6 +43,13 @@
       "when": 1790800000000,
       "tag": "0005_pay_link_errors",
       "breakpoints": true
+    },
+    {
+      "idx": 6,
+      "version": "6",
+      "when": 1790900000000,
+      "tag": "0006_provider_adjustments",
+      "breakpoints": true
     }
   ]
 }

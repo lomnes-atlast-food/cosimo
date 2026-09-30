@@ -8,6 +8,7 @@ import { invoiceView } from "../../services/documents.ts";
 import {
   getSettings,
   handlePaymentWebhook,
+  invoiceCashBalance,
   openPayLink,
   type PayPage,
   payLinker,
@@ -71,6 +72,14 @@ const SettingsSchema = z
     livemode: z.boolean().nullable().describe("False for a test-mode key."),
     clearing_account_id: z.string().nullable(),
     fee_account_id: z.string().nullable(),
+    refund_account_id: z
+      .string()
+      .nullable()
+      .describe("Stripe refunds are debited here (Refunds and Allowances unless chosen)."),
+    chargeback_account_id: z
+      .string()
+      .nullable()
+      .describe("Amounts Stripe takes back for disputes are debited here (Chargebacks unless chosen)."),
     online_pay_default: z.boolean(),
     last_event_at: z.string().nullable(),
     setup_check: SetupCheckSchema,
@@ -99,6 +108,8 @@ const SettingsInput = z.object({
   methods: z.array(Method).min(1).max(3).optional(),
   clearing_account_id: Id.nullable().optional(),
   fee_account_id: Id.nullable().optional(),
+  refund_account_id: Id.nullable().optional().describe("An active income or expense account."),
+  chargeback_account_id: Id.nullable().optional().describe("An active expense account."),
   online_pay_default: z.boolean().optional(),
 });
 
@@ -132,7 +143,7 @@ export function onlinePaymentRoutes() {
       tags,
       summary: "Set up online payments (owner)",
       description:
-        "Stripe keys are checked with Stripe before they are stored, encrypted. On first setup Cosimo creates a Stripe Clearing account and uses (or creates) Bank and Merchant Fees unless you choose accounts. With an HTTPS public URL Cosimo registers the webhook endpoint in your Stripe account; otherwise it polls.",
+        "Stripe keys are checked with Stripe before they are stored, encrypted. On first setup Cosimo creates a Stripe Clearing account and uses (or creates) Bank and Merchant Fees, Refunds and Allowances, and Chargebacks unless you choose accounts. With an HTTPS public URL Cosimo registers the webhook endpoint in your Stripe account; otherwise it polls.",
       security: bearerSecurity,
       request: { params: OrgParams, body: jsonBody(SettingsInput) },
       responses: {
@@ -236,6 +247,45 @@ export function onlinePaymentRoutes() {
       const ctx = c.get("ctx");
       const inv = await rotatePayLink(ctx, o.id, o.actor, c.req.valid("param").invoiceId);
       return c.json(await invoiceView(o.handle.db, inv, await payLinker(ctx, o.handle.db, o.id)), 200);
+    },
+  );
+
+  r.openapi(
+    createRoute({
+      method: "get",
+      path: "/orgs/{orgId}/invoices/{invoiceId}/online-pay/cash-balance",
+      tags: ["Invoices"],
+      summary: "Funds Stripe holds for the invoice's customer that aren't applied to a payment",
+      description:
+        "Bank transfers Stripe received from the customer but couldn't match to a payment (Stripe returns them after 75 days). Read from Stripe when the stored balance is more than 5 minutes old; only for orgs that offer bank transfers.",
+      security: bearerSecurity,
+      request: { params: InvoiceParams },
+      responses: {
+        200: json(
+          z
+            .object({
+              amount: z
+                .number()
+                .int()
+                .nullable()
+                .describe(
+                  "Cents; null when the org doesn't offer bank transfers or the customer never checked out.",
+                ),
+              currency: z.string(),
+              checked_at: z.string().nullable(),
+              error: z
+                .string()
+                .nullable()
+                .describe("Why the live read failed; the stored balance is returned."),
+            })
+            .openapi("CustomerCashBalance"),
+        ),
+        ...errorResponses,
+      },
+    }),
+    async (c) => {
+      const o = requireWriter(c);
+      return c.json(await invoiceCashBalance(c.get("ctx"), o.id, c.req.valid("param").invoiceId), 200);
     },
   );
 

@@ -9,6 +9,7 @@ import { desc, eq } from "drizzle-orm";
 import { createBackup, listBackups } from "../../services/backup.ts";
 import { exportOrgBytes, importOrgArchive } from "../../services/export.ts";
 import { instanceAudit } from "../../services/instance-audit.ts";
+import { onlinePaymentStatus } from "../../services/online-payments.ts";
 import {
   commitProductImport,
   MAX_PRODUCT_IMPORT_BYTES,
@@ -53,6 +54,30 @@ const StatusSchema = z
         institution: z.string().nullable(),
         status: z.string(),
         last_synced_at: z.string().nullable(),
+      }),
+    ),
+    online_payments: z.array(
+      z.object({
+        org_id: z.string(),
+        org_name: z.string(),
+        livemode: z.boolean().nullable(),
+        webhook_mode: z.enum(["registered", "manual", "polling"]).nullable(),
+        last_event_at: z.string().nullable(),
+        last_pay_error_at: z.string().nullable(),
+        pending_reviews: z
+          .number()
+          .int()
+          .describe("Stripe payments, fees, refunds, and disputes waiting in the review queue."),
+        unmatched_payouts: z.number().int().describe("Paid Stripe payouts not yet linked to a bank deposit."),
+        cash_balances: z
+          .array(
+            z.object({
+              contact_name: z.string(),
+              amount: z.number().int(),
+              checked_at: z.string().nullable(),
+            }),
+          )
+          .describe("Customers Stripe holds unapplied funds for (bank transfers), as last read."),
       }),
     ),
     recent_job_errors: z.array(
@@ -136,7 +161,8 @@ export function operationsRoutes() {
       method: "get",
       path: "/admin/status",
       tags: ["Admin"],
-      summary: "Instance status: version, storage, backups, bank feeds, recent job errors (instance admin)",
+      summary:
+        "Instance status: version, storage, backups, bank feeds, online payments, recent job errors (instance admin)",
       responses: { 200: json(StatusSchema), ...errorResponses },
     }),
     async (c) => {
@@ -144,9 +170,12 @@ export function operationsRoutes() {
       const ctx = c.get("ctx");
       const orgs = await ctx.orgs.list();
       const connections: z.infer<typeof StatusSchema>["bank_connections"] = [];
+      const payments: z.infer<typeof StatusSchema>["online_payments"] = [];
       for (const o of orgs) {
         const h = await ctx.orgs.open(o.id);
         if (!h) continue;
+        const pay = await onlinePaymentStatus(ctx, h.db, o.id, o.name);
+        if (pay) payments.push(pay);
         const rows = await h.db.select().from(org.bankConnections).all();
         for (const b of rows)
           connections.push({
@@ -179,6 +208,7 @@ export function operationsRoutes() {
             last: await ctx.settings.get("last_backup"),
           },
           bank_connections: connections,
+          online_payments: payments,
           recent_job_errors: errors.map((e) => ({
             job: e.job,
             org_id: e.orgId,

@@ -84,7 +84,8 @@ The tables most readers want:
 | `invoices`, `invoice_lines` | Receivables; `entry_id` links the posted entry |
 | `bills`, `bill_lines` | Payables |
 | `payments`, `payment_applications` | Payments received and made, and which documents they settle |
-| `provider_payments`, `provider_events`, `provider_customers` | Online payments: each Stripe payment recorded (with its fee entry), webhook events received, and each contact's Stripe customer |
+| `provider_payments`, `provider_events`, `provider_customers` | Online payments: each Stripe payment recorded (with its fee entry), webhook events received, and each contact's Stripe customer (with the cash balance Stripe last reported for it) |
+| `provider_adjustments`, `provider_payouts` | Stripe refunds and dispute movements against recorded payments (with the entry proposed for each), and Stripe payouts (with the bank transaction and transfer entry they were matched to) |
 | `bank_accounts`, `bank_transactions` | Bank and card accounts and their imported or synced transactions |
 | `reconciliations`, `reconciliation_items` | Completed and in-progress reconciliations |
 | `rules`, `review_items`, `review_policy` | Categorization rules and the review queue |

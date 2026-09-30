@@ -7,6 +7,7 @@ import { createHmac } from "node:crypto";
 import { safeEqual } from "../../crypto.ts";
 import {
   type CreateSessionInput,
+  type DisputeMovement,
   type MethodStatus,
   type PaymentMethodType,
   type PaymentProvider,
@@ -14,6 +15,8 @@ import {
   type ProviderAccount,
   ProviderError,
   type ProviderEvent,
+  type ProviderPayout,
+  type ProviderRefund,
   type ProviderSession,
   type SessionResult,
   type SetupCheck,
@@ -31,7 +34,7 @@ const API = "https://api.stripe.com";
 /** Stripe's default signature tolerance: reject events signed more than five minutes away from now. */
 export const WEBHOOK_TOLERANCE_S = 300;
 
-/** Events Cosimo asks Stripe to send. The last three are stored for later processing. */
+/** Events Cosimo asks Stripe to send. */
 export const WEBHOOK_EVENTS = [
   "checkout.session.completed",
   "checkout.session.async_payment_succeeded",
@@ -42,14 +45,16 @@ export const WEBHOOK_EVENTS = [
   "charge.updated",
   "charge.refunded",
   "charge.dispute.created",
+  "charge.dispute.funds_withdrawn",
+  "charge.dispute.funds_reinstated",
+  "charge.dispute.closed",
   "payout.paid",
 ] as const;
 /**
  * Bumped whenever WEBHOOK_EVENTS changes, so endpoints registered by an older release are brought
- * up to date. 1 was the list without `charge.updated`.
+ * up to date. 1 was the list without `charge.updated`; 2 without the dispute funds events.
  */
-export const WEBHOOK_EVENTS_VERSION = 2;
-const UNHANDLED_EVENTS = new Set(["charge.refunded", "charge.dispute.created", "payout.paid"]);
+export const WEBHOOK_EVENTS_VERSION = 3;
 
 /**
  * Check a key's shape: a secret (`sk_`) or restricted (`rk_`) key, test or live. Returns an error
@@ -136,17 +141,26 @@ export function parseStripeEvent(rawBody: string): ProviderEvent {
   if (type === "charge.updated") {
     // Stripe sends it about two seconds after the payment, once the fee (balance transaction) exists.
     const o = e.data?.object;
-    const idOf = (v: unknown) =>
-      typeof v === "string" ? v : typeof obj(v)?.id === "string" ? (obj(v)!.id as string) : "";
     const paymentIntentId = idOf(o?.payment_intent);
     const balanceTxnId = idOf(o?.balance_transaction);
     if (objectId && paymentIntentId && balanceTxnId)
       return { id, type, kind: "charge", chargeId: objectId, paymentIntentId, balanceTxnId };
     return { id, type, kind: "ignored" };
   }
-  if (UNHANDLED_EVENTS.has(type)) return { id, type, kind: "unhandled" };
+  if (type === "charge.refunded") {
+    const paymentIntentId = idOf(e.data?.object?.payment_intent);
+    return paymentIntentId ? { id, type, kind: "refund", paymentIntentId } : { id, type, kind: "ignored" };
+  }
+  // Every dispute event syncs the dispute's balance transactions, which is idempotent, so it doesn't
+  // matter which of them carries the movement of funds.
+  if (type.startsWith("charge.dispute.") && objectId)
+    return { id, type, kind: "dispute", disputeId: objectId };
+  if (type === "payout.paid" && objectId) return { id, type, kind: "payout", payoutId: objectId };
   return { id, type, kind: "ignored" };
 }
+
+const idOf = (v: unknown) =>
+  typeof v === "string" ? v : typeof obj(v)?.id === "string" ? (obj(v)!.id as string) : "";
 
 type Obj = Record<string, unknown>;
 const obj = (v: unknown): Obj | null => (v && typeof v === "object" ? (v as Obj) : null);
@@ -154,6 +168,52 @@ const str = (v: unknown): string | null => (typeof v === "string" ? v : null);
 const num = (v: unknown): number | null => (typeof v === "number" && Number.isFinite(v) ? v : null);
 const utcDate = (unix: number | null) =>
   new Date((unix ?? Date.now() / 1000) * 1000).toISOString().slice(0, 10);
+
+export function refundResult(r: Obj): ProviderRefund {
+  return {
+    id: str(r.id) ?? "",
+    paymentIntentId: idOf(r.payment_intent) || null,
+    amount: num(r.amount) ?? 0,
+    status: str(r.status) ?? "",
+    created: utcDate(num(r.created)),
+  };
+}
+
+/**
+ * A dispute's movements of funds, from its balance transactions: a negative amount took the funds
+ * from the balance, a positive one gave them back. `fee` is the balance transaction's fee as Stripe
+ * reports it (the dispute fee when charged; negative if Stripe returns it).
+ */
+export function disputeMovements(d: Obj): DisputeMovement[] {
+  const disputeId = str(d.id) ?? "";
+  const paymentIntentId = idOf(d.payment_intent) || null;
+  const out: DisputeMovement[] = [];
+  for (const raw of (d.balance_transactions as unknown[] | undefined) ?? []) {
+    const bt = obj(raw);
+    const amount = num(bt?.amount);
+    const id = str(bt?.id);
+    if (!bt || !id || !amount) continue;
+    out.push({
+      balanceTxnId: id,
+      disputeId,
+      paymentIntentId,
+      kind: amount < 0 ? "withdrawal" : "reinstatement",
+      amount: Math.abs(amount),
+      fee: num(bt.fee) ?? 0,
+      created: utcDate(num(bt.created) ?? num(d.created)),
+    });
+  }
+  return out;
+}
+
+export function payoutResult(p: Obj): ProviderPayout {
+  return {
+    id: str(p.id) ?? "",
+    amount: num(p.amount) ?? 0,
+    arrivalDate: utcDate(num(p.arrival_date) ?? num(p.created)),
+    status: str(p.status) ?? "",
+  };
+}
 
 /** Map a Checkout Session (with the payment intent, charge, and balance transaction expanded). */
 export function sessionResult(s: Obj): SessionResult {
@@ -196,7 +256,24 @@ const READ_PROBES: [string, string][] = [
   ["Charges: Read", "/v1/charges"],
   ["Balance transactions: Read", "/v1/balance_transactions"],
   ["Events: Read", "/v1/events"],
+  // Refunds, disputes, and payouts: without them Cosimo can't propose their entries.
+  ["Refunds: Read", "/v1/refunds"],
+  ["Disputes: Read", "/v1/disputes"],
+  ["Payouts: Read", "/v1/payouts"],
 ];
+/**
+ * Customer cash balances (bank transfers). There is no list endpoint, so the probe reads the
+ * balance of a customer that doesn't exist: 404 means the key may read it, 403 that it may not.
+ */
+const CASH_BALANCE_PERMISSION = "Cash balances: Read";
+const CASH_BALANCE_PROBE = "/v1/customers/cus_cosimo_permission_check/cash_balance";
+/** Permissions only the refund, dispute, payout, and cash balance sync need: customers can pay without them. */
+export const SYNC_PERMISSIONS = new Set([
+  "Refunds: Read",
+  "Disputes: Read",
+  "Payouts: Read",
+  CASH_BALANCE_PERMISSION,
+]);
 const WRITE_PROBES: [string, string][] = [
   ["Customers: Write", "/v1/customers"],
   ["Checkout Sessions: Write", "/v1/checkout/sessions"],
@@ -289,6 +366,7 @@ export class HttpStripe implements PaymentProvider {
   async checkSetup(methods: PaymentMethodType[], webhookUrl?: string | null): Promise<SetupCheck> {
     const permissions = await Promise.all([
       ...READ_PROBES.map(([name, path]) => this.probeRead(name, path)),
+      ...(methods.includes("customer_balance") ? [this.probeCashBalance()] : []),
       ...WRITE_PROBES.map(([name, path]) => this.probeWrite(name, path)),
     ]);
     return {
@@ -304,6 +382,18 @@ export class HttpStripe implements PaymentProvider {
       return { name, ok: true, detail: null };
     } catch (e) {
       if (e instanceof ProviderError && e.status === 403) return { name, ok: false, detail: e.message };
+      return { name, ok: null, detail: couldNotCheck(e) };
+    }
+  }
+
+  private async probeCashBalance(): Promise<PermissionCheck> {
+    const name = CASH_BALANCE_PERMISSION;
+    try {
+      await this.call("GET", CASH_BALANCE_PROBE);
+      return { name, ok: null, detail: "Stripe answered the check request, so the result is unknown." };
+    } catch (e) {
+      if (e instanceof ProviderError && e.status === 403) return { name, ok: false, detail: e.message };
+      if (e instanceof ProviderError && e.status === 404) return { name, ok: true, detail: null };
       return { name, ok: null, detail: couldNotCheck(e) };
     }
   }
@@ -436,6 +526,55 @@ export class HttpStripe implements PaymentProvider {
   async fetchEvent(eventId: string) {
     const e = await this.call("GET", `/v1/events/${encodeURIComponent(eventId)}`);
     return parseStripeEvent(JSON.stringify(e));
+  }
+
+  /** Every page of a list (up to `maxPages` of 100), oldest pages last. */
+  private async listAll(path: string, params: Record<string, unknown>, maxPages = 10): Promise<Obj[]> {
+    const out: Obj[] = [];
+    let after: string | undefined;
+    for (let page = 0; page < maxPages; page++) {
+      const r = await this.call("GET", path, { ...params, limit: 100, starting_after: after });
+      const data = ((r.data as unknown[] | undefined) ?? []).map(obj).filter((x): x is Obj => x !== null);
+      out.push(...data);
+      after = str(data.at(-1)?.id) ?? undefined;
+      if (r.has_more !== true || !after) break;
+    }
+    return out;
+  }
+
+  async listRefunds({ since }: { since: Date }) {
+    const rows = await this.listAll("/v1/refunds", { created: { gte: Math.floor(since.getTime() / 1000) } });
+    return rows.map(refundResult);
+  }
+
+  async getRefundsForPayment(paymentIntentId: string) {
+    return (await this.listAll("/v1/refunds", { payment_intent: paymentIntentId })).map(refundResult);
+  }
+
+  async getDispute(id: string) {
+    return disputeMovements(await this.call("GET", `/v1/disputes/${encodeURIComponent(id)}`));
+  }
+
+  async listDisputes({ since }: { since: Date }) {
+    const rows = await this.listAll("/v1/disputes", { created: { gte: Math.floor(since.getTime() / 1000) } });
+    return rows.flatMap(disputeMovements);
+  }
+
+  async listPayouts({ since, status }: { since: Date; status: "paid" }) {
+    const rows = await this.listAll("/v1/payouts", {
+      status,
+      arrival_date: { gte: Math.floor(since.getTime() / 1000) },
+    });
+    return rows.map(payoutResult);
+  }
+
+  async getPayout(id: string) {
+    return payoutResult(await this.call("GET", `/v1/payouts/${encodeURIComponent(id)}`));
+  }
+
+  async getCashBalance(customerId: string, currency: string) {
+    const b = await this.call("GET", `/v1/customers/${encodeURIComponent(customerId)}/cash_balance`);
+    return num(obj(b.available)?.[currency.toLowerCase()]) ?? 0;
   }
 
   verifyWebhook(signature: string | undefined, rawBody: string, now?: number) {

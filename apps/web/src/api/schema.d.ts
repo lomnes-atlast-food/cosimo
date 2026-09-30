@@ -16113,7 +16113,7 @@ export interface paths {
         };
         /**
          * Set up online payments (owner)
-         * @description Stripe keys are checked with Stripe before they are stored, encrypted. On first setup Cosimo creates a Stripe Clearing account and uses (or creates) Bank and Merchant Fees unless you choose accounts. With an HTTPS public URL Cosimo registers the webhook endpoint in your Stripe account; otherwise it polls.
+         * @description Stripe keys are checked with Stripe before they are stored, encrypted. On first setup Cosimo creates a Stripe Clearing account and uses (or creates) Bank and Merchant Fees, Refunds and Allowances, and Chargebacks unless you choose accounts. With an HTTPS public URL Cosimo registers the webhook endpoint in your Stripe account; otherwise it polls.
          */
         put: {
             parameters: {
@@ -16141,6 +16141,16 @@ export interface paths {
                         clearing_account_id?: string | null;
                         /** @example 01J9Z3K5Q7W8X9Y0A1B2C3D4E5 */
                         fee_account_id?: string | null;
+                        /**
+                         * @description An active income or expense account.
+                         * @example 01J9Z3K5Q7W8X9Y0A1B2C3D4E5
+                         */
+                        refund_account_id?: string | null;
+                        /**
+                         * @description An active expense account.
+                         * @example 01J9Z3K5Q7W8X9Y0A1B2C3D4E5
+                         */
+                        chargeback_account_id?: string | null;
                         online_pay_default?: boolean;
                     };
                 };
@@ -16562,6 +16572,111 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/orgs/{orgId}/invoices/{invoiceId}/online-pay/cash-balance": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Funds Stripe holds for the invoice's customer that aren't applied to a payment
+         * @description Bank transfers Stripe received from the customer but couldn't match to a payment (Stripe returns them after 75 days). Read from Stripe when the stored balance is more than 5 minutes old; only for orgs that offer bank transfers.
+         */
+        get: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    orgId: string;
+                    invoiceId: string;
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["CustomerCashBalance"];
+                    };
+                };
+                /** @description Invalid request */
+                400: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+                /** @description Not authenticated */
+                401: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+                /** @description Forbidden */
+                403: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+                /** @description Not found */
+                404: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+                /** @description Conflict */
+                409: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+                /** @description Rule or invariant violation */
+                422: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+                /** @description Rate limited */
+                429: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+            };
+        };
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/webhooks/payments/{provider}/{orgId}": {
         parameters: {
             query?: never;
@@ -16678,7 +16793,7 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** Instance status: version, storage, backups, bank feeds, recent job errors (instance admin) */
+        /** Instance status: version, storage, backups, bank feeds, online payments, recent job errors (instance admin) */
         get: {
             parameters: {
                 query?: never;
@@ -19418,13 +19533,16 @@ export interface components {
         };
         Suggestion: {
             /** @enum {string} */
-            source: "rule" | "history";
+            source: "rule" | "history" | "payout";
             account_id?: string | null;
             transfer_account_id?: string | null;
             contact_id?: string | null;
             memo?: string | null;
             rule_id?: string | null;
             rule_name?: string | null;
+            /** @description A Stripe payout this deposit matches; accepting the transfer from the clearing account links it. */
+            payout_id?: string | null;
+            payout_arrival_date?: string | null;
         } | null;
         BankTxnCounts: {
             all: number;
@@ -19701,6 +19819,20 @@ export interface components {
             pay_error_at: string | null;
             /** @description A payment page URL entered by hand (payment link mode). */
             manual_pay_url: string | null;
+            /**
+             * @description Refunded through Stripe, from posted refund entries. The invoice stays paid; the refund reduces revenue.
+             * @example 12345
+             */
+            online_refunded: number;
+            /**
+             * @description Taken back by Stripe for disputes (chargebacks), less funds returned, from posted dispute entries.
+             * @example 12345
+             */
+            online_disputed: number;
+            /** @description A Stripe refund or dispute entry for this invoice is waiting in the review queue. */
+            refund_pending_review: boolean;
+            /** @description A Stripe refund or dispute entry was rejected; Cosimo won't propose it again, so book it by hand. */
+            refund_rejected: boolean;
             lines: {
                 id: string;
                 description: string;
@@ -20112,6 +20244,10 @@ export interface components {
             livemode: boolean | null;
             clearing_account_id: string | null;
             fee_account_id: string | null;
+            /** @description Stripe refunds are debited here (Refunds and Allowances unless chosen). */
+            refund_account_id: string | null;
+            /** @description Amounts Stripe takes back for disputes are debited here (Chargebacks unless chosen). */
+            chargeback_account_id: string | null;
             online_pay_default: boolean;
             last_event_at: string | null;
             /** @description The last check of the key's permissions and the payment methods (Save or Test connection). */
@@ -20158,6 +20294,14 @@ export interface components {
             /** @description Events the webhook endpoint doesn't send; null when it can't be read. */
             missing_events: string[] | null;
         };
+        CustomerCashBalance: {
+            /** @description Cents; null when the org doesn't offer bank transfers or the customer never checked out. */
+            amount: number | null;
+            currency: string;
+            checked_at: string | null;
+            /** @description Why the live read failed; the stored balance is returned. */
+            error: string | null;
+        };
         InstanceStatus: {
             version: string;
             commit: string;
@@ -20183,6 +20327,25 @@ export interface components {
                 institution: string | null;
                 status: string;
                 last_synced_at: string | null;
+            }[];
+            online_payments: {
+                org_id: string;
+                org_name: string;
+                livemode: boolean | null;
+                /** @enum {string|null} */
+                webhook_mode: "registered" | "manual" | "polling" | null;
+                last_event_at: string | null;
+                last_pay_error_at: string | null;
+                /** @description Stripe payments, fees, refunds, and disputes waiting in the review queue. */
+                pending_reviews: number;
+                /** @description Paid Stripe payouts not yet linked to a bank deposit. */
+                unmatched_payouts: number;
+                /** @description Customers Stripe holds unapplied funds for (bank transfers), as last read. */
+                cash_balances: {
+                    contact_name: string;
+                    amount: number;
+                    checked_at: string | null;
+                }[];
             }[];
             recent_job_errors: {
                 job: string;

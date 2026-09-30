@@ -53,6 +53,8 @@ export const SOURCE_TYPES = [
   "invoice",
   "invoice_payment",
   "payment_fee",
+  "payment_refund",
+  "payment_dispute",
   "bill",
   "bill_payment",
   "transfer",

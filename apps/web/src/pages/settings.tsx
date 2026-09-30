@@ -764,6 +764,8 @@ function OnlinePayments() {
   const [methods, setMethods] = useState<PaymentMethod[]>(["card"]);
   const [clearing, setClearing] = useState("");
   const [fee, setFee] = useState("");
+  const [refundAccount, setRefundAccount] = useState("");
+  const [chargebackAccount, setChargebackAccount] = useState("");
   const [byDefault, setByDefault] = useState(false);
   useEffect(() => {
     if (!q.data) return;
@@ -771,6 +773,8 @@ function OnlinePayments() {
     setMethods(q.data.methods);
     setClearing(q.data.clearing_account_id ?? "");
     setFee(q.data.fee_account_id ?? "");
+    setRefundAccount(q.data.refund_account_id ?? "");
+    setChargebackAccount(q.data.chargeback_account_id ?? "");
     setByDefault(q.data.online_pay_default);
   }, [q.data]);
   const save = useMutation({
@@ -785,6 +789,8 @@ function OnlinePayments() {
             methods,
             clearing_account_id: clearing || null,
             fee_account_id: fee || null,
+            refund_account_id: refundAccount || null,
+            chargeback_account_id: chargebackAccount || null,
             online_pay_default: byDefault,
           },
         }),
@@ -1001,6 +1007,36 @@ function OnlinePayments() {
                   value={fee}
                   onChange={setFee}
                   placeholder="Bank and Merchant Fees"
+                />
+              )}
+            </Field>
+            <Field
+              label="Refunds account"
+              hint="Refunds issued in Stripe are proposed against this account. Empty: Refunds and Allowances."
+            >
+              {(id) => (
+                <AccountSelect
+                  id={id}
+                  accounts={accounts.data ?? []}
+                  types={["income", "expense"]}
+                  value={refundAccount}
+                  onChange={setRefundAccount}
+                  placeholder="Refunds and Allowances"
+                />
+              )}
+            </Field>
+            <Field
+              label="Chargebacks account"
+              hint="Amounts Stripe takes back for disputes. Empty: Chargebacks."
+            >
+              {(id) => (
+                <AccountSelect
+                  id={id}
+                  accounts={accounts.data ?? []}
+                  types={["expense"]}
+                  value={chargebackAccount}
+                  onChange={setChargebackAccount}
+                  placeholder="Chargebacks"
                 />
               )}
             </Field>
