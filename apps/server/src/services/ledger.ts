@@ -151,6 +151,19 @@ export function onEntryRejected(sourceType: string, fn: EntryHook) {
   rejectHooks.set(sourceType, [...(rejectHooks.get(sourceType) ?? []), fn]);
 }
 
+const approvingHooks = new Map<string, EntryHook[]>();
+
+/**
+ * Runs when a person approves a pending entry from the review queue, right before it posts. A hook
+ * may throw to refuse the approval. It does not run on auto-post paths.
+ */
+export function onEntryApproving(sourceType: string, fn: EntryHook) {
+  approvingHooks.set(sourceType, [...(approvingHooks.get(sourceType) ?? []), fn]);
+}
+export async function runEntryApprovingHooks(tx: OrgTx, orgId: string, entry: EntryView, a: ActorInfo) {
+  for (const fn of approvingHooks.get(entry.source_type) ?? []) await fn(tx, orgId, entry, a);
+}
+
 // ----------------------------------------------------------------------------- lookups
 
 export async function settingsRow(db: Reader) {

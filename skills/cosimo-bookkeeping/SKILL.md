@@ -71,14 +71,20 @@ Work one month at a time, oldest first.
    "Stripe payouts are gross of fees; fees are booked monthly to 6120." Never put account numbers,
    passwords, or other secrets in notes.
 
+To change a proposal that is still pending, withdraw it with `withdraw_proposal` (give the reason),
+then propose the corrected one. Only withdraw proposals you made; never withdraw someone else's, and
+tell the person if one of theirs is wrong.
+
 ## Invoice follow-up
 
 1. `list_invoices` with `overdue: true`. Sort by days overdue and balance due.
 2. For each, draft a short, polite reminder for the person to send. Cosimo already emails weekly
    overdue reminders when SMTP is set up, so don't duplicate those.
 3. If a payment arrived in the bank but isn't applied (an uncategorized deposit that matches an
-   invoice total), tell the person so they can record the payment against the invoice. Don't
-   categorize it to income, which would count the revenue twice.
+   invoice), find the deposit with `list_uncategorized_transactions`, check `list_invoice_payments`
+   for one already waiting, then propose `record_invoice_payment` with the deposit's
+   `transaction_id`. Don't categorize it to income, which would count the revenue twice. A
+   partial payment leaves the invoice partial; tell the person about any credit left over.
 4. For new work the person describes, propose an invoice with `create_invoice_draft` (customer,
    lines with quantity, unit price in cents, and income account code). Leave out `terms` and
    `due_date` to use the customer's or the org's default terms. Give a `due_date` alone and the terms
@@ -124,7 +130,8 @@ Work one month at a time, oldest first.
   are one review item: approved together or not at all.
 - To cancel a posted entry that shouldn't exist (a duplicate), use `propose_reversal`.
 - When a payment was recorded on a different date than the bank shows, use
-  `propose_payment_date_change` with the bank's date. The payment ID is in `list_bill_payments`.
+  `propose_payment_date_change` with the bank's date. The payment ID is in `list_bill_payments` or
+  `list_invoice_payments`.
 - Entries created by invoices, bills, and payments can't be reversed or replaced. Explain the fix
   to the person, who can void or edit the document.
 - Don't post an offsetting `create_manual_entry` to correct a mistake; use the tools above so the

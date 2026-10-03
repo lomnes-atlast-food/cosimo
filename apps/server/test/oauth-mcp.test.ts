@@ -523,6 +523,8 @@ describe("MCP", () => {
       "create_invoice_draft",
       "list_bills",
       "list_bill_payments",
+      "list_invoice_payments",
+      "record_invoice_payment",
       "create_bill_draft",
       "get_cash_snapshot",
       "list_pending_reviews",
@@ -533,6 +535,7 @@ describe("MCP", () => {
       "propose_reversal",
       "propose_replacement",
       "propose_payment_date_change",
+      "withdraw_proposal",
       "list_recurring_templates",
       "propose_recurring_template",
       "sync_bank_feed",
@@ -1467,5 +1470,338 @@ describe("MCP", () => {
     });
     expect(r.structuredContent.status).toBe("pending_review");
     expect((await anon(env).json("GET", `/api/v1/orgs/${orgId}/accounts`)).status).toBe(401);
+  });
+
+  describe("record_invoice_payment", () => {
+    const api = (path: string) => `/api/v1/orgs/${orgId}${path}`;
+    async function setup() {
+      const accounts = (await call(token, "get_account_balances", {})).structuredContent.accounts;
+      const income = accounts.find((a: any) => a.type === "income" || a.type === "revenue");
+      const cash = accounts.find((a: any) => a.code === "1000");
+      return { income, cash };
+    }
+    async function customer(name: string) {
+      return (await owner.json("POST", api("/contacts"), { kind: "customer", name })).body.id as string;
+    }
+    async function invoice(customerId: string, amount: number, post = true) {
+      const { income } = await setup();
+      const inv = (
+        await owner.json("POST", api("/invoices"), {
+          customer_id: customerId,
+          issue_date: "2026-07-01",
+          lines: [{ description: "Work", quantity_milli: 1000, unit_price: amount, account_id: income.id }],
+        })
+      ).body;
+      if (post) {
+        const f = await owner.json("POST", api(`/invoices/${inv.id}/finalize`), {});
+        expect(f.body.invoice.status).toBe("sent");
+      }
+      return inv as { id: string; number: string };
+    }
+    const getInvoice = async (id: string) => (await owner.json("GET", api(`/invoices/${id}`))).body;
+    const approve = (reviewId: string) => owner.json("POST", api(`/review/${reviewId}/approve`), {});
+    const reject = (reviewId: string) =>
+      owner.json("POST", api(`/review/${reviewId}/reject`), { note: "no" });
+    async function deposit(desc: string, amount: string) {
+      const ba = (
+        await owner.json("POST", api("/bank-accounts"), { name: `${desc} Checking`, kind: "checking" })
+      ).body;
+      await owner.json("POST", api(`/bank-accounts/${ba.id}/import`), {
+        filename: "x.csv",
+        content: `Date,Description,Amount\n2026-07-15,${desc},${amount}\n`,
+      });
+      return (await owner.json("GET", api(`/bank-transactions?bank_account_id=${ba.id}&status=new`))).body
+        .data[0];
+    }
+
+    test("partial payment, then the rest with the amount omitted", async () => {
+      const { cash } = await setup();
+      const inv = await invoice(await customer("Partial Customer"), 100_000);
+      const a = await call(token, "record_invoice_payment", {
+        invoices: [{ invoice: inv.number, amount: 40_000 }],
+        date: "2026-07-10",
+        amount: 40_000,
+        account: cash.code,
+        reference: "CHK 1",
+        rationale: "Customer paid part by check",
+      });
+      expect(a.structuredContent).toMatchObject({
+        status: "pending_review",
+        unapplied: 0,
+        invoices: [{ number: inv.number, applied: 40_000, balance_due_after: 60_000 }],
+      });
+      expect((await getInvoice(inv.id)).status).toBe("sent");
+      const item = await call(token, "get_review_item", {
+        review_item_id: a.structuredContent.review_item_id,
+      });
+      expect(item.structuredContent.rationale).toBe("Customer paid part by check");
+      expect(item.structuredContent.payload.payment).toMatchObject({
+        direction: "received",
+        amount: 40_000,
+        applications: [{ document_type: "invoice", document_number: inv.number, amount: 40_000 }],
+      });
+      expect((await approve(a.structuredContent.review_item_id)).status).toBe(200);
+      expect(await getInvoice(inv.id)).toMatchObject({ status: "partial", amount_paid: 40_000 });
+
+      const b = await call(token, "record_invoice_payment", {
+        invoices: [{ invoice: inv.id }],
+        date: "2026-07-20",
+        amount: 60_000,
+        account: cash.id,
+        rationale: "The balance arrived",
+      });
+      expect(b.structuredContent.invoices[0]).toMatchObject({ applied: 60_000, balance_due_after: 0 });
+      expect((await approve(b.structuredContent.review_item_id)).status).toBe(200);
+      expect((await getInvoice(inv.id)).status).toBe("paid");
+      expect((await owner.json("POST", api("/verify"))).body.ok).toBe(true);
+    });
+
+    test("payments waiting in review count against the open balance", async () => {
+      const { cash } = await setup();
+      const inv = await invoice(await customer("Pending Guard Customer"), 100_000);
+      const args = {
+        invoices: [{ invoice: inv.number, amount: 100_000 }],
+        date: "2026-07-10",
+        amount: 100_000,
+        account: cash.code,
+        rationale: "Paid in full",
+      };
+      const a = await call(token, "record_invoice_payment", args);
+      expect(a.structuredContent.status).toBe("pending_review");
+      const b = await call(token, "record_invoice_payment", args);
+      expect(b.isError).toBe(true);
+      expect(b.content[0]!.text).toContain("over_applied");
+      expect(b.content[0]!.text).toContain("review");
+      const listed = await call(token, "list_invoice_payments", {});
+      expect(
+        listed.structuredContent.payments.find((p: any) => p.id === a.structuredContent.payment_id),
+      ).toMatchObject({ entry_status: "pending_review", amount: 100_000 });
+      await reject(a.structuredContent.review_item_id);
+    });
+
+    test("approval is refused when another payment used up the invoice meanwhile", async () => {
+      const { cash } = await setup();
+      const cust = await customer("Approval Guard Customer");
+      const inv = await invoice(cust, 100_000);
+      const a = await call(token, "record_invoice_payment", {
+        invoices: [{ invoice: inv.number }],
+        date: "2026-07-10",
+        amount: 100_000,
+        account: cash.code,
+        rationale: "Paid in full",
+      });
+      expect(a.structuredContent.status).toBe("pending_review");
+      const direct = await owner.json("POST", api("/payments"), {
+        direction: "received",
+        contact_id: cust,
+        date: "2026-07-11",
+        amount: 100_000,
+        account_id: cash.id,
+        applications: [{ document_id: inv.id, amount: 100_000 }],
+      });
+      expect(direct.status).toBe(201);
+      const refused = await approve(a.structuredContent.review_item_id);
+      expect(refused.status).toBe(409);
+      expect(refused.body.error.code ?? refused.body.code).toBe("over_applied");
+      expect(JSON.stringify(refused.body)).toContain("now has $0.00 open");
+      expect((await reject(a.structuredContent.review_item_id)).status).toBe(200);
+      expect(await getInvoice(inv.id)).toMatchObject({ status: "paid", amount_paid: 100_000 });
+      expect((await owner.json("POST", api("/verify"))).body.ok).toBe(true);
+    });
+
+    test("a bank deposit is linked on approval and released on rejection", async () => {
+      const cust = await customer("Bank Customer");
+      const inv = await invoice(cust, 100_000);
+      const txn = await deposit("BANK CUSTOMER PAYMENT", "1000.00");
+      const a = await call(token, "record_invoice_payment", {
+        invoices: [{ invoice: inv.number }],
+        transaction_id: txn.id,
+        rationale: "Deposit matches the invoice",
+      });
+      expect(a.structuredContent.status).toBe("pending_review");
+      const during = (await owner.json("GET", api(`/bank-transactions/${txn.id}`))).body;
+      expect(during.review_item_id).toBe(a.structuredContent.review_item_id);
+      expect((await approve(a.structuredContent.review_item_id)).status).toBe(200);
+      expect((await getInvoice(inv.id)).status).toBe("paid");
+      expect((await owner.json("GET", api(`/bank-transactions/${txn.id}`))).body.entry_id).toBe(
+        a.structuredContent.entry_id,
+      );
+
+      const inv2 = await invoice(cust, 50_000);
+      const txn2 = await deposit("BANK CUSTOMER PAYMENT TWO", "500.00");
+      const b = await call(token, "record_invoice_payment", {
+        invoices: [{ invoice: inv2.number }],
+        transaction_id: txn2.id,
+        rationale: "Deposit matches the invoice",
+      });
+      expect((await reject(b.structuredContent.review_item_id)).status).toBe(200);
+      expect((await owner.json("GET", api(`/bank-transactions/${txn2.id}`))).body.status).toBe("new");
+      expect((await getInvoice(inv2.id)).status).toBe("sent");
+      const payments = (await owner.json("GET", api(`/payments/${b.structuredContent.payment_id}`))).body;
+      expect(payments.voided_at).not.toBeNull();
+    });
+
+    test("an overpayment stays as customer credit", async () => {
+      const { cash } = await setup();
+      const cust = await customer("Overpay Customer");
+      const inv = await invoice(cust, 100_000);
+      const a = await call(token, "record_invoice_payment", {
+        invoices: [{ invoice: inv.number }],
+        date: "2026-07-10",
+        amount: 120_000,
+        account: cash.code,
+        rationale: "Customer overpaid",
+      });
+      expect(a.structuredContent.unapplied).toBe(20_000);
+      expect((await approve(a.structuredContent.review_item_id)).status).toBe(200);
+      const listed = await call(token, "list_invoice_payments", { customer_id: cust });
+      expect(listed.structuredContent.payments[0]).toMatchObject({ amount: 120_000, unapplied: 20_000 });
+      expect((await getInvoice(inv.id)).status).toBe("paid");
+    });
+
+    test("withdraw_proposal undoes the assistant's own pending proposal", async () => {
+      const { cash } = await setup();
+      const cust = await customer("Withdraw Customer");
+      const inv = await invoice(cust, 100_000);
+      const args = {
+        invoices: [{ invoice: inv.number }],
+        date: "2026-07-10",
+        amount: 100_000,
+        account: cash.code,
+        rationale: "Paid in full",
+      };
+      const a = await call(token, "record_invoice_payment", args);
+      const w = await call(token, "withdraw_proposal", {
+        review_item_id: a.structuredContent.review_item_id,
+        rationale: "Wrong amount",
+      });
+      expect(w.structuredContent.status).toBe("withdrawn");
+      const item = await call(token, "get_review_item", {
+        review_item_id: a.structuredContent.review_item_id,
+      });
+      expect(item.structuredContent).toMatchObject({
+        status: "rejected",
+        decision_note: "Withdrawn by the assistant: Wrong amount",
+      });
+      const pay = (await owner.json("GET", api(`/payments/${a.structuredContent.payment_id}`))).body;
+      expect(pay.voided_at).not.toBeNull();
+      expect(await getInvoice(inv.id)).toMatchObject({ status: "sent", amount_paid: 0 });
+      const audit = await owner.json("GET", api(`/audit?target_id=${a.structuredContent.review_item_id}`));
+      expect(JSON.stringify(audit.body)).toContain("review.withdraw");
+      // The pending guard no longer blocks a corrected proposal.
+      const b = await call(token, "record_invoice_payment", {
+        ...args,
+        amount: 60_000,
+        invoices: [{ invoice: inv.number }],
+      });
+      expect(b.structuredContent.status).toBe("pending_review");
+      // Already decided: refused.
+      expect((await approve(b.structuredContent.review_item_id)).status).toBe(200);
+      const again = await call(token, "withdraw_proposal", {
+        review_item_id: b.structuredContent.review_item_id,
+        rationale: "Too late",
+      });
+      expect(again.isError).toBe(true);
+      expect(again.content[0]!.text).toContain("invalid_state");
+      // A person's own proposal, or another person's assistant's, can't be withdrawn.
+      const h = await env.ctx.orgs.mustOpen(orgId);
+      for (const [actor, by] of [
+        ["user", owner.userId],
+        ["mcp", admin.userId],
+      ] as const) {
+        const id = newId();
+        await h.write((tx) =>
+          tx.insert(org.reviewItems).values({
+            id,
+            itemType: "payment_redate",
+            itemId: newId(),
+            proposedByActor: actor,
+            proposedById: by,
+            reason: "test",
+          }),
+        );
+        const refused = await call(token, "withdraw_proposal", { review_item_id: id, rationale: "Not mine" });
+        expect(refused.isError).toBe(true);
+        expect(refused.content[0]!.text).toContain("forbidden");
+      }
+    });
+
+    test("withdrawing a bank-linked proposal frees the transaction", async () => {
+      const inv = await invoice(await customer("Withdraw Bank Customer"), 30_000);
+      const txn = await deposit("WITHDRAW BANK DEPOSIT", "300.00");
+      const a = await call(token, "record_invoice_payment", {
+        invoices: [{ invoice: inv.number }],
+        transaction_id: txn.id,
+        rationale: "Deposit matches",
+      });
+      await call(token, "withdraw_proposal", {
+        review_item_id: a.structuredContent.review_item_id,
+        rationale: "Mistake",
+      });
+      expect((await owner.json("GET", api(`/bank-transactions/${txn.id}`))).body).toMatchObject({
+        status: "new",
+        review_item_id: null,
+      });
+    });
+
+    test("a person can still reject through REST", async () => {
+      const { cash } = await setup();
+      const inv = await invoice(await customer("Reject Customer"), 10_000);
+      const a = await call(token, "record_invoice_payment", {
+        invoices: [{ invoice: inv.number }],
+        date: "2026-07-10",
+        amount: 10_000,
+        account: cash.code,
+        rationale: "Paid",
+      });
+      expect((await reject(a.structuredContent.review_item_id)).status).toBe(200);
+    });
+
+    test("refusals", async () => {
+      const { cash } = await setup();
+      const c1 = await customer("Refuse One");
+      const c2 = await customer("Refuse Two");
+      const i1 = await invoice(c1, 10_000);
+      const i2 = await invoice(c2, 10_000);
+      const draft = await invoice(c1, 10_000, false);
+      const base = { date: "2026-07-10", amount: 10_000, account: cash.code, rationale: "Testing refusals" };
+      const mixed = await call(token, "record_invoice_payment", {
+        ...base,
+        invoices: [{ invoice: i1.number }, { invoice: i2.number }],
+      });
+      expect(mixed.isError).toBe(true);
+      expect(mixed.content[0]!.text).toContain("different customers");
+      const d = await call(token, "record_invoice_payment", {
+        ...base,
+        invoices: [{ invoice: draft.number }],
+      });
+      expect(d.isError).toBe(true);
+      expect(d.content[0]!.text).toContain("document_not_open");
+      const out = await deposit("WITHDRAWAL XYZ", "-100.00");
+      const w = await call(token, "record_invoice_payment", {
+        invoices: [{ invoice: i1.number }],
+        transaction_id: out.id,
+        rationale: "Testing refusals",
+      });
+      expect(w.isError).toBe(true);
+      expect(w.content[0]!.text).toContain("money out");
+      const inn = await deposit("DEPOSIT ABC", "100.00");
+      const both = await call(token, "record_invoice_payment", {
+        invoices: [{ invoice: i1.number }],
+        transaction_id: inn.id,
+        amount: 10_000,
+        rationale: "Testing refusals",
+      });
+      expect(both.isError).toBe(true);
+      expect(both.content[0]!.text).toContain("come from the transaction");
+      const none = await call(token, "record_invoice_payment", {
+        invoices: [{ invoice: i1.number }],
+        rationale: "Testing refusals",
+      });
+      expect(none.isError).toBe(true);
+      const ro = (await authorize(viewer, await register("Viewer Payment AI"))).tok.body.access_token;
+      const v = await call(ro, "record_invoice_payment", { ...base, invoices: [{ invoice: i1.number }] });
+      expect(v.isError).toBe(true);
+    });
   });
 });

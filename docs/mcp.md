@@ -36,7 +36,7 @@ Read:
 | `list_uncategorized_transactions`, `search_transactions` | Bank and card transactions; `list_uncategorized_transactions` also lists the bank accounts with their feed's sync status |
 | `get_entry`, `list_entries` | Journal entries, with account and contact names filled in and whether each has an attachment |
 | `list_contacts` | Customers and vendors; pass `include_archived` to see archived ones too |
-| `list_invoices`, `list_bills`, `list_bill_payments` | Invoices to customers (with the online pay link and whether a bank payment is processing), bills from vendors, and payments sent to vendors |
+| `list_invoices`, `list_bills`, `list_bill_payments`, `list_invoice_payments` | Invoices to customers (with the online pay link and whether a bank payment is processing), bills from vendors, payments sent to vendors, and payments received from customers (including any waiting in review and unapplied customer credit) |
 | `list_pending_reviews`, `get_review_item` | The review queue |
 | `list_recurring_templates` | Recurring invoices, bills, and journal entries: schedule, next and upcoming dates, run mode, total, last error, and any change waiting for review |
 
@@ -66,10 +66,13 @@ Propose (each takes a `rationale`, which you see in Review):
 | `propose_reversal` | Posts a reversal of a posted entry |
 | `propose_replacement` | Reverses a posted entry and posts the corrected one, together (one review item) |
 | `propose_recurring_template` | Creates, changes, pauses, or resumes a recurring invoice, bill, or journal entry. A template that emails invoices to the customer always waits for a person, whatever the review policies say |
+| `record_invoice_payment` | Records a payment received from a customer against one or more of their open invoices, in full or in part; an amount beyond what is applied stays as customer credit. Pass `transaction_id` to record it from a bank deposit so the cash isn't counted twice. Refuses amounts beyond what is open (payments waiting in review count) |
 | `propose_payment_date_change` | Moves a payment to a new date: its entry is reversed on the old date and posted again on the new one; the documents it pays stay paid and a matched bank transaction stays matched (one review item) |
 
 Entries created by invoices, bills, and payments can't be reversed or replaced over MCP; void or
 edit the document instead. A payment's date is the one exception.
+
+**Withdraw.** `withdraw_proposal` lets an assistant take back its own pending proposal (with a reason) so it can propose a corrected one. The item ends as rejected, with the note "Withdrawn by the assistant", and everything it did unwinds as on rejection. It refuses items already decided and items proposed by a person, a rule, an integration, or another person's assistant. Assistants still can't approve or reject.
 
 Apply directly, without review, and recorded in the audit log:
 

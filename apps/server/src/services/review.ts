@@ -8,7 +8,14 @@ import { and, asc, count, desc, eq, inArray, lt, type SQL } from "drizzle-orm";
 import { conflict, forbidden, notFound, unprocessable } from "../http/errors.ts";
 import type { ActorInfo } from "./actor.ts";
 import { appendAudit } from "./audit.ts";
-import { type EntryInput, getEntry, postEntryTx, rejectEntryTx, updateDraftTx } from "./ledger.ts";
+import {
+  type EntryInput,
+  getEntry,
+  postEntryTx,
+  rejectEntryTx,
+  runEntryApprovingHooks,
+  updateDraftTx,
+} from "./ledger.ts";
 
 type Reader = OrgDb | OrgTx;
 export type ReviewRow = typeof org.reviewItems.$inferSelect;
@@ -191,6 +198,32 @@ export async function rejectReviewTx(
   return reviewView(await mustGetReview(tx, id));
 }
 
+/**
+ * An AI assistant takes back its own pending proposal (so it can propose a corrected one). It can't
+ * approve or reject; this reuses the type's reject handler so every side effect unwinds the same
+ * way, and the item ends rejected with a note saying who withdrew it.
+ */
+export async function withdrawReviewTx(tx: OrgTx, orgId: string, a: ActorInfo, id: string, reason: string) {
+  if (a.actor !== "mcp")
+    throw forbidden("Only an AI assistant withdraws its own proposals; reject it instead.");
+  const item = await mustGetReview(tx, id);
+  if (item.status !== "pending") throw conflict(`This item is ${item.status}.`, "invalid_state");
+  if (item.proposedByActor !== "mcp" || !a.userId || item.proposedById !== a.userId)
+    throw forbidden("You can only withdraw proposals an AI assistant made for you.");
+  const h = handlers.get(item.itemType);
+  if (!h) throw unprocessable(`Items of type ${item.itemType} cannot be withdrawn yet.`, "unsupported");
+  await h.reject(tx, orgId, a, item, `Withdrawn by the assistant: ${reason}`);
+  // The assistant didn't decide anything; don't record the person it works for as the decider.
+  await tx.update(org.reviewItems).set({ decidedBy: null }).where(eq(org.reviewItems.id, item.id));
+  await appendAudit(tx, orgId, a, {
+    action: "review.withdraw",
+    targetType: "review_item",
+    targetId: item.id,
+    after: { item_type: item.itemType, item_id: item.itemId, reason },
+  });
+  return reviewView(await mustGetReview(tx, id));
+}
+
 /** Items pending longer than 30 days expire and are listed for cleanup; they can no longer be approved. */
 export async function expireOldTx(tx: OrgTx, orgId: string, now = new Date()) {
   const cutoff = new Date(now.getTime() - REVIEW_EXPIRY_DAYS * 86_400_000).toISOString();
@@ -258,6 +291,7 @@ const entryHandler: ReviewHandler = {
       const orig = item.payloadJson ? JSON.parse(item.payloadJson) : {};
       payload = { ...orig, entry: edited };
     }
+    await runEntryApprovingHooks(tx, orgId, before, a);
     const posted = await postEntryTx(tx, orgId, entryId, a, input.lock_override_note ?? null);
     await tx
       .update(org.bankTransactions)
