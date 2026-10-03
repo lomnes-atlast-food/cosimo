@@ -2,8 +2,8 @@
  * OAuth 2.1 (SPEC §10.4) and MCP (SPEC §10.2). OAuth: dynamic registration, PKCE code flow,
  * refresh rotation, revocation, role capping, org scoping, redirect validation. MCP: writes land in
  * the review queue and don't affect reports, an MCP client cannot approve, notes and resources,
- * contacts, corrections (reversal, replacement, payment date change), and recurring templates
- * through review.
+ * contacts, corrections (reversal, replacement, payment date change), recurring templates through
+ * review, invoice payments, and an assistant withdrawing its own proposal of every type.
  */
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { createHash, randomBytes } from "node:crypto";
@@ -1802,6 +1802,235 @@ describe("MCP", () => {
       const ro = (await authorize(viewer, await register("Viewer Payment AI"))).tok.body.access_token;
       const v = await call(ro, "record_invoice_payment", { ...base, invoices: [{ invoice: i1.number }] });
       expect(v.isError).toBe(true);
+    });
+  });
+  describe("withdraw_proposal covers every proposal type", () => {
+    const api = (path: string) => `/api/v1/orgs/${orgId}${path}`;
+    const accounts = async () => (await call(token, "get_account_balances", {})).structuredContent.accounts;
+    const expenseCode = async () =>
+      (await accounts()).find((a: any) => a.type === "expense" && a.subtype !== "uncategorized").code;
+    const contact = async (kind: "customer" | "vendor", name: string) =>
+      (await owner.json("POST", api("/contacts"), { kind, name })).body.id as string;
+
+    /** Withdraws the item and checks it ended rejected, with the note, no decider, and an audit row. */
+    async function withdraw(reviewId: string, reason = "Proposed by mistake") {
+      const w = await call(token, "withdraw_proposal", { review_item_id: reviewId, rationale: reason });
+      expect(w.isError).toBe(false);
+      expect(w.structuredContent.status).toBe("withdrawn");
+      const item = (await owner.json("GET", api(`/review/${reviewId}`))).body;
+      expect(item).toMatchObject({
+        status: "rejected",
+        decision_note: `Withdrawn by the assistant: ${reason}`,
+        decided_by: null,
+      });
+      const audit = (await owner.json("GET", api(`/audit?target_id=${reviewId}`))).body.data;
+      expect(audit.some((r: any) => r.action === "review.withdraw")).toBe(true);
+      return item;
+    }
+    const entryStatus = async (id: string) =>
+      (await call(token, "get_entry", { entry_id: id })).structuredContent.status;
+
+    test("categorize_transaction: the entry is rejected and the transaction is open again", async () => {
+      const ba = (
+        await owner.json("POST", api("/bank-accounts"), { name: "Withdraw Card", kind: "checking" })
+      ).body;
+      await owner.json("POST", api(`/bank-accounts/${ba.id}/import`), {
+        filename: "w.csv",
+        content: "Date,Description,Amount\n2026-08-02,WITHDRAW TEST SOFTWARE,-19.99\n",
+      });
+      const txn = (await owner.json("GET", api(`/bank-transactions?bank_account_id=${ba.id}&status=new`)))
+        .body.data[0];
+      const args = {
+        transaction_id: txn.id,
+        splits: [{ account: await expenseCode() }],
+        rationale: "Software subscription",
+      };
+      const cat = await call(token, "categorize_transaction", args);
+      expect(cat.structuredContent.status).toBe("pending_review");
+      const item = await withdraw(cat.structuredContent.review_item_id);
+      expect(item.item_type).toBe("bank_categorization");
+      expect(await entryStatus(cat.structuredContent.entry_id)).toBe("rejected");
+      expect((await owner.json("GET", api(`/bank-transactions/${txn.id}`))).body).toMatchObject({
+        status: "new",
+        review_item_id: null,
+        entry_id: null,
+      });
+      expect((await call(token, "categorize_transaction", args)).structuredContent.status).toBe(
+        "pending_review",
+      );
+    });
+
+    test("create_manual_entry: the entry is rejected", async () => {
+      const r = await call(token, "create_manual_entry", {
+        date: "2026-08-03",
+        memo: "Withdrawn contribution",
+        lines: [
+          { account: "1000", amount: 7000 },
+          { account: "3100", amount: -7000 },
+        ],
+        rationale: "Owner contribution",
+      });
+      expect(r.structuredContent.status).toBe("pending_review");
+      expect((await withdraw(r.structuredContent.review_item_id)).item_type).toBe("journal_entry");
+      expect(await entryStatus(r.structuredContent.entry_id)).toBe("rejected");
+    });
+
+    test("propose_reversal: the reversal is rejected and the original can be reversed again", async () => {
+      const { entryId } = await postedExpense("2025-02-10", 4321);
+      const r = await call(token, "propose_reversal", { entry_id: entryId, rationale: "Duplicate" });
+      expect(r.structuredContent.status).toBe("pending_review");
+      await withdraw(r.structuredContent.review_item_id);
+      expect(await entryStatus(r.structuredContent.entry_id)).toBe("rejected");
+      expect(
+        (await call(token, "get_entry", { entry_id: entryId })).structuredContent.reversed_by_entry_id,
+      ).toBeNull();
+      expect(
+        (await call(token, "propose_reversal", { entry_id: entryId, rationale: "Duplicate" }))
+          .structuredContent.status,
+      ).toBe("pending_review");
+    });
+
+    test("create_rule: the proposed rule is deleted", async () => {
+      const r = await call(token, "create_rule", {
+        name: "Withdrawn rule",
+        conditions: { description_contains: "WITHDRAWN RULE" },
+        actions: { account: await expenseCode() },
+        rationale: "Recurring payee",
+      });
+      expect(r.structuredContent.status).toBe("pending_review");
+      expect((await withdraw(r.structuredContent.review_item_id)).item_type).toBe("rule");
+      const rules = (await owner.json("GET", api("/rules"))).body;
+      expect(JSON.stringify(rules)).not.toContain(r.structuredContent.rule_id);
+    });
+
+    test("create_invoice_draft and create_bill_draft: the draft is deleted", async () => {
+      const inv = await call(token, "create_invoice_draft", {
+        customer_id: await contact("customer", "Withdraw Invoice Customer"),
+        issue_date: "2026-08-01",
+        lines: [{ description: "Work", quantity: 1, unit_price: 5000, account: "4000" }],
+        rationale: "Work done in July",
+      });
+      expect((await withdraw(inv.structuredContent.review_item_id)).item_type).toBe("invoice_draft");
+      expect((await owner.json("GET", api(`/invoices/${inv.structuredContent.invoice_id}`))).status).toBe(
+        404,
+      );
+
+      const bill = await call(token, "create_bill_draft", {
+        vendor_id: await contact("vendor", "Withdraw Bill Vendor"),
+        issue_date: "2026-08-01",
+        lines: [{ description: "Supplies", amount: 3300, account: await expenseCode() }],
+        rationale: "Vendor invoice",
+      });
+      expect((await withdraw(bill.structuredContent.review_item_id)).item_type).toBe("bill_draft");
+      expect((await owner.json("GET", api(`/bills/${bill.structuredContent.bill_id}`))).status).toBe(404);
+    });
+
+    test("propose_replacement: nothing changes and a new replacement can be proposed", async () => {
+      const { entryId, b, cash } = await postedExpense("2025-03-10", 1800);
+      const before = await pnl("2025");
+      const propose = () =>
+        call(token, "propose_replacement", {
+          entry_id: entryId,
+          date: "2025-03-10",
+          lines: [
+            { account: b.code, amount: 1800 },
+            { account: cash.code, amount: -1800 },
+          ],
+          rationale: "Wrong expense account",
+        });
+      const r = await propose();
+      expect(r.structuredContent.status).toBe("pending_review");
+      expect((await withdraw(r.structuredContent.review_item_id)).item_type).toBe("entry_replacement");
+      expect(await pnl("2025")).toEqual(before);
+      expect(
+        (await call(token, "get_entry", { entry_id: entryId })).structuredContent.reversed_by_entry_id,
+      ).toBeNull();
+      expect((await propose()).structuredContent.status).toBe("pending_review");
+    });
+
+    test("propose_payment_date_change: the payment keeps its date and a new change can be proposed", async () => {
+      const cust = await contact("customer", "Withdraw Redate Customer");
+      const income = (await accounts()).find((a: any) => a.code === "4000");
+      const cash = (await accounts()).find((a: any) => a.code === "1000");
+      const inv = (
+        await owner.json("POST", api("/invoices"), {
+          customer_id: cust,
+          issue_date: "2026-08-01",
+          lines: [{ description: "Work", quantity_milli: 1000, unit_price: 9000, account_id: income.id }],
+        })
+      ).body;
+      await owner.json("POST", api(`/invoices/${inv.id}/finalize`), {});
+      const paid = await owner.json("POST", api("/payments"), {
+        direction: "received",
+        contact_id: cust,
+        date: "2026-08-10",
+        amount: 9000,
+        account_id: cash.id,
+        applications: [{ document_id: inv.id, amount: 9000 }],
+      });
+      expect(paid.status).toBe(201);
+      const paymentId = paid.body.payment.id as string;
+      const propose = () =>
+        call(token, "propose_payment_date_change", {
+          payment_id: paymentId,
+          date: "2026-08-08",
+          rationale: "The bank shows the 8th",
+        });
+      const r = await propose();
+      expect(r.structuredContent.status).toBe("pending_review");
+      expect((await withdraw(r.structuredContent.review_item_id)).item_type).toBe("payment_redate");
+      expect((await owner.json("GET", api(`/payments/${paymentId}`))).body).toMatchObject({
+        date: "2026-08-10",
+        entry_id: paid.body.payment.entry_id,
+      });
+      expect((await propose()).structuredContent.status).toBe("pending_review");
+    });
+
+    test("propose_recurring_template: a create leaves no template; an update leaves it unchanged", async () => {
+      const base = {
+        kind: "bill",
+        contact_id: await contact("vendor", "Withdraw Landlord"),
+        schedule: { unit: "month", start_date: "2031-01-31", anchor_day: -1 },
+        lines: [{ account: "6130", amount: 100_000, description: "Rent {period}" }],
+        rationale: "Monthly rent",
+      };
+      const c = await call(token, "propose_recurring_template", {
+        ...base,
+        action: "create",
+        name: "Withdrawn rent",
+      });
+      expect(c.structuredContent.status).toBe("pending_review");
+      expect((await withdraw(c.structuredContent.review_item_id)).item_type).toBe("recurring_template");
+      expect(
+        (await owner.json("GET", api(`/recurring-templates/${c.structuredContent.template_id}`))).status,
+      ).toBe(404);
+
+      const kept = await call(token, "propose_recurring_template", {
+        ...base,
+        action: "create",
+        name: "Kept rent",
+      });
+      const id = kept.structuredContent.template_id;
+      expect(
+        (await owner.json("POST", api(`/review/${kept.structuredContent.review_item_id}/approve`), {}))
+          .status,
+      ).toBe(200);
+      const update = () =>
+        call(token, "propose_recurring_template", {
+          action: "update",
+          template_id: id,
+          lines: [{ account: "6130", amount: 110_000, description: "Rent {period}" }],
+          rationale: "Rent went up",
+        });
+      const u = await update();
+      expect(u.structuredContent.status).toBe("pending_review");
+      await withdraw(u.structuredContent.review_item_id);
+      expect((await owner.json("GET", api(`/recurring-templates/${id}`))).body.template).toMatchObject({
+        status: "active",
+        total: 100_000,
+      });
+      // The withdrawn change no longer blocks a new one.
+      expect((await update()).structuredContent.status).toBe("pending_review");
     });
   });
 });
