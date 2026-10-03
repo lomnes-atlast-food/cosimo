@@ -5,10 +5,12 @@
  * Writes go through the review policy like any other writer; for the `mcp` actor the default is
  * review, and OAuth grants are always propose-only. Every write tool that touches the books takes
  * a `rationale` and returns the review item ID and status. Corrections to posted entries (reverse,
- * replace, and a payment's date) are proposals like any other write. Notes, contacts, and bank feed
- * syncs don't touch the books, so they apply directly and are recorded in the audit log (rules a sync
- * runs still go through the review policy). Recurring templates are proposed too, and nothing runs
- * until a person approves. There is no tool to approve, reject, void, delete, or move lock dates.
+ * replace, and a payment's date) are proposals like any other write, and so is recording a customer
+ * payment against invoices. Notes, contacts, and bank feed syncs don't touch the books, so they apply
+ * directly and are recorded in the audit log (rules a sync runs still go through the review policy).
+ * Recurring templates are proposed too, and nothing runs until a person approves. An assistant may
+ * withdraw its own pending proposals, which ends them as rejected. There is no tool to approve,
+ * reject, void, delete, or move lock dates.
  */
 import type { LineInput } from "@cosimo/core";
 import { org } from "@cosimo/db";
@@ -39,6 +41,9 @@ import {
   listBills,
   listInvoices,
   listPayments,
+  openBalance,
+  payFromBankTxnTx,
+  recordPaymentTx,
 } from "./documents.ts";
 import { assertNoPendingReplacement, proposeReplacementTx } from "./entry-replacement-review.ts";
 import { holdInvoiceDraftTx } from "./invoice-review.ts";
@@ -58,7 +63,7 @@ import {
   templateView,
 } from "./recurring.ts";
 import { REPORT_KEYS, runReport } from "./reports.ts";
-import { listReview, mustGetReview, reviewView } from "./review.ts";
+import { listReview, mustGetReview, reviewView, withdrawReviewTx } from "./review.ts";
 import { createRuleTx } from "./rules.ts";
 
 export interface ToolCtx {
@@ -435,7 +440,7 @@ tool({
   name: "list_invoices",
   title: "List invoices",
   description:
-    "Invoices to customers, with status, balance due, and whether each is overdue. Each invoice also says whether it accepts online payment (online_payment_enabled), its customer pay link (pay_url; none while the balance due is under Stripe's $0.50 minimum) or hand-entered payment link (manual_pay_url), whether a bank payment is still processing (online_pay_status), when the customer first opened the link, and why the link last failed (pay_error). Payments made online are recorded automatically. Refunds and disputes (chargebacks) made in Stripe are proposed as entries that wait for review; online_refunded and online_disputed are the posted amounts, refund_pending_review says one is waiting, and refund_rejected that one was rejected and must be booked by hand. A refunded invoice stays paid. For bills from vendors use list_bills instead; there is no tool yet for payments received against invoices.",
+    "Invoices to customers, with status, balance due, and whether each is overdue. Each invoice also says whether it accepts online payment (online_payment_enabled), its customer pay link (pay_url; none while the balance due is under Stripe's $0.50 minimum) or hand-entered payment link (manual_pay_url), whether a bank payment is still processing (online_pay_status), when the customer first opened the link, and why the link last failed (pay_error). Payments made online are recorded automatically. Refunds and disputes (chargebacks) made in Stripe are proposed as entries that wait for review; online_refunded and online_disputed are the posted amounts, refund_pending_review says one is waiting, and refund_rejected that one was rejected and must be booked by hand. A refunded invoice stays paid. For bills from vendors use list_bills instead. To record a customer payment use record_invoice_payment, and to see payments already received (or waiting in review) use list_invoice_payments.",
   money: true,
   input: z.object({
     status: z.array(z.enum(["draft", "sent", "partial", "paid", "void"])).optional(),
@@ -459,7 +464,7 @@ tool({
   name: "list_bills",
   title: "List bills",
   description:
-    "Bills from vendors, with balance due and whether each is overdue. Each line carries account code/name, and each bill whether it has an attachment. For invoices to customers, use list_invoices; for payments already recorded against bills, use list_bill_payments.",
+    "Bills from vendors, with balance due and whether each is overdue. Each line carries account code/name, and each bill whether it has an attachment. For invoices to customers, use list_invoices; for payments already recorded against bills, use list_bill_payments. For payments received from customers, use list_invoice_payments.",
   money: true,
   input: z.object({
     status: z.array(z.enum(["draft", "open", "partial", "paid", "void"])).optional(),
@@ -504,7 +509,7 @@ tool({
   name: "list_bill_payments",
   title: "List payments sent to vendors",
   description:
-    "Payments this business has sent to vendors, each with the bills it was applied to. There is no tool yet for payments received from customers. For the bills themselves, use list_bills.",
+    "Payments this business has sent to vendors, each with the bills it was applied to. For payments received from customers, use list_invoice_payments. For the bills themselves, use list_bills.",
   money: true,
   input: z.object({
     vendor_id: z.string().optional(),
@@ -516,6 +521,33 @@ tool({
     const payments = await listPayments(t.scope.handle.db, {
       direction: "sent",
       contactId: i.vendor_id,
+      // listPayments has no date filter, so filter the full list before applying the limit.
+      limit: i.from || i.to ? 1000 : i.limit,
+    });
+    return {
+      payments: payments
+        .filter((p) => (!i.from || p.date >= i.from) && (!i.to || p.date <= i.to))
+        .slice(0, i.limit),
+    };
+  },
+});
+
+tool({
+  name: "list_invoice_payments",
+  title: "List payments received from customers",
+  description:
+    "Payments this business has received from customers, each with the invoices it was applied to, the amount not applied (unapplied: customer credit), and entry_status (pending_review means it is still waiting for a person to approve). Check this before record_invoice_payment so you don't record a payment twice; payment IDs here also work with propose_payment_date_change. For the invoices themselves, use list_invoices.",
+  money: true,
+  input: z.object({
+    customer_id: z.string().optional(),
+    from: IsoDate.optional(),
+    to: IsoDate.optional(),
+    limit: z.number().int().min(1).max(200).default(50),
+  }),
+  async run(t, i) {
+    const payments = await listPayments(t.scope.handle.db, {
+      direction: "received",
+      contactId: i.customer_id,
       // listPayments has no date filter, so filter the full list before applying the limit.
       limit: i.from || i.to ? 1000 : i.limit,
     });
@@ -643,6 +675,159 @@ tool({
       }),
     );
     return outcome(r);
+  },
+});
+
+tool({
+  name: "record_invoice_payment",
+  title: "Record a customer payment against invoices",
+  description:
+    "Propose recording a payment received from a customer and applying it to one or more of that customer's open invoices, in full or in part. An amount beyond what is applied stays as customer credit. When the deposit is in the bank feed, pass transaction_id (from list_uncategorized_transactions or search_transactions) so the deposit is linked and not counted twice; never categorize such a deposit to income, because the invoice already booked the income. Without transaction_id, give date, amount, and the bank or cash account. It waits in the review queue; approval posts Bank/Accounts Receivable and moves each invoice to partial or paid. Check list_invoice_payments first for one already waiting. Refuses: amounts beyond what is open (payments waiting in review count), invoices that are draft or void or belong to different customers, a withdrawal (money out), and a transaction that is already categorized, matched, or waiting.",
+  write: true,
+  money: true,
+  input: z.object({
+    invoices: z
+      .array(
+        z.object({
+          invoice: z.string().describe("Invoice ID or number"),
+          amount: cents(
+            "Applied to this invoice. Omit to apply the smaller of its open balance and what is left of the payment.",
+            "positive",
+          ).optional(),
+        }),
+      )
+      .min(1),
+    transaction_id: z
+      .string()
+      .optional()
+      .describe("A deposit from the bank feed; its date, amount, and account are used and it is linked."),
+    date: IsoDate.optional().describe("Required without transaction_id"),
+    amount: cents("The whole payment received. Required without transaction_id.", "positive").optional(),
+    account: z
+      .string()
+      .optional()
+      .describe("Bank or cash account ID or code. Required without transaction_id."),
+    method: z.string().max(100).optional(),
+    reference: z.string().max(200).optional().describe("For example a check number"),
+    memo: z.string().optional(),
+    rationale: Rationale,
+  }),
+  async run(t, i) {
+    requireWriter(t);
+    if (i.transaction_id && (i.date || i.amount != null || i.account))
+      throw unprocessable(
+        "Don't give date, amount, or account with transaction_id: they come from the transaction.",
+        "invalid_input",
+      );
+    if (!i.transaction_id && (!i.date || i.amount == null || !i.account))
+      throw unprocessable(
+        "Without transaction_id, give date, amount, and account (the bank or cash account the money went into).",
+        "invalid_input",
+      );
+    const accountRef = i.account ? await accountId(t, i.account) : null;
+    return t.scope.handle.write(async (tx) => {
+      const txn = i.transaction_id ? await mustGetBankTxn(tx, i.transaction_id) : null;
+      if (txn && txn.amount <= 0)
+        throw unprocessable(
+          "That transaction is money out, not a payment received. Use categorize_transaction.",
+          "invalid_transaction",
+        );
+      const total = txn ? txn.amount : (i.amount as number);
+      // Resolve each invoice by ID, else by number.
+      const rows: { id: string; number: string; customerId: string; balance: number; amount: number }[] = [];
+      let left = total;
+      for (const x of i.invoices) {
+        const inv =
+          (await tx.select().from(org.invoices).where(eq(org.invoices.id, x.invoice)).get()) ??
+          (await tx.select().from(org.invoices).where(eq(org.invoices.number, x.invoice)).get());
+        if (!inv) throw notFound(`Invoice ${x.invoice}`);
+        if (rows.some((r) => r.id === inv.id))
+          throw unprocessable("Apply to each invoice once.", "duplicate_document");
+        if (rows.length && rows[0]!.customerId !== inv.customerId)
+          throw unprocessable(
+            "These invoices belong to different customers; record one payment per customer.",
+            "contact_mismatch",
+          );
+        const { open, posted } = await openBalance(tx, "invoice", inv.id, true);
+        const amount = x.amount ?? Math.min(open, left);
+        if (amount <= 0)
+          throw unprocessable(
+            `Nothing to apply to invoice ${inv.number}: it has no open balance (payments waiting in review count; withdraw your own with withdraw_proposal if it was wrong), or the payment is already fully allocated.`,
+            "over_applied",
+          );
+        left -= amount;
+        rows.push({
+          id: inv.id,
+          number: inv.number,
+          customerId: inv.customerId,
+          balance: inv.total - posted,
+          amount,
+        });
+      }
+      const applications = rows.map((r) => ({ document_id: r.id, amount: r.amount }));
+      const opts = { rationale: i.rationale, countPending: true };
+      const customerId = rows[0]!.customerId;
+      const r = txn
+        ? await payFromBankTxnTx(
+            tx,
+            t.scope.id,
+            t.scope.actor,
+            txn.id,
+            { contact_id: customerId, applications, memo: i.memo ?? null },
+            opts,
+          )
+        : await recordPaymentTx(
+            tx,
+            t.scope.id,
+            t.scope.actor,
+            {
+              direction: "received",
+              contact_id: customerId,
+              date: i.date as string,
+              amount: total,
+              account_id: accountRef as string,
+              method: i.method ?? null,
+              reference: i.reference ?? null,
+              memo: i.memo ?? null,
+              applications,
+            },
+            opts,
+          );
+      const applied = rows.reduce((s, x) => s + x.amount, 0);
+      return {
+        ...outcome(r.result),
+        payment_id: r.payment.id,
+        amount: total,
+        unapplied: total - applied,
+        invoices: rows.map((x) => ({
+          invoice_id: x.id,
+          number: x.number,
+          applied: x.amount,
+          balance_due_after: x.balance - x.amount,
+        })),
+      };
+    });
+  },
+});
+
+tool({
+  name: "withdraw_proposal",
+  title: "Withdraw your own pending proposal",
+  description:
+    "Withdraw a proposal you (an AI assistant working for this person) made that is still waiting in the review queue, undoing it as if it had been rejected, so you can propose a corrected one. The review_item_id comes from list_pending_reviews or the result of the proposal. Refuses items already decided, and items proposed by anyone else (a person, a rule, an integration, or another person's assistant). Never use it to clear proposals you didn't make; tell the person instead. The rationale is the reason and is kept on the item.",
+  write: true,
+  money: false,
+  input: z.object({ review_item_id: z.string(), rationale: Rationale }),
+  async run(t, i) {
+    requireWriter(t);
+    const r = await t.scope.handle.write((tx) =>
+      withdrawReviewTx(tx, t.scope.id, t.scope.actor, i.review_item_id, i.rationale),
+    );
+    return {
+      status: "withdrawn",
+      review_item_id: r.id,
+      message: "Withdrawn. The proposal was undone as if rejected; propose a corrected one if needed.",
+    };
   },
 });
 
@@ -1040,7 +1225,7 @@ tool({
   name: "propose_payment_date_change",
   title: "Propose a new date for a payment",
   description:
-    "Propose moving a recorded payment (to a vendor or from a customer) to a different date, typically to match the date the bank shows. Payment IDs come from list_bill_payments, or from a journal entry's source_id when its source_type is bill_payment or invoice_payment. On approval the payment's entry is reversed on its original date and posted again on the new date; the bills or invoices it pays stay paid, and a matched bank transaction stays matched. It is one review item and changes nothing until a person approves it. Refuses a voided payment, one not yet posted, one in a completed bank reconciliation, or one with a date change already waiting.",
+    "Propose moving a recorded payment (to a vendor or from a customer) to a different date, typically to match the date the bank shows. Payment IDs come from list_bill_payments or list_invoice_payments, or from a journal entry's source_id when its source_type is bill_payment or invoice_payment. On approval the payment's entry is reversed on its original date and posted again on the new date; the bills or invoices it pays stay paid, and a matched bank transaction stays matched. It is one review item and changes nothing until a person approves it. Refuses a voided payment, one not yet posted, one in a completed bank reconciliation, or one with a date change already waiting.",
   write: true,
   money: false,
   input: z.object({ payment_id: z.string(), date: IsoDate, rationale: Rationale }),

@@ -24,6 +24,7 @@ import { mustGetContact } from "./contacts.ts";
 import {
   accountMap,
   getEntry,
+  onEntryApproving,
   onEntryPosted,
   onEntryRejected,
   rejectEntryTx,
@@ -129,6 +130,25 @@ async function appliedTo(db: Reader, type: DocType, id: string, asOf?: string) {
     .innerJoin(org.payments, eq(org.payments.id, org.paymentApplications.paymentId))
     .innerJoin(org.journalEntries, eq(org.journalEntries.id, org.payments.entryId))
     .where(and(...conds))
+    .get();
+  return Number(r?.total ?? 0);
+}
+
+/** Sum of applications from payments still waiting in review (not yet counted by appliedTo). */
+async function pendingAppliedTo(db: Reader, type: DocType, id: string) {
+  const r = await db
+    .select({ total: sql<number>`coalesce(sum(${org.paymentApplications.amount}), 0)` })
+    .from(org.paymentApplications)
+    .innerJoin(org.payments, eq(org.payments.id, org.paymentApplications.paymentId))
+    .innerJoin(org.journalEntries, eq(org.journalEntries.id, org.payments.entryId))
+    .where(
+      and(
+        eq(org.paymentApplications.documentType, type),
+        eq(org.paymentApplications.documentId, id),
+        isNull(org.payments.voidedAt),
+        eq(org.journalEntries.status, "pending_review"),
+      ),
+    )
     .get();
   return Number(r?.total ?? 0);
 }
@@ -1005,6 +1025,7 @@ async function checkApplications(
   tx: Reader,
   p: { direction: PaymentRow["direction"]; contactId: string },
   apps: { document_id: string; amount: number }[],
+  opts: { countPending?: boolean } = {},
 ) {
   const type: DocType = p.direction === "received" ? "invoice" : "bill";
   const seen = new Set<string>();
@@ -1024,15 +1045,28 @@ async function checkApplications(
         "document_not_open",
       );
     }
-    const open = doc.total - (await appliedTo(tx, type, doc.id));
+    const posted = await appliedTo(tx, type, doc.id);
+    const pending = opts.countPending ? await pendingAppliedTo(tx, type, doc.id) : 0;
+    const open = doc.total - posted - pending;
     if (x.amount > open) {
+      const label = `${type === "invoice" ? "Invoice" : "Bill"} ${"number" in doc ? doc.number : (doc.billNumber ?? "")}`;
       throw unprocessable(
-        `That is more than the ${(open / 100).toFixed(2)} still open on this document.`,
+        pending > 0
+          ? `${label} has ${(open / 100).toFixed(2)} open, because ${(pending / 100).toFixed(2)} more is already waiting in review. A person must approve or reject that payment first (an assistant can withdraw its own with withdraw_proposal).`
+          : `That is more than the ${(open / 100).toFixed(2)} still open on this document.`,
         "over_applied",
       );
     }
   }
   return type;
+}
+
+/** What is still open on a posted invoice or bill: total less posted applications (and, optionally, those waiting in review). */
+export async function openBalance(db: Reader, type: DocType, id: string, countPending = false) {
+  const doc = type === "invoice" ? await mustGetInvoice(db, id) : await mustGetBill(db, id);
+  const posted = await appliedTo(db, type, id);
+  const pending = countPending ? await pendingAppliedTo(db, type, id) : 0;
+  return { doc, open: doc.total - posted - pending, posted };
 }
 
 /**
@@ -1044,7 +1078,13 @@ export async function recordPaymentTx(
   orgId: string,
   a: ActorInfo,
   input: PaymentInput,
-  opts: { requireReview?: string; reviewContext?: Record<string, unknown> } = {},
+  opts: {
+    requireReview?: string;
+    reviewContext?: Record<string, unknown>;
+    rationale?: string | null;
+    /** Also count payments waiting in review against each document's open balance. */
+    countPending?: boolean;
+  } = {},
 ) {
   if (!Number.isSafeInteger(input.amount) || input.amount <= 0)
     throw unprocessable("The payment amount must be positive.", "invalid_amount");
@@ -1064,6 +1104,7 @@ export async function recordPaymentTx(
     tx,
     { direction: input.direction, contactId: contact.id },
     input.applications,
+    { countPending: opts.countPending },
   );
   const id = newId();
   await tx.insert(org.payments).values({
@@ -1109,11 +1150,31 @@ export async function recordPaymentTx(
       sourceType: input.direction === "received" ? "invoice_payment" : "bill_payment",
       sourceId: id,
       lockOverrideNote: input.lock_override_note ?? null,
+      rationale: opts.rationale ?? null,
     },
     {
       requireReview: opts.requireReview,
       reviewContext: {
-        payment: { id, contact: contact.name, applications: input.applications },
+        payment: {
+          id,
+          direction: input.direction,
+          contact_name: contact.name,
+          amount: input.amount,
+          applications: await Promise.all(
+            input.applications.map(async (x) => {
+              const doc =
+                type === "invoice"
+                  ? await mustGetInvoice(tx, x.document_id)
+                  : await mustGetBill(tx, x.document_id);
+              return {
+                document_type: type,
+                document_id: x.document_id,
+                document_number: "number" in doc ? doc.number : (doc.billNumber ?? ""),
+                amount: x.amount,
+              };
+            }),
+          ),
+        },
         ...opts.reviewContext,
       },
     },
@@ -1326,22 +1387,29 @@ export async function payFromBankTxnTx(
     memo?: string | null;
     lock_override_note?: string | null;
   },
+  opts: { rationale?: string | null; countPending?: boolean } = {},
 ) {
   const t = await mustGetBankTxn(tx, txnId);
   assertReviewable(t);
   const bank = await mustGetBankAccount(tx, t.bankAccountId);
-  const out = await recordPaymentTx(tx, orgId, a, {
-    direction: t.amount > 0 ? "received" : "sent",
-    contact_id: input.contact_id,
-    date: t.date,
-    amount: Math.abs(t.amount),
-    account_id: bank.ledgerAccountId,
-    memo: input.memo ?? t.description,
-    reference: null,
-    method: "bank",
-    applications: input.applications,
-    lock_override_note: input.lock_override_note ?? null,
-  });
+  const out = await recordPaymentTx(
+    tx,
+    orgId,
+    a,
+    {
+      direction: t.amount > 0 ? "received" : "sent",
+      contact_id: input.contact_id,
+      date: t.date,
+      amount: Math.abs(t.amount),
+      account_id: bank.ledgerAccountId,
+      memo: input.memo ?? t.description,
+      reference: null,
+      method: "bank",
+      applications: input.applications,
+      lock_override_note: input.lock_override_note ?? null,
+    },
+    opts,
+  );
   const posted = out.result.entry.status === "posted";
   await tx
     .update(org.bankTransactions)
@@ -1417,5 +1485,45 @@ for (const src of ["invoice_payment", "bill_payment"]) {
   );
   onEntryRejected(src, (tx, _o, e) =>
     e.reverses_entry_id ? Promise.resolve() : onPaymentEntry(tx, e.id, e.source_id, true),
+  );
+}
+
+/**
+ * Approving a pending payment from the review queue re-checks its applications: another payment may
+ * have used up the open balance, or the document may have been voided, since it was proposed.
+ */
+async function assertPaymentStillApplies(tx: OrgTx, _orgId: string, e: { source_id: string | null }) {
+  if (!e.source_id) return;
+  const p = await tx.select().from(org.payments).where(eq(org.payments.id, e.source_id)).get();
+  if (!p) return;
+  const type: DocType = p.direction === "received" ? "invoice" : "bill";
+  const label = type === "invoice" ? "Invoice" : "Bill";
+  const apps = await tx
+    .select()
+    .from(org.paymentApplications)
+    .where(eq(org.paymentApplications.paymentId, p.id))
+    .all();
+  for (const x of apps) {
+    const doc =
+      type === "invoice" ? await mustGetInvoice(tx, x.documentId) : await mustGetBill(tx, x.documentId);
+    const number = "number" in doc ? doc.number : (doc.billNumber ?? "");
+    if (doc.voidedAt || (await entryStatus(tx, doc.entryId)) !== "posted") {
+      throw conflict(
+        `${label} ${number} is no longer open (it was voided or is not posted). Reject this payment.`,
+        "over_applied",
+      );
+    }
+    const open = Math.max(0, doc.total - (await appliedTo(tx, type, doc.id)));
+    if (x.amount > open) {
+      throw conflict(
+        `${label} ${number} now has $${(open / 100).toFixed(2)} open; another payment was recorded after this one was proposed. Reject this one if it is a duplicate.`,
+        "over_applied",
+      );
+    }
+  }
+}
+for (const src of ["invoice_payment", "bill_payment"]) {
+  onEntryApproving(src, (tx, o, e) =>
+    e.reverses_entry_id ? Promise.resolve() : assertPaymentStillApplies(tx, o, e),
   );
 }

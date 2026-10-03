@@ -462,20 +462,20 @@ function ReviewCard({
               <p>
                 {fmtDate(payload.from_date ?? "")} → <strong>{fmtDate(payload.to_date ?? "")}</strong>
               </p>
-              {payload.payment.applications.length > 0 && (
-                <ul className="mt-1 text-xs text-zinc-600 dark:text-zinc-400">
-                  {payload.payment.applications.map((x) => (
-                    <li key={`${x.document_type}-${x.document_number}`}>
-                      {x.document_type === "bill" ? "Bill" : "Invoice"} {x.document_number} ·{" "}
-                      {money(x.amount)}
-                    </li>
-                  ))}
-                </ul>
-              )}
+              <PaymentApplications payment={payload.payment} />
               <p className="mt-1 text-xs text-zinc-500">
                 Approving reverses the payment's entry on the old date and posts it again on the new date. The
                 documents it pays stay paid, and a matched bank transaction stays matched.
               </p>
+            </div>
+          )}
+          {item.item_type === "journal_entry" && payload.payment && (
+            <div className="text-sm">
+              <p>
+                Payment {payload.payment.direction === "sent" ? "to" : "from"}{" "}
+                <strong>{payload.payment.contact_name}</strong> · {money(payload.payment.amount)}
+              </p>
+              <PaymentApplications payment={payload.payment} showCredit />
             </div>
           )}
           {item.item_type === "recurring_template" && payload.template && (
@@ -672,6 +672,38 @@ const RECURRING_MODE = {
   post: "Posts each one",
   post_and_send: "Posts and emails each invoice",
 } as const;
+
+/** The invoices or bills a payment pays, and any amount left over as customer credit. */
+function PaymentApplications({
+  payment,
+  showCredit,
+}: {
+  payment: { direction: "received" | "sent"; amount: number; applications: PaymentApplication[] };
+  showCredit?: boolean;
+}) {
+  const applied = payment.applications.reduce((s, x) => s + x.amount, 0);
+  return (
+    <>
+      {payment.applications.length > 0 && (
+        <ul className="mt-1 text-xs text-zinc-600 dark:text-zinc-400">
+          {payment.applications.map((x) => (
+            <li key={`${x.document_type}-${x.document_number}`}>
+              {x.document_type === "bill" ? "Bill" : "Invoice"} {x.document_number} · {money(x.amount)}
+            </li>
+          ))}
+        </ul>
+      )}
+      {showCredit && payment.amount > applied && (
+        <p className="mt-1 text-xs text-zinc-600 dark:text-zinc-400">
+          Unapplied ({payment.direction === "sent" ? "vendor" : "customer"} credit):{" "}
+          {money(payment.amount - applied)}
+        </p>
+      )}
+    </>
+  );
+}
+
+type PaymentApplication = { document_type: string; document_number: string; amount: number };
 
 /** A proposed recurring template, or a change to one, with what it will create and when. */
 function RecurringProposal({
